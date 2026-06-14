@@ -52,12 +52,11 @@ export default function App() {
           visibleRef.current = true;
           setVisible(true);
         });
-        const un2 = await listen("hotkey-hide", async () => {
+        const un2 = await listen("hotkey-hide", () => {
           console.log("[frontend] ← hotkey-hide received, current visibleRef=", visibleRef.current);
           visibleRef.current = false;
           setVisible(false);
-          // 前端调度 hide_window，让 WebView 内容先卸载再隐藏窗口
-          try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch {}
+          // Rust 侧已直接 window.hide()，前端只需同步状态
         });
         cleanup = [un1, un2];
         console.log("[frontend] listeners registered OK");
@@ -69,10 +68,10 @@ export default function App() {
     };
   }, []);
 
-  // ── 窗口显示时加载数据 ──
+  // ── 窗口显示时加载数据 + 剪贴板轮询 ──
   useEffect(() => {
     if (!visible) return;
-    // 读剪贴板
+    // 首次立即读一次
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -83,6 +82,20 @@ export default function App() {
         }
       } catch {}
     })();
+    // 轮询：每 500ms 检查剪贴板变化，visible=false 时 React 自动清理 interval
+    let latest = "";
+    const poll = setInterval(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const r = await invoke<{type:string;content:string}>("read_clipboard");
+        if (r.type !== "empty" && r.content && r.content !== latest) {
+          latest = r.content;
+          const item: ClipItem = { type: r.type as "text"|"image", content: r.content, time: Date.now() };
+          setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
+        }
+      } catch {}
+    }, 500);
+    return () => clearInterval(poll);
     // 加载应用（首次加载后缓存，不再重复扫描）
     if (!loadedRef.current) {
       loadedRef.current = true;
@@ -96,7 +109,7 @@ export default function App() {
       })();
     }
     setTimeout(() => searchRef.current?.focus(), 100);
-  }, [visible, appFreq]);
+  }, [visible]);
 
   // ── 搜索过滤 ──
   const q = search.toLowerCase().trim();
