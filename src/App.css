@@ -2,7 +2,7 @@
    Workbench App — 第二桌面
    ============================================================ */
 :root {
-  --bg: rgba(13, 13, 15, 0.92);
+  --bg: rgba(13, 13, 15, 0.97);
   --hover: rgba(255, 255, 255, 0.05);
   --border: rgba(255, 255, 255, 0.06);
   --text: #fff;
@@ -12,16 +12,17 @@
   --radius: 8px;
   --font: 'Segoe UI Variable','Segoe UI',system-ui,'Microsoft YaHei',sans-serif;
 }
-html,body,#root{margin:0;padding:0;height:100%;overflow:hidden;background:transparent;font-family:var(--font);color:var(--text);}
-*{box-sizing:border-box;}
+html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:var(--font);color:var(--text);}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 ::selection{background:var(--accent);color:#fff;}
 ::-webkit-scrollbar{width:3px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.06);border-radius:2px;}
 
 /* ── 简化版 overlay（无动画）── */
-.overlay-simple{position:fixed;inset:0;display:flex;flex-direction:column;z-index:99999;background:var(--bg);
-  backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);}
+.overlay-simple{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;z-index:99999;
+  background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  border:none;outline:none;margin:0;padding:0;}
 
 /* ── 顶栏 ── */
 .top-bar{display:flex;align-items:center;height:64px;padding:0 24px;gap:20px;border-bottom:1px solid var(--border);flex-shrink:0;}

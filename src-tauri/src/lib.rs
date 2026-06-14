@@ -1,9 +1,18 @@
 mod apps;
 
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+// 50ms 防抖：过滤同一物理按键的重复 Pressed 事件
+static LAST_PRESS_MS: AtomicI64 = AtomicI64::new(0);
+
+fn now_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+}
 
 // ── 动态全屏 ───────────────────────────────────────────────
 fn make_fullscreen(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -35,6 +44,7 @@ fn tray_toggle(app_handle: &AppHandle) {
 #[tauri::command]
 fn hide_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        println!("[hotkey] hide_window called from frontend, is_visible={}", window.is_visible().unwrap_or(false));
         let _ = window.hide();
     }
 }
@@ -50,11 +60,13 @@ fn open_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn read_clipboard() -> serde_json::Value {
+    let start = std::time::Instant::now();
     let mut clipboard = match arboard::Clipboard::new() {
         Ok(c) => c,
         Err(_) => return serde_json::json!({"type": "empty"}),
     };
     if let Ok(text) = clipboard.get_text() {
+        println!("[clipboard] read text in {:?}", start.elapsed());
         if !text.is_empty() {
             return serde_json::json!({"type": "text", "content": text});
         }
@@ -119,8 +131,14 @@ pub fn run() {
                     if shortcut.mods != Modifiers::ALT || shortcut.key != Code::F1 { return; }
                     if event.state != ShortcutState::Pressed { return; }
 
+                    let t = now_ms();
+                    let last = LAST_PRESS_MS.swap(t, Ordering::SeqCst);
+                    if t - last < 50 {
+                        return; // 过滤同一次物理按键的重复事件
+                    }
                     let window = app.get_webview_window("main").unwrap();
                     if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
                         println!("[hotkey] toggle → hide");
                         let _ = app.emit("hotkey-hide", ());
                     } else {
