@@ -17,11 +17,45 @@ fn now_ms() -> i64 {
 // ── 动态全屏 ───────────────────────────────────────────────
 fn make_fullscreen(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app.get_webview_window("main").unwrap();
-    let monitor = window.current_monitor()?.unwrap();
-    let size = monitor.size();
-    let pos = monitor.position();
-    window.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: size.width, height: size.height }))?;
-    window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: pos.x, y: pos.y }))?;
+    let scale = window.current_monitor()?.unwrap().scale_factor();
+
+    // 通过 Windows API 获取工作区（屏幕减去任务栏）
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+            windows::Win32::UI::WindowsAndMessaging::SPI_GETWORKAREA,
+            0,
+            Some(&mut rect as *mut _ as *mut core::ffi::c_void),
+            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+    };
+
+    let x = rect.left;
+    let y = rect.top;
+    let w = (rect.right - rect.left) as u32;
+    let h = (rect.bottom - rect.top) as u32;
+
+    println!("[fullscreen] work_area: ({x},{y}) {w}×{h}, scale={scale}");
+
+    window.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: w, height: h }))?;
+    window.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }))?;
+
+    // 补偿 outer→inner 偏移：将窗口向负方向移动半个差值，使内容区对齐屏幕原点
+    let outer = window.outer_size()?;
+    let inner = window.inner_size()?;
+    let offset_x = (outer.width as i32 - inner.width as i32) / 2;
+    let offset_y = (outer.height as i32 - inner.height as i32) / 2;
+    window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+        x: x - offset_x,
+        y: y - offset_y,
+    }))?;
+
+    let outer = window.outer_size()?;
+    let inner = window.inner_size()?;
+    let pos = window.outer_position()?;
+    println!("[fullscreen] result: outer={0}x{1}, inner={2}x{3}, pos=({4},{5}), offset=({offset_x},{offset_y})",
+        outer.width, outer.height, inner.width, inner.height, pos.x, pos.y);
+
     Ok(())
 }
 

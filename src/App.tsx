@@ -48,7 +48,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => {
-          console.log("[frontend] ← hotkey-show received, current visibleRef=", visibleRef.current);
+          console.log("[frontend] SHOW opacity→1 at", performance.now().toFixed(1), "ms");
           visibleRef.current = true;
           setVisible(true);
         });
@@ -77,6 +77,7 @@ export default function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         const r = await invoke<{type:string;content:string}>("read_clipboard");
         if (r.type !== "empty" && r.content) {
+          console.log("[frontend] INITIAL clipboard at", performance.now().toFixed(1), "ms, type=", r.type);
           const item: ClipItem = { type: r.type as "text"|"image", content: r.content, time: Date.now() };
           setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
         }
@@ -89,6 +90,7 @@ export default function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         const r = await invoke<{type:string;content:string}>("read_clipboard");
         if (r.type !== "empty" && r.content && r.content !== latest) {
+          console.log("[frontend] CLIPBOARD UPDATE at", performance.now().toFixed(1), "ms, type=", r.type, "len=", r.content.length);
           latest = r.content;
           const item: ClipItem = { type: r.type as "text"|"image", content: r.content, time: Date.now() };
           setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
@@ -140,10 +142,8 @@ export default function App() {
     return ()=>window.removeEventListener("keydown",onKey);
   }, [visible, filteredApps, selectedIdx, launchApp]);
 
-  if (!visible) return null;
-
   return (
-    <div id="overlay" className="overlay-simple">
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}`}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
