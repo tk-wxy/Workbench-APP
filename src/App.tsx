@@ -58,7 +58,12 @@ export default function App() {
           setVisible(false);
           // Rust 侧已直接 window.hide()，前端只需同步状态
         });
-        cleanup = [un1, un2];
+        const un3 = await listen("clipboard-update", (event: any) => {
+          console.log("[frontend] ← clipboard-update, type=", event.payload.type);
+          const item: ClipItem = { type: event.payload.type as "text"|"image", content: event.payload.content, time: event.payload.time };
+          setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
+        });
+        cleanup = [un1, un2, un3];
         console.log("[frontend] listeners registered OK");
       } catch (e) { console.error("[frontend] listen error:", e); }
     })();
@@ -68,36 +73,19 @@ export default function App() {
     };
   }, []);
 
-  // ── 窗口显示时加载数据 + 剪贴板轮询 ──
+  // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
   useEffect(() => {
     if (!visible) return;
-    // 首次立即读一次
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{type:string;content:string}>("read_clipboard");
-        if (r.type !== "empty" && r.content) {
-          console.log("[frontend] INITIAL clipboard at", performance.now().toFixed(1), "ms, type=", r.type);
-          const item: ClipItem = { type: r.type as "text"|"image", content: r.content, time: Date.now() };
-          setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
+        const history = await invoke<{type:string;content:string;time:number}[]>("get_clipboard_history");
+        if (history.length) {
+          console.log("[frontend] loaded", history.length, "clip items from cache");
+          setClipboard(history.map(e => ({ type: e.type as "text"|"image", content: e.content, time: e.time })));
         }
       } catch {}
     })();
-    // 轮询：每 500ms 检查剪贴板变化，visible=false 时 React 自动清理 interval
-    let latest = "";
-    const poll = setInterval(async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{type:string;content:string}>("read_clipboard");
-        if (r.type !== "empty" && r.content && r.content !== latest) {
-          console.log("[frontend] CLIPBOARD UPDATE at", performance.now().toFixed(1), "ms, type=", r.type, "len=", r.content.length);
-          latest = r.content;
-          const item: ClipItem = { type: r.type as "text"|"image", content: r.content, time: Date.now() };
-          setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
-        }
-      } catch {}
-    }, 500);
-    return () => clearInterval(poll);
     // 加载应用（首次加载后缓存，不再重复扫描）
     if (!loadedRef.current) {
       loadedRef.current = true;

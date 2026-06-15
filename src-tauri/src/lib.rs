@@ -1,17 +1,83 @@
 mod apps;
 
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-// 50ms 防抖：过滤同一物理按键的重复 Pressed 事件
+// 50ms 防抖
 static LAST_PRESS_MS: AtomicI64 = AtomicI64::new(0);
+/// 后台监听跳过的 seq 事件次数（set_image 可能触发多次 seq 变化）
+static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+// ── 剪贴板后台缓存 ─────────────────────────────────────────
+
+static CLIP_CACHE: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+
+/// 后台线程：每 800ms 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端
+fn start_clipboard_monitor(app_handle: AppHandle) {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    std::thread::spawn(move || {
+        let mut last_seq = unsafe { GetClipboardSequenceNumber() };
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(800));
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq == last_seq { continue; }
+            last_seq = seq;
+            // 跳过 set_clipboard_image 自身触发的 seq 变化
+            let skip = SKIP_CLIP_EVENTS.load(Ordering::SeqCst);
+            if skip > 0 {
+                SKIP_CLIP_EVENTS.store(skip - 1, Ordering::SeqCst);
+                continue;
+            }
+            println!("[clipbg] seq changed → reading");
+
+            let mut clipboard = match arboard::Clipboard::new() {
+                Ok(c) => c, Err(_) => continue,
+            };
+            let entry = if let Ok(text) = clipboard.get_text() {
+                if text.is_empty() { continue; }
+                println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
+                serde_json::json!({"type":"text","content":text,"time":now_ms()})
+            } else if let Ok(img) = clipboard.get_image() {
+                let w = img.width as u32;
+                let h = img.height as u32;
+                if let Some(rgba) = image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
+                    let thumb = if w > 1024 || h > 1024 {
+                        let ratio = 1024.0 / w.max(h) as f64;
+                        image::DynamicImage::ImageRgba8(rgba)
+                            .resize_exact((w as f64*ratio) as u32, (h as f64*ratio) as u32,
+                                          image::imageops::FilterType::Triangle)
+                    } else { image::DynamicImage::ImageRgba8(rgba) };
+                    let mut png = std::io::Cursor::new(Vec::new());
+                    if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                        let b64 = base64_encode(&png.into_inner());
+                        println!("[clipbg] image {w}×{h} cached");
+                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms()})
+                    } else { continue }
+                } else { continue }
+            } else { continue };
+
+            let mut cache = CLIP_CACHE.lock().unwrap();
+            cache.retain(|e| e["content"] != entry["content"]);
+            cache.insert(0, entry.clone());
+            cache.truncate(20);
+            let _ = app_handle.emit("clipboard-update", entry);
+        }
+    });
+}
+
+/// 前端调用：直接返回缓存数据（毫秒级）
+#[tauri::command]
+fn get_clipboard_history() -> Vec<serde_json::Value> {
+    CLIP_CACHE.lock().unwrap().clone()
 }
 
 // ── 动态全屏 ───────────────────────────────────────────────
@@ -106,10 +172,23 @@ fn read_clipboard() -> serde_json::Value {
         }
     }
     if let Ok(img) = clipboard.get_image() {
-        let rgba = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.to_vec());
+        let w = img.width as u32;
+        let h = img.height as u32;
+        let rgba = image::RgbaImage::from_raw(w, h, img.bytes.to_vec());
         if let Some(rgba) = rgba {
+            // 大图缩放：最长边 > 1024px 时缩至 1024px，Triangle 滤镜追求速度
+            const MAX_DIM: u32 = 1024;
+            let thumb = if w > MAX_DIM || h > MAX_DIM {
+                let ratio = MAX_DIM as f64 / w.max(h) as f64;
+                let tw = (w as f64 * ratio) as u32;
+                let th = (h as f64 * ratio) as u32;
+                println!("[clipboard] image {w}×{h} → thumbnail {tw}×{th} in {:?}", start.elapsed());
+                image::DynamicImage::ImageRgba8(rgba).resize_exact(tw, th, image::imageops::FilterType::Triangle)
+            } else {
+                image::DynamicImage::ImageRgba8(rgba)
+            };
             let mut png_buf = std::io::Cursor::new(Vec::new());
-            if image::DynamicImage::ImageRgba8(rgba).write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
+            if thumb.write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
                 let b64 = base64_encode(&png_buf.into_inner());
                 return serde_json::json!({"type": "image", "content": format!("data:image/png;base64,{b64}")});
             }
@@ -118,16 +197,54 @@ fn read_clipboard() -> serde_json::Value {
     serde_json::json!({"type": "empty"})
 }
 
+/// 仅读文本（跳过图片），供轮询使用，避免每次读图编码的开销
 #[tauri::command]
-fn set_clipboard_image(base64: String) -> Result<(), String> {
-    let b64_data = if let Some(comma) = base64.find(',') { &base64[comma + 1..] } else { &base64 };
-    let bytes = base64_decode(b64_data).ok_or("base64 解码失败")?;
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析失败: {}", e))?;
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
-    clipboard.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
-        .map_err(|e| format!("剪贴板图片写入失败: {}", e))?;
+fn read_clipboard_text() -> serde_json::Value {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(c) => c,
+        Err(_) => return serde_json::json!({"type": "empty"}),
+    };
+    if let Ok(text) = clipboard.get_text() {
+        if !text.is_empty() {
+            return serde_json::json!({"type": "text", "content": text});
+        }
+    }
+    serde_json::json!({"type": "empty"})
+}
+
+#[tauri::command]
+fn set_clipboard_image(app: AppHandle, _base64: String) -> Result<(), String> {
+    use enigo::Direction::{Press, Release};
+    use enigo::Keyboard;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+    // 读原图 + 写回（计数器防死循环）
+    SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+    let img = {
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
+        clipboard.get_image().map_err(|_| "剪贴板中无图片（可能已被覆盖）".to_string())?
+    };
+    {
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
+        clipboard.set_image(arboard::ImageData {
+            width: img.width, height: img.height, bytes: img.bytes,
+        }).map_err(|e| format!("剪贴板图片写入失败: {}", e))?;
+    }
+    println!("[paste] image {}×{} → hide → Ctrl+V", img.width, img.height);
+
+    // 先隐藏，再获取后台窗口（此时才是用户真正的目标窗口）
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let target = unsafe { GetForegroundWindow() };
+    unsafe { let _ = SetForegroundWindow(target); }
+
+    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+    let _ = enigo.key(enigo::Key::Control, Press);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::V, Press);
+    let _ = enigo.key(enigo::Key::V, Release);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::Control, Release);
     Ok(())
 }
 
@@ -169,7 +286,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info,
             hide_window, open_file, paste_clipboard,
-            read_clipboard, set_clipboard_image
+            read_clipboard, read_clipboard_text, set_clipboard_image, get_clipboard_history
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -201,6 +318,7 @@ pub fn run() {
             app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
             println!("[hotkey] Ctrl+Space registered (pure toggle)");
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
+            start_clipboard_monitor(app.handle().clone());
 
             let toggle_item = MenuItemBuilder::with_id("toggle", "显示窗口").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
