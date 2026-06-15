@@ -123,6 +123,7 @@ export default function App() {
   const removeFile = useCallback(async (i:number) => { await saveFiles(files.filter((_,j)=>j!==i)); }, [files,saveFiles]);
   const openFile = useCallback(async (f:FileEntry) => { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("open_file",{path:f.path}); } catch{} await hideWorkbench(); }, []);
   const copyAndPaste = useCallback(async (item:ClipItem) => {
+    console.log("[frontend] copyAndPaste called, type=", item.type);
     if (item.type === "text") { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
     else { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_image",{base64:item.content}); } catch{} await hideWorkbench(); }
   }, []);
