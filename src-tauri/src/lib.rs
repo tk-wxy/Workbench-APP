@@ -213,28 +213,28 @@ fn read_clipboard_text() -> serde_json::Value {
 }
 
 #[tauri::command]
-fn set_clipboard_image(app: AppHandle, _base64: String) -> Result<(), String> {
+fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
-    // 读原图 + 写回（计数器防死循环）
-    SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
-    let img = {
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
-        clipboard.get_image().map_err(|_| "剪贴板中无图片（可能已被覆盖）".to_string())?
-    };
-    {
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
-        clipboard.set_image(arboard::ImageData {
-            width: img.width, height: img.height, bytes: img.bytes,
-        }).map_err(|e| format!("剪贴板图片写入失败: {}", e))?;
+    // 历史图片：缩略图写回剪贴板（当前图已在剪贴板中，跳过）
+    if !base64.is_empty() {
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+        let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+        cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
+            .map_err(|e| format!("写入: {}", e))?;
+        println!("[paste] thumbnail {w}×{h} written back");
     }
-    println!("[paste] image {}×{} → hide → Ctrl+V", img.width, img.height);
 
-    // 先隐藏，再获取后台窗口（此时才是用户真正的目标窗口）
+    println!("[paste] image → hide → Ctrl+V");
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    std::thread::sleep(std::time::Duration::from_millis(150));
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
 
@@ -259,7 +259,7 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     clipboard.set_text(&text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
 
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(250));
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     unsafe {
         let hwnd = GetForegroundWindow();
