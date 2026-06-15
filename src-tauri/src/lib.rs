@@ -133,16 +133,30 @@ fn set_clipboard_image(base64: String) -> Result<(), String> {
 
 #[tauri::command]
 fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
-    clipboard.set_text(text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(120));
-    use enigo::Direction::{Click, Press, Release};
+    use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+    let t0 = std::time::Instant::now();
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
+    clipboard.set_text(&text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
+
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    std::thread::sleep(std::time::Duration::from_millis(250));
+
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let _ = SetForegroundWindow(hwnd);
+    }
+
     let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
     let _ = enigo.key(enigo::Key::Control, Press);
-    let _ = enigo.key(enigo::Key::Unicode('v'), Click);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::V, Press);
+    let _ = enigo.key(enigo::Key::V, Release);
+    std::thread::sleep(std::time::Duration::from_millis(20));
     let _ = enigo.key(enigo::Key::Control, Release);
+    println!("[paste] done at {:?}", t0.elapsed());
     Ok(())
 }
 
@@ -162,7 +176,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if shortcut.mods != Modifiers::ALT || shortcut.key != Code::F1 { return; }
+                    if shortcut.mods != Modifiers::CONTROL || shortcut.key != Code::Space { return; }
                     if event.state != ShortcutState::Pressed { return; }
 
                     let t = now_ms();
@@ -184,8 +198,8 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            app.global_shortcut().register(Shortcut::new(Some(Modifiers::ALT), Code::F1))?;
-            println!("[hotkey] Alt+F1 registered (pure toggle)");
+            app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
+            println!("[hotkey] Ctrl+Space registered (pure toggle)");
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
 
             let toggle_item = MenuItemBuilder::with_id("toggle", "显示窗口").build(app)?;
