@@ -4,7 +4,8 @@ import "./App.css";
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; }
-interface ClipItem { type: "text" | "image"; content: string; time: number; }
+interface FileItem { path: string; name: string; ext: string; isImage: boolean; }
+interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; }
 
 function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
 function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return "刚刚"; if (s<3600) return `${Math.floor(s/60)}分钟前`; return `${Math.floor(s/3600)}小时前`; }
@@ -60,8 +61,15 @@ export default function App() {
         });
         const un3 = await listen("clipboard-update", (event: any) => {
           console.log("[frontend] ← clipboard-update, type=", event.payload.type);
-          const item: ClipItem = { type: event.payload.type as "text"|"image", content: event.payload.content, time: event.payload.time };
-          setClipboard(prev => { const filtered = prev.filter(x => x.content !== item.content); return [item, ...filtered].slice(0, 20); });
+          const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
+          setClipboard(prev => {
+            const filtered = prev.filter(x => {
+              if (item.type === "file" && x.type === "file") return x.items?.[0]?.path !== item.items?.[0]?.path;
+              if (item.type !== "file" && x.type !== "file") return x.content !== item.content;
+              return true; // 不同类型保留
+            });
+            return [item, ...filtered].slice(0, 20);
+          });
         });
         cleanup = [un1, un2, un3];
         console.log("[frontend] listeners registered OK");
@@ -79,10 +87,10 @@ export default function App() {
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const history = await invoke<{type:string;content:string;time:number}[]>("get_clipboard_history");
+        const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number}[]>("get_clipboard_history");
         if (history.length) {
           console.log("[frontend] loaded", history.length, "clip items from cache");
-          setClipboard(history.map(e => ({ type: e.type as "text"|"image", content: e.content, time: e.time })));
+          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count })));
         }
       } catch {}
     })();
@@ -113,6 +121,9 @@ export default function App() {
   const copyAndPaste = useCallback(async (item:ClipItem) => {
     console.log("[frontend] copyAndPaste called, type=", item.type);
     if (item.type === "text") { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
+    else if (item.type === "file" && item.items) {
+      try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); }
+    }
     else { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_image",{base64:item.content}); } catch{} await hideWorkbench(); }
   }, []);
   const openShortcut = useCallback(async (target:string) => { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("launch_app",{path:target}); } catch{} await hideWorkbench(); }, []);
@@ -180,9 +191,14 @@ export default function App() {
           <div className="section-label">剪贴板历史</div>
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
-              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"点击粘贴":"点击复制"}>
-                {c.type==="image"? <img className="clip-image" src={c.content} alt=""/> : <span className="clip-preview">{c.content.slice(0,100)}{c.content.length>100?"…":""}</span>}
-                <span className="clip-time">{c.type==="image"?"📷 ":""}{ago(c.time)}</span>
+              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"点击粘贴":c.type==="file"?"点击粘贴文件":"点击复制"}>
+                {c.type==="image"? <img className="clip-image" src={c.content} alt=""/>
+                : c.type==="file"? <div className="file-clip-preview">
+                    <span className="file-clip-icon">{c.items?.[0]?.isImage?"🖼️":"📁"}</span>
+                    <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : `${c.count}个文件`}</span>
+                  </div>
+                : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
+                <span className="clip-time">{c.type==="image"?"📷 ":c.type==="file"?"📎 ":""}{ago(c.time)}</span>
               </div>
             )): <p className="empty-hint">显示时自动读取</p>}
           </div>
