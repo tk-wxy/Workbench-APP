@@ -1,0 +1,143 @@
+# Workbench App — 架构决策与踩坑根因
+
+> 本文件记录"为什么这样做"和"哪些路走不通"。铁律见 `CLAUDE.md`。
+
+---
+
+## 1. 全局热键：RegisterHotKey vs 自建钩子
+
+**最终方案**：`tauri-plugin-global-shortcut`（底层 `RegisterHotKey`），纯 toggle 模式，Ctrl+Space。
+
+### 踩坑路径
+
+| 尝试 | 技术 | 失败原因 |
+|------|------|----------|
+| 1 | `rdev::listen` | WebView2 获得焦点后 KeyRelease 丢失，走普通消息队列 |
+| 2 | `windows-sys` + `WH_KEYBOARD_LL` | 消息队列未初始化（缺 `PeekMessageW`），回调永不触发 |
+| 3 | 修复后 WH_KEYBOARD_LL | `KBDLLHOOKSTRUCT.vkCode` 报告 `0xA4`(VK_LMENU)，代码检查 `0x12`(VK_MENU) |
+| 4 | 修复虚键码后 | Windows key repeat 不断重置 timestamp，长按误判 |
+| 5 | `KEY_IS_DOWN` 防 repeat | 代码复杂度失控，Tauri 进程内独立线程消息循环稳定性不确定 |
+
+**结论**：OS 级钩子的正确性依赖极精确的 Win32 消息循环编排，一行错步步错。插件封装好的 API 比自己写的可靠一个数量级。
+
+---
+
+## 2. 长短按判定：为何彻底放弃
+
+**最终方案**：不做长短按，纯 toggle。
+
+**根因**：`RegisterHotKey` 的 `Pressed` 和 `Released` 事件通过 Windows 消息队列异步投递。两台真实机器上实测延迟在 500-800ms。用两个异步事件的时间差判定物理按键时长，从根本上不可靠。
+
+**尝试的阈值**：200ms / 300ms / 500ms — 全部失败。调整数值无效，信号源本质有不可控延迟抖动。
+
+---
+
+## 3. 粘贴可靠性：6 轮方案演进（从 33% 到 100%）
+
+**最终方案**：`arboard.set_text` → `window.hide` → `sleep(150ms)` → `GetForegroundWindow` → `SetForegroundWindow` → `enigo Ctrl+V`。
+
+| 轮次 | 方案 | 成功率 | 原因 |
+|------|------|--------|------|
+| 1 | `enigo Key::Unicode('v')` + `Click` | 33% | `SendInput` 对 Unicode 键投递不稳定 |
+| 2 | `enigo Key::V` + `Press/Release` | 50%（交替） | 交替说明 `SendInput` 可靠性问题，非代码逻辑 |
+| 3 | `SendMessageW(WM_PASTE)` | 0% | `windows` 0.58 的 `Param<T>` 泛型与剪贴板 API 类型不兼容 |
+| 4 | sleep 500ms + 键间隔 20ms | 25% | 单纯延时不能解决 `SendInput` 底层问题 |
+| 5 | `SetForegroundWindow` + sleep + enigo | **100%** | 关键——`SetForegroundWindow` 强制刷新焦点队列 |
+| 6 | `WS_EX_NOACTIVATE` + 无 hide | 0% | 架构死胡同：点击时 WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回 |
+
+**焦点交还机制**（统一复用于文本/图片/文件粘贴）：
+```
+window.hide() → sleep(150ms) → GetForegroundWindow → SetForegroundWindow → enigo Ctrl+V
+```
+
+---
+
+## 4. 窗口透明 vs 不透明：GPU 合成路径选择
+
+**最终方案**：`transparent: true`，用 CSS `rgba(13,13,15,0.97)` + `backdrop-filter: blur(24px)` 模拟不透明效果。
+
+**根因**：`transparent: false` + 全屏(3.7M px) + `backdrop-filter: blur` 走重量级 GPU 合成路径。每次 `window.hide()/show()` 需重新分配表面/重绘背景，延迟 ~200ms，表现为"空白页后延迟关闭"。
+
+**为什么 blur 本身不慢**：在 `transparent: true` 下，窗口走 DWM 层合成，`hide()/show()` 只是 visibility flag 切换，零开销。blur 的 GPU 计算在合成层完成，与显隐无关。
+
+---
+
+## 5. 全屏缝隙：outer_size ≠ inner_size
+
+**根因**：`decorations: false` 的无边框窗口仍存在 `outer_size - inner_size` 的固定内边距。200% DPI 下实测为 26×15px，`window.set_position(0,0)` 让 outer 对齐屏幕但 inner 被推偏。
+
+**修复**：
+1. 用 Windows `SPI_GETWORKAREA` 获取工作区（排除任务栏）
+2. `set_size` 后读 `outer/inner` 差值 → 位置补偿 `(-offset_x, -offset_y)` → inner 对齐屏幕原点
+3. offset 完全运行时动态计算，无硬编码像素值
+
+---
+
+## 6. 剪贴板架构：实时编码 → 后台缓存
+
+**变更**：窗口弹出时从"实时读剪贴板+编码"改为"读内存缓存"。
+
+**旧问题**：弹出时 `read_clipboard` 读取大图 → `image` crate 编码 PNG(~3s) → Base64(~1s) → IPC 传输 → 前端渲染。全屏截图时有数秒延迟。
+
+**新方案**：
+- 后台线程每 800ms 轮询 `GetClipboardSequenceNumber`（µs 级）
+- 变化时：读→缩放(>1024px→1024px Triangle)→编码→存 `CLIP_CACHE`→emit 推送
+- 弹出时：直接读缓存，毫秒级
+
+**死循环防御**：`set_image/set_clipboard_files` 写回剪贴板会触发 seq 变化 → 后台检测到 → 跳过。用 `AtomicI32` 计数器（非布尔——arboard 的 get+set 可能触发 2 次 seq 变化）。
+
+---
+
+## 7. CF_HDROP 文件粘贴：DROPFILES 结构体
+
+**技术选择**：raw FFI 而非 `arboard`（arboard 不支持 CF_HDROP 格式）或 `windows` crate（0.58 的 `Param<T>` 泛型与剪贴板 API 不兼容）。
+
+**关键 Bug**：`fWide` 字段设为 0（ANSI）但路径是 UTF-16，导致 Explorer 解析失败。
+
+**DROPFILES 布局**（20 字节头 + UTF-16 路径）：
+```
+Bytes 0-3:   pFiles = 20
+Bytes 4-7:   pt.x = 0
+Bytes 8-11:  pt.y = 0
+Bytes 12-15: fNC = FALSE
+Bytes 16-19: fWide = TRUE  ← 必须为 1
+Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
+```
+
+---
+
+## 8. 前端状态管理：从动画状态机到简化版
+
+**变更历程**：
+- 初版：Framer Motion `AnimatePresence` + CSS phase 动画 → 快速 toggle 时动画冲突
+- 改版：`visible ? <UI/> : null` 条件渲染 → 组件卸载重建导致闪烁
+- 最终：`opacity:0/1` + `pointer-events:none/auto` → 组件不卸载，WebView2 纹理不释放
+
+**interval 泄漏根因**：剪贴板轮询的 `setInterval` cleanup 在 IIFE 内部返回，React `useEffect` 不可见。修复：提升到 `useEffect` 顶层 `return`。
+
+**双重 SHOW 事件**：`hotkey-show` 在同帧内被 emit 两次（间隔 <1ms），导致 `useEffect([visible])` 重复执行。原因未根除但影响已被现有架构吸收（`useEffect` 第二次执行是幂等的）。
+
+---
+
+## 9. 修饰键选择
+
+| 组合 | 问题 | 结论 |
+|------|------|------|
+| Alt+F1 | Alt 触发 Windows 菜单栏激活 | 禁用 |
+| Alt+Space | 被系统窗口菜单占用 | 禁用 |
+| Ctrl+F1 | 可用但不顺手 | 过渡方案 |
+| Ctrl+Space | 可能和输入法切换冲突 | **当前方案**（实测可工作） |
+
+---
+
+## 10. Git 版本历史（关键节点）
+
+```
+a7c13b6 新增：剪贴板文件历史（CF_HDROP检测+写入+粘贴）
+d11bcf2 图片粘贴修复：去除冗余读写循环
+38df8b9 剪贴板后台监听 + 图片缩放 + 图片自动粘贴
+c04585c 稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
+77de932 修复：工作区定位 + outer→inner 偏移补偿
+9b745de 修复：transparent=true + 50ms防抖 + interval泄漏
+3508350 基线：纯 toggle 模式
+```
