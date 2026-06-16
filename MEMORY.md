@@ -157,12 +157,29 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ## 九、变更记录 〔追加〕
 
 ### 2026-06-16
-- 初始化项目记忆体系：CLAUDE.md（铁律）+ DECISIONS.md（决策根因）+ MEMORY.md（本文件）
-- 完成 CF_HDROP 文件剪贴板：后台监听检测、DROPFILES 写入粘贴、前端 file 类型渲染
-- 修复 fWide=FALSE→TRUE bug（UTF-16 路径解析失败）
-- 修复跨类型去重误删 bug（文件条目错误清除文本条目）
-- 图片粘贴延迟优化：去除冗余 get_image+set_image 读写循环，当前图直接 Ctrl+V
-- sleep 优化：250ms→150ms（焦点交还）
-- 前端 items/count 字段丢失修复（Bug 1+2，两处 ClipItem 构造不完整）
-- 剪贴板后台监听从实时编码重构为缓存架构（消除弹出延迟）
-- Git: a7c13b6 / d11bcf2 / 38df8b9 / c04585c
+- **文档三件套**：CLAUDE.md（铁律+协作约定）+ DECISIONS.md（10节架构决策+踩坑根因）+ MEMORY.md（现状快照）
+- **CF_HDROP 文件剪贴板**：后台监听检测文件复制、DROPFILES 结构体构造写入（fWide=TRUE）、前端 file 类型渲染、多文件支持
+- **修复**：fWide=FALSE 导致文件粘贴失败；跨类型去重误删（文件条目错误清除文本条目）；前端 items/count 字段丢失（两处 ClipItem 构造不完整）
+- **图片粘贴延迟优化**：去除 get_image+set_image 冗余读写循环（~500ms→~50ms），历史图 base64 解码写回
+- **sleep 优化**：焦点交还等待 250ms→150ms
+- Git: f281f11 → a7c13b6
+
+### 2026-06-15
+- **剪贴板后台监听架构**：start_clipboard_monitor 独立线程（800ms 轮询 GetClipboardSequenceNumber），CLIP_CACHE 内存缓存，clipboard-update 事件实时推送
+- **图片自动粘贴**：set_clipboard_image 焦点交还 + enigo Ctrl+V（与文本粘贴统一流程）
+- **大图缩放**：>1024px 用 FilterType::Triangle 缩至 1024px，避免 IPC 传输数十MB
+- **死循环防御**：SKIP_CLIP_EVENTS 计数器（AtomicI32），arboard 的 get+set 可能触发 2 次 seq 变化
+- **粘贴方案最终确定**：SetForegroundWindow + enigo Key::V → 100% 成功率（6 轮方案演进）
+- **Ctrl+Space 热键**定稿（Alt+F1→Ctrl+F1→Ctrl+Space）
+- Git: d11bcf2 → 38df8b9 → c04585c
+
+### 2026-06-14
+- **全屏缝隙修复**：SPI_GETWORKAREA 获取工作区 + outer→inner 动态偏移补偿（200% DPI 下 13×7px 隐形边框）
+- **transparent 实验**：false→true 消除 GPU 合成延迟（hide/show ~200ms→即时），CSS rgba(0.97) 补偿透度
+- **50ms 防抖**：过滤 Windows key repeat 重复 Pressed 事件
+- **interval 泄漏修复**：setInterval cleanup 从 IIFE 内提升到 useEffect 顶层 return
+- **前端简化**：Framer Motion 动画 → opacity:0/1 条件渲染（组件不卸载）
+- **长短按判定彻底放弃**：RegisterHotKey Pressed/Released 有 500-800ms 软件延迟，阈值 200/300/500ms 全失败
+- **热键演进**：rdev→WH_KEYBOARD_LL→tauri-plugin-global-shortcut（RegisterHotKey）
+- **项目初始化**：Tauri 2.0 + React 18 + TypeScript + Vite + Tailwind CSS，全屏窗口，系统托盘
+- Git: 77de932 → 9b745de → 3508350
