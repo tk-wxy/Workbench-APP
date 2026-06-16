@@ -39,22 +39,38 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             }
             println!("[clipbg] seq changed → reading");
 
-            let mut clipboard = match arboard::Clipboard::new() {
-                Ok(c) => c, Err(_) => continue,
-            };
-            let entry = if let Ok(text) = clipboard.get_text() {
-                if text.is_empty() { continue; }
-                println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
-                serde_json::json!({"type":"text","content":text,"time":now_ms()})
-            } else if let Ok(img) = clipboard.get_image() {
-                let w = img.width as u32;
-                let h = img.height as u32;
-                if let Some(rgba) = image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
+            // CF_HDROP 最先检测（raw FFI，arboard 可能干扰剪贴板状态）
+            let entry = if let Some(paths) = read_clipboard_files() {
+                if paths.is_empty() { continue; }
+                let items: Vec<serde_json::Value> = paths.iter().map(|p| {
+                    let name = std::path::Path::new(p).file_name()
+                        .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let ext = std::path::Path::new(p).extension()
+                        .map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                    let is_img = matches!(ext.as_str(), "jpg"|"jpeg"|"png"|"gif"|"webp"|"bmp"|"ico");
+                    serde_json::json!({"path":p,"name":name,"ext":ext,"isImage":is_img})
+                }).collect();
+                let count = items.len();
+                println!("[clipbg] {} file(s) copied", count);
+                serde_json::json!({"type":"file","items":items,"time":now_ms(),"count":count})
+            } else {
+                let mut cb = match arboard::Clipboard::new() {
+                    Ok(c) => c, Err(_) => continue,
+                };
+                if let Ok(text) = cb.get_text() {
+                    if !text.is_empty() {
+                        println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
+                        serde_json::json!({"type":"text","content":text,"time":now_ms()})
+                    } else { continue }
+                } else if let Ok(img) = cb.get_image() {
+                    let w = img.width as u32; let h = img.height as u32;
+                    let rgba = match image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
+                        Some(r) => r, None => continue,
+                    };
                     let thumb = if w > 1024 || h > 1024 {
-                        let ratio = 1024.0 / w.max(h) as f64;
+                        let r = 1024.0 / w.max(h) as f64;
                         image::DynamicImage::ImageRgba8(rgba)
-                            .resize_exact((w as f64*ratio) as u32, (h as f64*ratio) as u32,
-                                          image::imageops::FilterType::Triangle)
+                            .resize_exact((w as f64*r) as u32, (h as f64*r) as u32, image::imageops::FilterType::Triangle)
                     } else { image::DynamicImage::ImageRgba8(rgba) };
                     let mut png = std::io::Cursor::new(Vec::new());
                     if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
@@ -63,10 +79,12 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                         serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms()})
                     } else { continue }
                 } else { continue }
-            } else { continue };
+            };
 
             let mut cache = CLIP_CACHE.lock().unwrap();
-            cache.retain(|e| e["content"] != entry["content"]);
+            if entry["type"] == "text" || entry["type"] == "image" {
+                cache.retain(|e| e["content"] != entry["content"]);
+            }
             cache.insert(0, entry.clone());
             cache.truncate(20);
             let _ = app_handle.emit("clipboard-update", entry);
@@ -78,6 +96,127 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
 #[tauri::command]
 fn get_clipboard_history() -> Vec<serde_json::Value> {
     CLIP_CACHE.lock().unwrap().clone()
+}
+
+// ── CF_HDROP FFI ────────────────────────────────────────────
+#[link(name = "user32")]
+extern "system" {
+    fn OpenClipboard(hWnd: isize) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn GetClipboardData(uFormat: u32) -> isize;
+    fn SetClipboardData(uFormat: u32, hMem: isize) -> isize;
+    fn IsClipboardFormatAvailable(uFormat: u32) -> i32;
+}
+#[link(name = "shell32")]
+extern "system" {
+    fn DragQueryFileW(hDrop: isize, iFile: u32, lpszFile: *mut u16, cch: u32) -> u32;
+}
+#[link(name = "kernel32")]
+extern "system" {
+    fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> isize;
+    fn GlobalLock(hMem: isize) -> *mut u8;
+    fn GlobalUnlock(hMem: isize) -> i32;
+}
+
+const CF_HDROP: u32 = 15;
+const GMEM_MOVEABLE: u32 = 2;
+
+/// 从剪贴板读取 CF_HDROP 文件路径列表
+fn read_clipboard_files() -> Option<Vec<String>> {
+    unsafe {
+        if OpenClipboard(0) == 0 { return None; }
+        if IsClipboardFormatAvailable(CF_HDROP) == 0 { CloseClipboard(); return None; }
+        let h = GetClipboardData(CF_HDROP);
+        if h == 0 { CloseClipboard(); return None; }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() { CloseClipboard(); return None; }
+
+        let count = DragQueryFileW(h, u32::MAX, std::ptr::null_mut(), 0);
+        let mut paths = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            let mut buf = [0u16; 520];
+            let len = DragQueryFileW(h, i, buf.as_mut_ptr(), buf.len() as u32);
+            if len > 0 {
+                paths.push(String::from_utf16_lossy(&buf[..len as usize]));
+            }
+        }
+        GlobalUnlock(h);
+        CloseClipboard();
+        Some(paths)
+    }
+}
+
+/// 将文件路径列表写回剪贴板（CF_HDROP 格式）+ 粘贴
+#[tauri::command]
+fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    use enigo::Direction::{Press, Release};
+    use enigo::Keyboard;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+    println!("[filepaste] paths count={}", paths.len());
+    for (i, p) in paths.iter().enumerate() {
+        println!("[filepaste]   [{}] \"{}\"", i, p);
+    }
+
+    // 构造 DROPFILES 结构 + 双字节路径列表
+    let mut raw: Vec<u8> = Vec::new();
+    raw.extend_from_slice(&20u32.to_ne_bytes());   // pFiles = sizeof(DROPFILES)
+    raw.extend_from_slice(&0u32.to_ne_bytes());    // pt.x = 0
+    raw.extend_from_slice(&0u32.to_ne_bytes());    // pt.y = 0
+    raw.extend_from_slice(&0u32.to_ne_bytes());    // fNC = FALSE
+    raw.extend_from_slice(&1u32.to_ne_bytes());    // fWide = TRUE（UTF-16 路径）
+    for p in &paths {
+        let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
+        for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
+    }
+    raw.push(0); raw.push(0); // 双 \0 结尾
+    println!("[filepaste] DROPFILES struct size={} bytes", raw.len());
+
+    SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+    unsafe {
+        let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
+        println!("[filepaste] GlobalAlloc({}) → h=0x{h:x}", raw.len());
+        if h == 0 { return Err("GlobalAlloc 失败".into()); }
+        let ptr = GlobalLock(h);
+        println!("[filepaste] GlobalLock(h) → ptr=0x{:x}", ptr as usize);
+        if ptr.is_null() { return Err("GlobalLock 失败".into()); }
+        std::ptr::copy_nonoverlapping(raw.as_ptr(), ptr, raw.len());
+        GlobalUnlock(h);
+
+        let open_ok = OpenClipboard(0);
+        println!("[filepaste] OpenClipboard → {open_ok}");
+        if open_ok == 0 {
+            let le = windows::Win32::Foundation::GetLastError();
+            println!("[filepaste] OpenClipboard GetLastError={le:?}");
+            return Err("OpenClipboard 失败".into());
+        }
+        let empty_ok = EmptyClipboard();
+        println!("[filepaste] EmptyClipboard → {empty_ok}");
+        let set_result = SetClipboardData(CF_HDROP, h);
+        println!("[filepaste] SetClipboardData(CF_HDROP, h) → {set_result}");
+        if set_result == 0 {
+            let le = windows::Win32::Foundation::GetLastError();
+            println!("[filepaste] SetClipboardData GetLastError={le:?}");
+        }
+        let close_ok = CloseClipboard();
+        println!("[filepaste] CloseClipboard → {close_ok}");
+    }
+
+    println!("[paste] {} file(s) written → hide → Ctrl+V", paths.len());
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let target = unsafe { GetForegroundWindow() };
+    unsafe { let _ = SetForegroundWindow(target); }
+
+    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+    let _ = enigo.key(enigo::Key::Control, Press);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::V, Press);
+    let _ = enigo.key(enigo::Key::V, Release);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::Control, Release);
+    Ok(())
 }
 
 // ── 动态全屏 ───────────────────────────────────────────────
@@ -286,7 +425,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info,
             hide_window, open_file, paste_clipboard,
-            read_clipboard, read_clipboard_text, set_clipboard_image, get_clipboard_history
+            read_clipboard, read_clipboard_text, set_clipboard_image, get_clipboard_history, set_clipboard_files
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
