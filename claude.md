@@ -20,8 +20,8 @@ npm run tauri build    # 打包
 - `src-tauri/src/apps.rs` — 应用扫描 / `ExtractIconEx` 图标提取
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
-- `docs/DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，本文件只放结论）
-- `docs/MEMORY.md` — 滚动会话小结，**当前进度 / 待办 / 下一步以它为准**
+- `DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，本文件只放结论）
+- `MEMORY.md` — 滚动会话小结，**当前进度 / 待办 / 下一步以它为准**
 
 ---
 
