@@ -13,9 +13,9 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴 + 后台监听 + 全屏无缝
+- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴 + 后台监听 + 全屏无缝 + 呼出白闪修复
 - **进行中**：← 无
-- **下一步**：闪烁优化、文件中转区独立于剪贴板文件历史
+- **下一步**：文件中转区独立于剪贴板文件历史
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -101,7 +101,8 @@ src-tauri/Cargo.toml
 - ✅ 文件中转区（拖入暂存/元信息显示/拖出/持久化到 store）
 - ✅ 快捷入口（常用 Windows 位置快速打开）
 - ✅ Esc 关闭（已修复幽灵界面：改接 Rust `window.hide()` + `emit hotkey-hide` 状态同步）
-- 📋 窗口约 15-20 次开关出现一次闪烁（图片时加重）
+- ✅ 呼出白闪（已修复：emit hotkey-show 提前到 show 前预渲染，set_focus 延迟 50ms 线程执行）
+- 📋 窗口偶发闪烁（图片解码时加重，预渲染方案已大幅缓解，剩余概率未知）
 
 ---
 
@@ -155,6 +156,9 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-17 (续3)
+- **呼出白闪修复**：`set_focus()` 触发 `WM_ACTIVATE` 导致 WebView2 激活重绘，短暂白帧。修复：emit `hotkey-show` 提前到 `window.show()` 前（前端预渲染深色 CSS），`set_focus()` 移至后台线程延迟 50ms 执行（附可见性守卫），两处 show 路径（hotkey handler + tray_toggle）同步修改
 
 ### 2026-06-17 (续2)
 - **Esc 焦点回归修复（补丁）**：热键 show 路径补 `window.set_focus()`（与 `tray_toggle` 对齐，原先缺失导致热键呼出后 Esc 的 keydown 无法到达 JS）。Esc handler 改为 `setVisible(false)` + `hideWorkbench()`（即时 CSS 反馈 + Rust hide）

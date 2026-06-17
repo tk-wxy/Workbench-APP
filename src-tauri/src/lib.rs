@@ -390,9 +390,13 @@ fn tray_toggle(app_handle: &AppHandle) {
             let _ = window.hide();
             let _ = app_handle.emit("hotkey-hide", ());
         } else {
+            let _ = app_handle.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
             let _ = window.show();
-            let _ = window.set_focus();
-            let _ = app_handle.emit("hotkey-show", ());
+            let win = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
+            });
         }
     }
 }
@@ -566,10 +570,14 @@ pub fn run() {
                         println!("[hotkey] toggle → hide");
                         let _ = app.emit("hotkey-hide", ());
                     } else {
+                        let _ = app.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
                         let _ = window.show();
-                        let _ = window.set_focus();
                         println!("[hotkey] toggle → show");
-                        let _ = app.emit("hotkey-show", ());
+                        let win = window.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
+                        });
                     }
                 })
                 .build(),
