@@ -32,7 +32,7 @@ npm run tauri build    # 打包
 - `tauri.conf.json` 中 `transparent: true` **必须保持**。改成 false 会触发全屏 + blur 的 GPU 合成开销，导致 hide/show 延迟 + 空白页闪烁。
 - 窗口配置基线（在 tauri.conf.json）：`decorations:false, alwaysOnTop:true, skipTaskbar:true, visible:false, focus:false`。**`focus:false` 不能改**——抢焦点会破坏热键。
 - 可见性的**唯一真相是 `window.is_visible()`（Rust）**。Rust 直接 `show()/hide()`，`emit` 只用于同步前端状态。**绝不让前端管 hide**（会引入 IPC 往返延迟，表现为"空白页后延迟关闭"）。
-- 焦点交还机制（文本 / 图片 / 文件粘贴统一复用，**别改流程**）：
+- 焦点交还机制（文本 / 图片 / 文件夹粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
   `window.hide()` → `sleep(150ms)` → `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
 - "前台窗口"与"键盘输入焦点"是两个概念。**不要再试 `WS_EX_NOACTIVATE` 推回焦点的方案——已验证失败**（WebView2 内部 `SetFocus` 会抢占路由，外部进程无权推回）。
 
@@ -45,7 +45,7 @@ npm run tauri build    # 打包
 ### 剪贴板
 - 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(800ms)`。
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
-- 检测顺序 `CF_HDROP(文件) → 图片 → 文本`，三者互斥；`CLIP_CACHE` 最多 20 条。
+- 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）；`CLIP_CACHE` 最多 20 条。
 - 图片：>1024px 用 `image` crate `FilterType::Triangle` 缩到 1024px 缩略图再编码。**轮询不读图，只在内容变化时处理一次**。
 - 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（用计数器非布尔——arboard 的 get+set 可能触发 2 次 seq 变化），后台 `swap` 递减跳过。
 - 写文件用 `CF_HDROP` raw FFI（`SetClipboardData` / `DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径）。别用 `[0u8;16]` 清零，会导致 fWide=FALSE 解析失败。

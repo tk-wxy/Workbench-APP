@@ -39,8 +39,30 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             }
             println!("[clipbg] seq changed → reading");
 
-            // CF_HDROP 最先检测（raw FFI，arboard 可能干扰剪贴板状态）
-            let entry = if let Some(paths) = read_clipboard_files() {
+            // 检测顺序：图片优先（截图同时有 CF_HDROP+CF_BITMAP/DIB/DIBV5）
+            let entry = if has_clipboard_image() {
+                let mut cb = match arboard::Clipboard::new() {
+                    Ok(c) => c, Err(_) => continue,
+                };
+                if let Ok(img) = cb.get_image() {
+                    let w = img.width as u32; let h = img.height as u32;
+                    let rgba = match image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
+                        Some(r) => r, None => continue,
+                    };
+                    let thumb = if w > 1024 || h > 1024 {
+                        let r = 1024.0 / w.max(h) as f64;
+                        image::DynamicImage::ImageRgba8(rgba)
+                            .resize_exact((w as f64*r) as u32, (h as f64*r) as u32, image::imageops::FilterType::Triangle)
+                    } else { image::DynamicImage::ImageRgba8(rgba) };
+                    let mut png = std::io::Cursor::new(Vec::new());
+                    if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
+                        let b64 = base64_encode(&png.into_inner());
+                        let ah = compute_ahash(&thumb);
+                        println!("[clipbg] image {w}×{h} cached");
+                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah})
+                    } else { continue }
+                } else { continue }
+            } else if let Some(paths) = read_clipboard_files() {
                 if paths.is_empty() { continue; }
                 let items: Vec<serde_json::Value> = paths.iter().map(|p| {
                     let name = std::path::Path::new(p).file_name()
@@ -75,13 +97,35 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                     let mut png = std::io::Cursor::new(Vec::new());
                     if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
                         let b64 = base64_encode(&png.into_inner());
+                        let ah = compute_ahash(&thumb);
                         println!("[clipbg] image {w}×{h} cached");
-                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms()})
+                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah})
                     } else { continue }
                 } else { continue }
             };
 
             let mut cache = CLIP_CACHE.lock().unwrap();
+
+            // 图片去重：aHash 汉明距离(≤5) + 尺寸近似(±2px)
+            if entry["type"] == "image" {
+                let ew = entry["w"].as_u64().unwrap_or(0) as i64;
+                let eh = entry["h"].as_u64().unwrap_or(0) as i64;
+                let ah = entry["ahash"].as_u64().unwrap_or(0);
+                let dup = cache.iter().any(|e| {
+                    if e["type"] != "image" { return false; }
+                    let cw = e["w"].as_u64().unwrap_or(0) as i64;
+                    let ch = e["h"].as_u64().unwrap_or(0) as i64;
+                    let ca = e["ahash"].as_u64().unwrap_or(0);
+                    let dim_ok = (cw - ew).abs() <= 2 && (ch - eh).abs() <= 2;
+                    dim_ok && (ah ^ ca).count_ones() <= 5
+                });
+                if dup {
+                    println!("[clipbg] image skipped (dup)");
+                    continue;
+                }
+            }
+
+            // 去重只在同类型内：文本/图片按 content，文件类型不去重
             if entry["type"] == "text" || entry["type"] == "image" {
                 cache.retain(|e| e["content"] != entry["content"]);
             }
@@ -96,6 +140,45 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
 #[tauri::command]
 fn get_clipboard_history() -> Vec<serde_json::Value> {
     CLIP_CACHE.lock().unwrap().clone()
+}
+
+/// 获取窗口类名
+fn get_window_class(hwnd: isize) -> String {
+    unsafe {
+        let mut buf = [0u16; 64];
+        let len = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(
+            windows::Win32::Foundation::HWND(hwnd as *mut _), &mut buf);
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+/// aHash(8×8): 缩至 8×8 灰度(Nearest,已缩略图二次缩放) → 求均值 → 64bit 指纹
+fn compute_ahash(img: &image::DynamicImage) -> u64 {
+    use image::GenericImageView;
+    let small = img.resize_exact(8, 8, image::imageops::FilterType::Nearest);
+    let gray = small.grayscale();
+    let pixels: Vec<u8> = gray.pixels().map(|(_, _, p)| p[0]).collect();
+    let mean = pixels.iter().map(|&p| p as u64).sum::<u64>() / 64;
+    let mut hash: u64 = 0;
+    for (i, &p) in pixels.iter().enumerate() {
+        if p as u64 > mean { hash |= 1 << i; }
+    }
+    hash
+}
+
+/// 剪贴板当前是否包含图片格式（CF_BITMAP / CF_DIB / CF_DIBV5）
+fn has_clipboard_image() -> bool {
+    const CF_BITMAP: u32 = 2;
+    const CF_DIB: u32 = 8;
+    const CF_DIBV5: u32 = 17;
+    unsafe {
+        if OpenClipboard(0) == 0 { return false; }
+        let has = IsClipboardFormatAvailable(CF_BITMAP) != 0
+               || IsClipboardFormatAvailable(CF_DIB) != 0
+               || IsClipboardFormatAvailable(CF_DIBV5) != 0;
+        CloseClipboard();
+        has
+    }
 }
 
 // ── CF_HDROP FFI ────────────────────────────────────────────
@@ -147,7 +230,7 @@ fn read_clipboard_files() -> Option<Vec<String>> {
     }
 }
 
-/// 将文件路径列表写回剪贴板（CF_HDROP 格式）+ 粘贴
+/// 将文件路径列表写回剪贴板（CF_HDROP 格式）或桌面落地 + 粘贴
 #[tauri::command]
 fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
@@ -159,56 +242,44 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
         println!("[filepaste]   [{}] \"{}\"", i, p);
     }
 
-    // 构造 DROPFILES 结构 + 双字节路径列表
+    // Bug A 修复：场景判断提到写剪贴板之前，桌面直接落地不碰剪贴板
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
+    println!("[filepaste] after hide, foreground class=\"{class1}\"");
+
+    if class1 == "WorkerW" || class1 == "Progman" {
+        return desktop_copy_files(&paths);
+    }
+
+    // 非桌面：CF_HDROP 写回 + Ctrl+V
     let mut raw: Vec<u8> = Vec::new();
-    raw.extend_from_slice(&20u32.to_ne_bytes());   // pFiles = sizeof(DROPFILES)
-    raw.extend_from_slice(&0u32.to_ne_bytes());    // pt.x = 0
-    raw.extend_from_slice(&0u32.to_ne_bytes());    // pt.y = 0
-    raw.extend_from_slice(&0u32.to_ne_bytes());    // fNC = FALSE
-    raw.extend_from_slice(&1u32.to_ne_bytes());    // fWide = TRUE（UTF-16 路径）
+    raw.extend_from_slice(&20u32.to_ne_bytes());
+    raw.extend_from_slice(&0u32.to_ne_bytes());
+    raw.extend_from_slice(&0u32.to_ne_bytes());
+    raw.extend_from_slice(&0u32.to_ne_bytes());
+    raw.extend_from_slice(&1u32.to_ne_bytes());
     for p in &paths {
         let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
         for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
     }
-    raw.push(0); raw.push(0); // 双 \0 结尾
-    println!("[filepaste] DROPFILES struct size={} bytes", raw.len());
+    raw.push(0); raw.push(0);
 
     SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
     unsafe {
         let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
-        println!("[filepaste] GlobalAlloc({}) → h=0x{h:x}", raw.len());
         if h == 0 { return Err("GlobalAlloc 失败".into()); }
         let ptr = GlobalLock(h);
-        println!("[filepaste] GlobalLock(h) → ptr=0x{:x}", ptr as usize);
-        if ptr.is_null() { return Err("GlobalLock 失败".into()); }
         std::ptr::copy_nonoverlapping(raw.as_ptr(), ptr, raw.len());
         GlobalUnlock(h);
-
-        let open_ok = OpenClipboard(0);
-        println!("[filepaste] OpenClipboard → {open_ok}");
-        if open_ok == 0 {
-            let le = windows::Win32::Foundation::GetLastError();
-            println!("[filepaste] OpenClipboard GetLastError={le:?}");
-            return Err("OpenClipboard 失败".into());
-        }
-        let empty_ok = EmptyClipboard();
-        println!("[filepaste] EmptyClipboard → {empty_ok}");
-        let set_result = SetClipboardData(CF_HDROP, h);
-        println!("[filepaste] SetClipboardData(CF_HDROP, h) → {set_result}");
-        if set_result == 0 {
-            let le = windows::Win32::Foundation::GetLastError();
-            println!("[filepaste] SetClipboardData GetLastError={le:?}");
-        }
-        let close_ok = CloseClipboard();
-        println!("[filepaste] CloseClipboard → {close_ok}");
+        OpenClipboard(0);
+        EmptyClipboard();
+        SetClipboardData(CF_HDROP, h);
+        CloseClipboard();
     }
 
-    println!("[paste] {} file(s) written → hide → Ctrl+V", paths.len());
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(150));
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
-
     let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
     let _ = enigo.key(enigo::Key::Control, Press);
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -216,6 +287,54 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
     let _ = enigo.key(enigo::Key::V, Release);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let _ = enigo.key(enigo::Key::Control, Release);
+    Ok(())
+}
+
+/// 桌面场景：SHFileOperation 拷贝文件到桌面（CF_HDROP 不被 WorkerW 接受）
+fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Desktop};
+    use windows::Win32::System::Com::CoTaskMemFree;
+
+    // 获取桌面路径
+    let desktop_path = unsafe {
+        let raw = SHGetKnownFolderPath(&FOLDERID_Desktop, Default::default(), None)
+            .map_err(|e| format!("SHGetKnownFolderPath: {e:?}"))?;
+        let s = raw.to_string().map_err(|_| "桌面路径转换失败")?;
+        let _ = CoTaskMemFree(Some(raw.0 as *mut _));
+        s
+    };
+    let mut dest: Vec<u16> = desktop_path.encode_utf16().collect();
+    dest.push(0); dest.push(0); // 双 \0 结尾
+
+    // 源路径（\0 分隔，双 \0 结尾）
+    let mut src = String::new();
+    for p in paths { src.push_str(p); src.push('\0'); }
+    src.push('\0');
+    let src_wide: Vec<u16> = src.encode_utf16().collect();
+
+    // raw FFI SHFileOperationW（windows crate 的 SHFILEOPSTRUCTW 类型不兼容）
+    #[repr(C)]
+    struct SHFILEOPSTRUCTW_RAW {
+        hwnd: isize, wFunc: u32, pFrom: *const u16, pTo: *const u16,
+        fFlags: u16, fAnyOperationsAborted: i32, hNameMappings: isize,
+        lpszProgressTitle: *const u16,
+    }
+    #[link(name = "shell32")]
+    extern "system" { fn SHFileOperationW(lpFileOp: *mut SHFILEOPSTRUCTW_RAW) -> i32; }
+
+    let mut op = SHFILEOPSTRUCTW_RAW {
+        hwnd: 0, wFunc: 2/*FO_COPY*/, pFrom: src_wide.as_ptr(), pTo: dest.as_ptr(),
+        fFlags: 0x40/*FOF_NOCONFIRMMKDIR*/|0x0040/*FOF_ALLOWUNDO*/,
+        fAnyOperationsAborted: 0, hNameMappings: 0, lpszProgressTitle: std::ptr::null(),
+    };
+
+    println!("[desktop] copying {} file(s) to \"{desktop_path}\"", paths.len());
+    unsafe {
+        let ret = SHFileOperationW(&mut op);
+        if ret != 0 { return Err(format!("SHFileOperation: 错误码 {ret}")); }
+        if op.fAnyOperationsAborted != 0 { println!("[desktop] user cancelled"); }
+    }
+    println!("[desktop] copy done");
     Ok(())
 }
 
