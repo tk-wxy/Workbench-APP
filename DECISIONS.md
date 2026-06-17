@@ -130,7 +130,31 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 
 ---
 
-## 10. Git 版本历史（关键节点）
+## 10. 检测优先级：图片 > 文件 > 文本（截图去重）
+
+**决策**：将 `CF_HDROP → 图片 → 文本` 改为 `图片 → CF_HDROP → 文本`。
+
+**证据**：Win+Shift+S 截图实测（200% DPI, Win11）dump：
+```
+HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
+```
+截图将临时文件路径 `{GUID}.png`（CF_HDROP）与位图数据（CF_BITMAP/DIB/DIBV5）同时写入剪贴板。旧顺序先命中 CF_HDROP → 生成文件条目 → 图片检测被跳过 → 面板不显示截图缩略图。
+
+**实现**：`has_clipboard_image()` 检查 BITMAP/DIB/DIBV5 任一为 true → 走图片分支 → 缓存缩略图。
+
+---
+
+## 11. 桌面文件粘贴：WorkerW 不接受 CF_HDROP → SHFileOperation 兜底
+
+**证据**：EnumWindows 枚举 Win11 桌面窗口树——3 个 WorkerW + 1 个 Progman，均无子窗口。DWM 合成层 WorkerW 不托管 SysListView32，无法通过焦点交还+Ctrl+V 接收 CF_HDROP。
+
+**决策**：桌面场景（目标窗口 class == "WorkerW"/"Progman"）改为 SHFileOperation(FO_COPY) 直接落地文件到桌面，跳过 Ctrl+V。获取桌面路径用 SHGetKnownFolderPath(FOLDERID_Desktop)（非硬编码 %USERPROFILE%\Desktop）。文件夹/其他目标仍走原有焦点交还+Ctrl+V 流程。
+
+**影响范围**：仅 `set_clipboard_files` 桌面分支，不改变文本/图片/文件夹粘贴逻辑。
+
+---
+
+## 12. Git 版本历史（关键节点）
 
 ```
 a7c13b6 新增：剪贴板文件历史（CF_HDROP检测+写入+粘贴）

@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-16
+> **最后更新**：2026-06-17
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -96,7 +96,7 @@ src-tauri/Cargo.toml
 - ✅ 系统托盘常驻 + 开机自启
 - ✅ 应用启动器（扫描 Start Menu / 图标提取 / 搜索 / 点击启动）
 - ✅ 剪贴板文本（复制/粘贴，auto Ctrl+V 到焦点窗口）
-- ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V）
+- ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V/aHash 去重）
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
 - ✅ 文件中转区（拖入暂存/元信息显示/拖出/持久化到 store）
 - ✅ 快捷入口（常用 Windows 位置快速打开）
@@ -155,6 +155,22 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-17
+- **图片去重（aHash）**：`compute_ahash` 8×8 灰度指纹（缩放滤镜用 `FilterType::Nearest`，单次 <1.5ms），后台缓存按「汉明距离≤5 + 尺寸±2px」判重，避免同一截图反复刷历史。entry 新增 `w/h/ahash` 字段
+- **清理**：删除上次调试遗留的 `[skip]`/`[dedup]` 诊断日志、aHash 计时探针，以及桌面调研死代码（`dump_desktop_window_tree`/`find_desktop_listview`/`dump_clipboard_formats`/`enum_*`，均未被调用）
+- **整体落盘**：本次连同此前未提交的「截图去重(图片优先)」「桌面 SHFileOperation 兜底」一并提交（文档 §10/§11/续/续2 此前已写但代码未 commit）。`Cargo.toml` 加 `Win32_System_Com`（`desktop_copy_files` 的 `CoTaskMemFree` 所需）
+- `cargo check` 通过，无新增 dead_code/unused 警告
+
+### 2026-06-16 (续2)
+- **桌面文件粘贴兜底**：WorkerW/Progman 不接受 CF_HDROP → `desktop_copy_files` 用 SHFileOperation(FO_COPY)+SHGetKnownFolderPath(FOLDERID_Desktop) 落地
+- 焦点交还铁律正式例外：桌面场景走 SHFileOperation，文件夹/CabinetWClass 仍走 Ctrl+V
+- 三文档同步：DECISIONS §11、CLAUDE.md 焦点节、MEMORY.md
+
+### 2026-06-16 (续)
+- **截图去重修复**：检测优先级 文件→图片→文本 改为 图片→文件→文本。Win+Shift+S 同时写 CF_HDROP+CF_BITMAP/DIB/DIBV5，图片优先避免截图被误判为文件
+- `has_clipboard_image()` 判定 BITMAP||DIB||DIBV5（非仅 CF_BITMAP）
+- 三文档同步：CLAUDE.md 检测顺序 / DECISIONS.md §10 证据 / MEMORY.md
 
 ### 2026-06-16
 - **文档三件套**：CLAUDE.md（铁律+协作约定）+ DECISIONS.md（10节架构决策+踩坑根因）+ MEMORY.md（现状快照）
