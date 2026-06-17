@@ -567,6 +567,7 @@ pub fn run() {
                         let _ = app.emit("hotkey-hide", ());
                     } else {
                         let _ = window.show();
+                        let _ = window.set_focus();
                         println!("[hotkey] toggle → show");
                         let _ = app.emit("hotkey-show", ());
                     }

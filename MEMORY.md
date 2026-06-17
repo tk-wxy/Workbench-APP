@@ -156,9 +156,11 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-17 (续2)
+- **Esc 焦点回归修复（补丁）**：热键 show 路径补 `window.set_focus()`（与 `tray_toggle` 对齐，原先缺失导致热键呼出后 Esc 的 keydown 无法到达 JS）。Esc handler 改为 `setVisible(false)` + `hideWorkbench()`（即时 CSS 反馈 + Rust hide）
+
 ### 2026-06-17 (续)
-- **Esc 幽灵界面修复**：Esc handler 改接 `hideWorkbench()`（invoke `hide_window`），不再直接 `setVisible(false)`。Rust `hide_window` 命令补 `emit("hotkey-hide")` 同步前端状态。修复后：① Rust `is_visible()` 在 Esc 后正确变 false；② 下次 Ctrl+Space toggle 方向正确（不再需要两次才能唤出）；③ Esc 路径无焦点交还/粘贴副作用
-- 删除本次诊断遗留的 `debug_window_state` 命令（已无用）
+- **Esc 幽灵界面修复**：Esc handler 改接 `hideWorkbench()`（invoke `hide_window`），`hide_window` 命令补 `emit("hotkey-hide")` 同步前端状态，删除诊断遗留的 `debug_window_state`
 
 ### 2026-06-17
 - **图片去重（aHash）**：`compute_ahash` 8×8 灰度指纹（缩放滤镜用 `FilterType::Nearest`，单次 <1.5ms），后台缓存按「汉明距离≤5 + 尺寸±2px」判重，避免同一截图反复刷历史。entry 新增 `w/h/ahash` 字段
