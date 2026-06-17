@@ -402,8 +402,9 @@ fn tray_toggle(app_handle: &AppHandle) {
 #[tauri::command]
 fn hide_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        println!("[hotkey] hide_window called from frontend, is_visible={}", window.is_visible().unwrap_or(false));
         let _ = window.hide();
+        let _ = app.emit("hotkey-hide", ());
+        println!("[hotkey] hide_window: is_visible={}", window.is_visible().unwrap_or(false));
     }
 }
 

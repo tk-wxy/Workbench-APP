@@ -117,6 +117,8 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 
 **双重 SHOW 事件**：`hotkey-show` 在同帧内被 emit 两次（间隔 <1ms），导致 `useEffect([visible])` 重复执行。原因未根除但影响已被现有架构吸收（`useEffect` 第二次执行是幂等的）。
 
+**Esc 幽灵界面修复（2026-06-17）**：原 Esc handler 只调 `setVisible(false)`（纯 CSS opacity/pointer-events 切换），从未调 `window.hide()`，Rust 侧 `is_visible()` 始终 true。CSS `pointer-events:none` 不可靠地等同于 OS-level click-through，偶发拦截点击。修复：Esc 改为调 `hideWorkbench()`（invoke `hide_window`）；Rust `hide_window` 命令在 `window.hide()` 后补 `emit("hotkey-hide")` 通知前端同步 visible 状态。Esc 路径不含焦点交还/Ctrl+V，不会误触发粘贴。
+
 ---
 
 ## 9. 修饰键选择

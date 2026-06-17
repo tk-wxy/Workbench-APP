@@ -13,9 +13,9 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键 toggle + 三类型剪贴板（文本/图片/文件）粘贴 + 后台监听 + 全屏无缝
+- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴 + 后台监听 + 全屏无缝
 - **进行中**：← 无
-- **下一步**：Esc 关闭修复（幽灵界面）、闪烁优化、文件中转区独立于剪贴板文件历史
+- **下一步**：闪烁优化、文件中转区独立于剪贴板文件历史
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -100,7 +100,7 @@ src-tauri/Cargo.toml
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
 - ✅ 文件中转区（拖入暂存/元信息显示/拖出/持久化到 store）
 - ✅ 快捷入口（常用 Windows 位置快速打开）
-- 📋 Esc 关闭偶尔不生效（幽灵界面问题）
+- ✅ Esc 关闭（已修复幽灵界面：改接 Rust `window.hide()` + `emit hotkey-hide` 状态同步）
 - 📋 窗口约 15-20 次开关出现一次闪烁（图片时加重）
 
 ---
@@ -155,6 +155,10 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-17 (续)
+- **Esc 幽灵界面修复**：Esc handler 改接 `hideWorkbench()`（invoke `hide_window`），不再直接 `setVisible(false)`。Rust `hide_window` 命令补 `emit("hotkey-hide")` 同步前端状态。修复后：① Rust `is_visible()` 在 Esc 后正确变 false；② 下次 Ctrl+Space toggle 方向正确（不再需要两次才能唤出）；③ Esc 路径无焦点交还/粘贴副作用
+- 删除本次诊断遗留的 `debug_window_state` 命令（已无用）
 
 ### 2026-06-17
 - **图片去重（aHash）**：`compute_ahash` 8×8 灰度指纹（缩放滤镜用 `FilterType::Nearest`，单次 <1.5ms），后台缓存按「汉明距离≤5 + 尺寸±2px」判重，避免同一截图反复刷历史。entry 新增 `w/h/ahash` 字段

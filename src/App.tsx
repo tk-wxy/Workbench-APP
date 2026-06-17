@@ -133,7 +133,7 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();setVisible(false);return;}
+      if(e.key==="Escape"){e.preventDefault();hideWorkbench();return;}
       if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
       if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a);}
