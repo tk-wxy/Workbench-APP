@@ -13,7 +13,7 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴 + 后台监听 + 全屏无缝 + 呼出白闪修复
+- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复
 - **进行中**：← 无
 - **下一步**：文件中转区独立于剪贴板文件历史
 - **阻塞 / 待决策**：← 无
@@ -156,6 +156,9 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-17 (续4)
+- **图片桌面粘贴**：`set_clipboard_image` 补桌面检测——先 hide+sleep，检查 `GetForegroundWindow` class；WorkerW/Progman 走「PNG→临时文件→SHFileOperation→删临时文件」，非桌面保持原有剪贴板写入+Ctrl+V 流程。逻辑与 `set_clipboard_files` 完全对齐。`base64` 空（当前图）时从 arboard 读 RGBA 再编码 PNG；非空（历史图）直接解码 base64
 
 ### 2026-06-17 (续3)
 - **呼出白闪修复**：`set_focus()` 触发 `WM_ACTIVATE` 导致 WebView2 激活重绘，短暂白帧。修复：emit `hotkey-show` 提前到 `window.show()` 前（前端预渲染深色 CSS），`set_focus()` 移至后台线程延迟 50ms 执行（附可见性守卫），两处 show 路径（hotkey handler + tray_toggle）同步修改
