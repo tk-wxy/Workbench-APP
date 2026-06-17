@@ -481,7 +481,40 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     use enigo::Keyboard;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
-    // 历史图片：缩略图写回剪贴板（当前图已在剪贴板中，跳过）
+    // 先隐藏窗口，再判断目标（与 set_clipboard_files 逻辑对齐）
+    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
+    println!("[imgpaste] foreground class=\"{class1}\"");
+
+    if class1 == "WorkerW" || class1 == "Progman" {
+        // 桌面：PNG 写临时文件 → SHFileOperation 落地
+        let png_bytes: Vec<u8> = if !base64.is_empty() {
+            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+            base64_decode(b64).ok_or("base64 解码失败")?
+        } else {
+            // 当前图：从 arboard 读取 RGBA 再编码为 PNG
+            let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+            let img_data = cb.get_image().map_err(|e| format!("读图: {}", e))?;
+            let rgba_img = image::RgbaImage::from_raw(
+                img_data.width as u32, img_data.height as u32, img_data.bytes.into_owned(),
+            ).ok_or("图片构造失败")?;
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(rgba_img)
+                .write_to(&mut png, image::ImageFormat::Png)
+                .map_err(|e| format!("PNG编码: {}", e))?;
+            png.into_inner()
+        };
+        let tmp = std::env::temp_dir().join(format!("workbench_{}.png", now_ms()));
+        std::fs::write(&tmp, &png_bytes).map_err(|e| format!("写临时文件: {}", e))?;
+        let tmp_str = tmp.to_string_lossy().into_owned();
+        let result = desktop_copy_files(&[tmp_str]);
+        let _ = std::fs::remove_file(&tmp);
+        return result;
+    }
+
+    // 非桌面：历史图写回剪贴板，再 Ctrl+V
     if !base64.is_empty() {
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
         let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
@@ -492,15 +525,11 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
         let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
         cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
             .map_err(|e| format!("写入: {}", e))?;
-        println!("[paste] thumbnail {w}×{h} written back");
+        println!("[imgpaste] thumbnail {w}×{h} written back");
     }
 
-    println!("[paste] image → hide → Ctrl+V");
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(150));
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
-
     let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
     let _ = enigo.key(enigo::Key::Control, Press);
     std::thread::sleep(std::time::Duration::from_millis(20));

@@ -152,7 +152,7 @@ HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
 
 **决策**：桌面场景（目标窗口 class == "WorkerW"/"Progman"）改为 SHFileOperation(FO_COPY) 直接落地文件到桌面，跳过 Ctrl+V。获取桌面路径用 SHGetKnownFolderPath(FOLDERID_Desktop)（非硬编码 %USERPROFILE%\Desktop）。文件夹/其他目标仍走原有焦点交还+Ctrl+V 流程。
 
-**影响范围**：仅 `set_clipboard_files` 桌面分支，不改变文本/图片/文件夹粘贴逻辑。
+**影响范围（扩展至图片，2026-06-17）**：`set_clipboard_image` 同样补入桌面检测——先 hide+sleep，再查 foreground class；WorkerW/Progman 时将图片解码为 PNG 写入 `%TEMP%\workbench_<ts>.png`，`desktop_copy_files` 落地后删除临时文件。`base64` 为空（当前剪贴板图）时从 arboard 读 RGBA 再编码；非空（历史缩略图）直接解码 base64。Ctrl+V 流程保持，不走桌面分支。
 
 ---
 
