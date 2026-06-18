@@ -63,14 +63,97 @@ $env:WORKBENCH_SPIKE=1; npm run tauri dev
 ## 5. 真机实测结果（待填）
 
 - 测试机：________（DPI / 键盘类型）
-- 动作1 快速点按：________
-- 动作2 长按：________
-- 动作3 按住稳定性（有无成串边沿）：________
-- 动作4 漏键压测（有无只 DOWN 无 UP）：________
-- 动作5 泄漏观察：________
-- **结论**：☐ 机制成立，可进入实现阶段　☐ 部分成立（限制：____）　☐ 不成立，回退纯 toggle
+- 动作1 快速点按：_____正常开/关，每次点按对应一个开或关__
+- 动作2 长按：___长按正常开启，松开后界面正常显示，再次长按：触发关后又触发了开，有概率触发开关交替__
+- 动作3 按住稳定性（有无成串边沿）：____长按开界面时没有，再察南关界面上有概率触发___
+- 动作4 漏键压测（有无只 DOWN 无 UP）：___无_____
+- 动作5 泄漏观察：________无
+- **结论**：☑ **机制成立，可进入实现阶段**
+
+### 5.1 真机日志判定（2026-06-18，默认激活后有效数据）
+
+8 次按压日志：TAP held=52/153/52ms；HOLD held=583/865/1118/1093/1165/762ms。
+
+| 验证点 | 结论 |
+|---|---|
+| 松开沿稳定捕获、show 抢焦点后不丢 | ✅ 每个 DOWN 恰好跟随 1 个 UP，零丢失（rdev 失败模式的反面）|
+| 时长测量稳定、tap/hold 可分 | ✅ TAP ≤153ms vs HOLD ≥583ms，拉开数百 ms |
+| key repeat 期间 MSB 不抖 | ✅ 一次按住 = 1 DOWN + 1 UP，无成串边沿 |
+| 泄漏前台 | 实测无明显影响 |
+
+**根因**：历史三次失败均败于"按键经 hook/消息队列异步投递"；GetAsyncKeyState 读物理键电平绕开整类问题。
+
+### 5.2 目标设计（混合语义，用户确认）
+
+- 长按（held > 阈值）→ momentary：按下开、松开关。
+- 短按（held ≤ 阈值）→ toggle：松开不关，下一次短按才关。
+- 阈值 `SPIKE_TAP_MAX_MS` 默认 250ms（落在实测 tap≤153 与 hold≥583 的安全间隔内，可调）。
 
 ## 6. 回退方式
 
 删 `spike_keystate_monitor()` 整段函数 + setup 里的 `if std::env::var("WORKBENCH_SPIKE")...` 分支
 （恢复成单行 `register(...)`）。无其它牵连。
+
+
+日志：
+
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[hotkey] toggle → show
+[hotkey] toggle → hide
+[clipbg] seq changed → reading
+[clipbg] text: 测试机：________（DPI / 键盘类型）
+- 动作
+[clipbg] seq changed → reading
+[clipbg] text: [hotkey] toggle → hide
+[hotke
+

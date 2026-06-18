@@ -592,6 +592,9 @@ fn spike_keystate_monitor(app: AppHandle) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_SPACE};
     /// spike 轮询间隔（25ms ≈ 40Hz，边沿延迟上界即此值）
     const SPIKE_POLL_MS: u64 = 25;
+    /// 短按/长按分界：held ≤ 此值算短按(toggle 语义)，> 此值算长按(momentary 语义)。
+    /// 默认 250ms 落在实测 tap≤153ms 与 hold≥583ms 的安全间隔内
+    const SPIKE_TAP_MAX_MS: u128 = 250;
 
     std::thread::spawn(move || {
         let window = match app.get_webview_window("main") {
@@ -603,40 +606,57 @@ fn spike_keystate_monitor(app: AppHandle) {
             unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000u16) != 0 }
         };
 
-        let start = std::time::Instant::now();              // 统一时间基准，便于对比各行
+        // ── 内嵌的 show / hide 配方（复刻现有路径，不调用/不改现有 handler）──
+        // show：§8 三约束——emit 先于 show（防白闪）；set_focus 延迟 50ms（防 WM_ACTIVATE 重绘）
+        let show = |app: &AppHandle, window: &tauri::WebviewWindow| {
+            let _ = app.emit("hotkey-show", ());
+            let _ = window.show();
+            let win = window.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
+            });
+        };
+        // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
+        let hide = |app: &AppHandle, window: &tauri::WebviewWindow| {
+            let _ = window.hide();
+            let _ = app.emit("hotkey-hide", ());
+        };
+
         let mut prev_combo = false;                          // 上一拍 Ctrl+Space 是否同时按下
         let mut down_at: Option<std::time::Instant> = None;  // 当前这次按住的起点
+        let mut visible_at_press = false;                    // 按下瞬间窗口是否已可见（区分 toggle 开/关）
 
-        println!("[spike] started poll={SPIKE_POLL_MS}ms keys=Ctrl+Space");
-        println!("[spike] 稳定判据: 一次物理按住 = 恰好 1 行 DOWN + 1 行 UP；成串 DOWN/UP = MSB 抖动");
+        println!("[spike] started poll={SPIKE_POLL_MS}ms tap_max={SPIKE_TAP_MAX_MS}ms keys=Ctrl+Space");
+        println!("[spike] 混合语义: 长按>阈值=按下开/松开关(momentary)；短按≤阈值=toggle(松开不关，下次短按才关)");
 
         loop {
             let combo = is_down(VK_CONTROL.0) && is_down(VK_SPACE.0);
-            let t = start.elapsed().as_millis();
 
             if combo && !prev_combo {
                 // ── 按下沿 ──
                 down_at = Some(std::time::Instant::now());
-                println!("[spike] DOWN  t={t}ms");
-                // 复刻现有 show 路径配方（§8 三约束）：emit 先于 show；set_focus 延迟 50ms
-                // → 让窗口"真的抢走键盘焦点"，这样松开沿才是对"焦点无关性"的有效检验
-                let _ = app.emit("hotkey-show", ());
-                let _ = window.show();
-                let win = window.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
-                });
+                visible_at_press = window.is_visible().unwrap_or(false);
+                if !visible_at_press {
+                    // 关 → 开：长按和短按在按下沿都先开（长按要响应，短按打开后是否保持留到松开沿判）
+                    show(&app, &window);
+                }
+                println!("[spike] DOWN  visible_before={visible_at_press}");
             } else if !combo && prev_combo {
-                // ── 松开沿（成败核心：focus 被 set_focus 抢走后，轮询还能否读到"已松开"）──
+                // ── 松开沿：按住时长决定语义 ──
                 let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
-                let class = if held < 200 { "TAP(<200ms)" }
-                            else if held > 300 { "HOLD(>300ms)" }
-                            else { "GRAY(200-300ms)" };
-                println!("[spike] UP    t={t}ms held={held}ms class={class}");
-                // 复刻现有 hide 路径：hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
-                let _ = window.hide();
-                let _ = app.emit("hotkey-hide", ());
+                if held > SPIKE_TAP_MAX_MS {
+                    // 长按 = momentary：松开即关（无论按下时开/关）
+                    hide(&app, &window);
+                    println!("[spike] UP held={held}ms HOLD → hide(momentary)");
+                } else if visible_at_press {
+                    // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
+                    hide(&app, &window);
+                    println!("[spike] UP held={held}ms TAP(was-open) → hide(toggle close)");
+                } else {
+                    // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open）
+                    println!("[spike] UP held={held}ms TAP(was-closed) → keep(toggle open)");
+                }
             }
 
             prev_combo = combo;
