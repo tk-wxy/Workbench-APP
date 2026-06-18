@@ -573,6 +573,78 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
 
 // ── 入口 ───────────────────────────────────────────────────
 
+// ════════════════════════════════════════════════════════════════════
+//  EXPERIMENTAL SPIKE — GetAsyncKeyState 物理键态轮询验证（可整段删除回退）
+//
+//  目的：验证"按住 Ctrl+Space→显示，松开→隐藏"是否可行。历史上 rdev / WH_KEYBOARD_LL /
+//    RegisterHotKey 时长判定均失败（根因：按键经 hook/消息队列异步投递，被焦点抢占破坏或
+//    有 500-800ms 抖动，见 DECISIONS §1/§2）。本 spike 改用 GetAsyncKeyState 读"物理键电平"，
+//    不依赖焦点、不依赖消息队列——这是文档里从未试过的机制。
+//
+//  激活：设环境变量 WORKBENCH_SPIKE=1 再启动；未设时本段完全不运行，现有逻辑零改动。
+//    ⚠️ spike 模式下跳过生产热键注册（见 setup），避免 toggle 与 spike 抢同一 Ctrl+Space、
+//       互相 hide/show 污染测量。现有 handler 闭包代码一字未改。
+//
+//  不接入现有交互：show/hide 在本函数内"复刻"现有 show 路径配方（emit→show→延迟 set_focus），
+//    但不调用、不修改现有 handler/toggle/set_focus。
+// ════════════════════════════════════════════════════════════════════
+fn spike_keystate_monitor(app: AppHandle) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_SPACE};
+    /// spike 轮询间隔（25ms ≈ 40Hz，边沿延迟上界即此值）
+    const SPIKE_POLL_MS: u64 = 25;
+
+    std::thread::spawn(move || {
+        let window = match app.get_webview_window("main") {
+            Some(w) => w,
+            None => { eprintln!("[spike] no main window, abort"); return; }
+        };
+        // MSB(0x8000)=当前物理按下。读"电平"而非"事件"——这是与 RegisterHotKey 的本质区别
+        let is_down = |vk: u16| -> bool {
+            unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000u16) != 0 }
+        };
+
+        let start = std::time::Instant::now();              // 统一时间基准，便于对比各行
+        let mut prev_combo = false;                          // 上一拍 Ctrl+Space 是否同时按下
+        let mut down_at: Option<std::time::Instant> = None;  // 当前这次按住的起点
+
+        println!("[spike] started poll={SPIKE_POLL_MS}ms keys=Ctrl+Space");
+        println!("[spike] 稳定判据: 一次物理按住 = 恰好 1 行 DOWN + 1 行 UP；成串 DOWN/UP = MSB 抖动");
+
+        loop {
+            let combo = is_down(VK_CONTROL.0) && is_down(VK_SPACE.0);
+            let t = start.elapsed().as_millis();
+
+            if combo && !prev_combo {
+                // ── 按下沿 ──
+                down_at = Some(std::time::Instant::now());
+                println!("[spike] DOWN  t={t}ms");
+                // 复刻现有 show 路径配方（§8 三约束）：emit 先于 show；set_focus 延迟 50ms
+                // → 让窗口"真的抢走键盘焦点"，这样松开沿才是对"焦点无关性"的有效检验
+                let _ = app.emit("hotkey-show", ());
+                let _ = window.show();
+                let win = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
+                });
+            } else if !combo && prev_combo {
+                // ── 松开沿（成败核心：focus 被 set_focus 抢走后，轮询还能否读到"已松开"）──
+                let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
+                let class = if held < 200 { "TAP(<200ms)" }
+                            else if held > 300 { "HOLD(>300ms)" }
+                            else { "GRAY(200-300ms)" };
+                println!("[spike] UP    t={t}ms held={held}ms class={class}");
+                // 复刻现有 hide 路径：hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
+                let _ = window.hide();
+                let _ = app.emit("hotkey-hide", ());
+            }
+
+            prev_combo = combo;
+            std::thread::sleep(std::time::Duration::from_millis(SPIKE_POLL_MS));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -615,8 +687,14 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
-            println!("[hotkey] Ctrl+Space registered (pure toggle)");
+            // EXPERIMENTAL: WORKBENCH_SPIKE=1 时跳过生产热键注册，改跑 keystate spike（避免互相干扰）
+            if std::env::var("WORKBENCH_SPIKE").is_ok() {
+                println!("[spike] WORKBENCH_SPIKE set → 跳过生产热键注册，仅运行 keystate spike");
+                spike_keystate_monitor(app.handle().clone());
+            } else {
+                app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
+                println!("[hotkey] Ctrl+Space registered (pure toggle)");
+            }
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
             start_clipboard_monitor(app.handle().clone());
 
