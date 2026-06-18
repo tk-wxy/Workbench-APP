@@ -157,6 +157,11 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-18
+- **桌面粘贴冲突框修复**：`desktop_copy_files` 的 `fFlags` 原为 `0x40|0x0040`（注释写错，实只生效 `FOF_ALLOWUNDO`），导致桌面同名/源==目标时弹冲突框只能取消。改为 `FOF_RENAMEONCOLLISION|FOF_NOCONFIRMATION|FOF_NOCONFIRMMKDIR|FOF_NOERRORUI`（=`0x0618`，windows crate `FILEOP_FLAGS` 常量 `.0 as u16`）。`RENAMEONCOLLISION` 为承重 flag（自动改名对齐 Explorer "X (2)"）；加 `NOERRORUI` 后补 `ret`/`fAnyOperationsAborted` 日志防静默失败
+- **自测**（P/Invoke SHFileOperationW，同 `fFlags=0x0618`、同裸指针双 null 缓冲）：T1 源==目标→"X - 副本.png" 无弹窗；T2 别处同名→改名共存（原+副本）；T3 连续 3 次→(2)/(3)/(4)；T5 多文件冲突→各自改名。全部 ret=0/aborted=0/零对话框。T4 图片桌面落地走单文件同路径，机制一致。GUI 点击/热键链路未改，无法在此环境模拟，仅验证 flag 语义
+- 仅改 `set_clipboard_files` → `desktop_copy_files` 的 flag，未动焦点交还/Ctrl+V/文本/文件夹分支
+
 ### 2026-06-17 (续4)
 - **图片桌面粘贴**：`set_clipboard_image` 补桌面检测——先 hide+sleep，检查 `GetForegroundWindow` class；WorkerW/Progman 走「PNG→临时文件→SHFileOperation→删临时文件」，非桌面保持原有剪贴板写入+Ctrl+V 流程。逻辑与 `set_clipboard_files` 完全对齐。`base64` 空（当前图）时从 arboard 读 RGBA 再编码 PNG；非空（历史图）直接解码 base64
 

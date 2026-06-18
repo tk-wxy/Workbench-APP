@@ -292,7 +292,10 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
 
 /// 桌面场景：SHFileOperation 拷贝文件到桌面（CF_HDROP 不被 WorkerW 接受）
 fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
-    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Desktop};
+    use windows::Win32::UI::Shell::{
+        SHGetKnownFolderPath, FOLDERID_Desktop,
+        FOF_RENAMEONCOLLISION, FOF_NOCONFIRMATION, FOF_NOCONFIRMMKDIR, FOF_NOERRORUI,
+    };
     use windows::Win32::System::Com::CoTaskMemFree;
 
     // 获取桌面路径
@@ -322,17 +325,23 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
     #[link(name = "shell32")]
     extern "system" { fn SHFileOperationW(lpFileOp: *mut SHFILEOPSTRUCTW_RAW) -> i32; }
 
+    // RENAMEONCOLLISION = 承重 flag：同名时自动生成 "X (2).ext"（对齐 Explorer 原生 Ctrl+V 行为）。
+    // NOCONFIRMATION/NOCONFIRMMKDIR/NOERRORUI 抑制确认与错误弹窗，全静默落地。
+    // FILEOP_FLAGS.0 是 u32，Win32 SHFILEOPSTRUCTW.fFlags 实为 WORD(u16)，强转（组合值 0x0618 在 u16 范围内）
+    let flags = (FOF_RENAMEONCOLLISION | FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI).0 as u16;
     let mut op = SHFILEOPSTRUCTW_RAW {
         hwnd: 0, wFunc: 2/*FO_COPY*/, pFrom: src_wide.as_ptr(), pTo: dest.as_ptr(),
-        fFlags: 0x40/*FOF_NOCONFIRMMKDIR*/|0x0040/*FOF_ALLOWUNDO*/,
+        fFlags: flags,
         fAnyOperationsAborted: 0, hNameMappings: 0, lpszProgressTitle: std::ptr::null(),
     };
 
-    println!("[desktop] copying {} file(s) to \"{desktop_path}\"", paths.len());
+    println!("[desktop] copying {} file(s) to \"{desktop_path}\", fFlags={flags:#06x}", paths.len());
     unsafe {
         let ret = SHFileOperationW(&mut op);
+        // NOERRORUI 静默错误，必须打日志便于诊断静默失败
+        println!("[desktop] SHFileOperation ret={ret} aborted={}", op.fAnyOperationsAborted);
         if ret != 0 { return Err(format!("SHFileOperation: 错误码 {ret}")); }
-        if op.fAnyOperationsAborted != 0 { println!("[desktop] user cancelled"); }
+        if op.fAnyOperationsAborted != 0 { println!("[desktop] 操作被中止 (aborted)"); }
     }
     println!("[desktop] copy done");
     Ok(())
