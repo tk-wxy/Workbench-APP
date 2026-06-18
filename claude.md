@@ -2,6 +2,8 @@
 
 Windows 全屏"第二桌面"工具：热键 toggle 呼出覆盖全屏的功能界面（应用启动器 / 文件中转 / 剪贴板历史），用完优雅消失，原桌面不受影响。理念 ≈ "功能增强版的开始菜单"。
 
+> **每次会话开始**：① 看 `MEMORY.md §0`（当前进度 / 下一步 / 待决策）；② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】；③ 需要"为什么这样做"的根因去 `DECISIONS.md`。本文件只放结论与硬规则。
+
 ## 技术栈
 - Tauri 2.0（Rust 后端）+ React 18 + TypeScript + Vite + Tailwind CSS
 - 目标：包体 ~5MB，内存 ~30MB
@@ -40,7 +42,7 @@ npm run tauri build    # 打包
 - 用 `tauri-plugin-global-shortcut`（底层 `RegisterHotKey`）。**不要自己写 `rdev` / `WH_KEYBOARD_LL` 等 OS 级钩子**——均已踩坑失败。
 - **纯 toggle 模式，不做长短按判定**。`RegisterHotKey` 的 Pressed/Released 有 500–800ms 软件延迟，无法判物理按键时长，调阈值无效——别再尝试。
 - 修饰键：不用 `Alt`（裸 Alt 触发菜单栏）、不用 `Alt+Space`（被系统窗口菜单占用）、不用 `Fn`（硬件键，OS 收不到）。用非 Alt 修饰键（如 `Ctrl+空格` / `Ctrl+反引号`）。
-- 加 ~50ms 防抖，过滤 Windows key repeat 的重复 Pressed 事件。
+- 加 ~50ms 防抖（`HOTKEY_DEBOUNCE_MS`），过滤 Windows key repeat 的重复 Pressed 事件。
 
 ### 剪贴板
 > 下列可调数值（轮询 800ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
@@ -60,6 +62,7 @@ npm run tauri build    # 打包
 
 ## 协作约定（给 AI 编码助手）
 - 改完代码要**自己真跑、看日志、用数据说话**，不要只说"请测试"就交差。
+- **真跑不了 GUI 时别假装**：热键 / 桌面点击这类无头环境无法驱动的链路，至少**针对性验证可复现的核心逻辑**（例：本会话用 P/Invoke 直接验证 `SHFileOperation` 的 flag 语义），并在结论里**诚实标注哪些是模拟验证、哪些没真跑**。
 - **诊断优先于修改**：先加日志 / 输出分析确认根因，再动手改。
 - "理论上更优雅" ≠ "实际更好"：已验证的笨方法优于未验证的聪明方法。
 - 出现"焦点回不来"这类**架构性死胡同信号时，果断回退**，不要打补丁硬撑。
