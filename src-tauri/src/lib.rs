@@ -8,10 +8,23 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
-// 50ms 防抖
 static LAST_PRESS_MS: AtomicI64 = AtomicI64::new(0);
 /// 后台监听跳过的 seq 事件次数（set_image 可能触发多次 seq 变化）
 static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+// ── 可调参数 ───────────────────────────────────────────────
+/// 剪贴板后台轮询间隔
+const CLIP_POLL_MS: u64 = 800;
+/// 剪贴板历史缓存上限
+const CLIP_CACHE_MAX: usize = 20;
+/// 图片缩略图最长边（超过则缩放，避免 IPC 传输数十 MB）
+const MAX_THUMB_DIM: u32 = 1024;
+/// 图片去重的 aHash 汉明距离阈值
+const AHASH_MAX_HAMMING: u32 = 5;
+/// 图片去重的尺寸近似阈值（px）
+const AHASH_MAX_DIM_DELTA: i64 = 2;
+/// 热键防抖窗口（过滤 Windows key repeat 的重复 Pressed）
+const HOTKEY_DEBOUNCE_MS: i64 = 50;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -21,13 +34,33 @@ fn now_ms() -> i64 {
 
 static CLIP_CACHE: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 
-/// 后台线程：每 800ms 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端
+/// 将 arboard 图片处理为缓存 entry：>MAX_THUMB_DIM 时缩放(Triangle) → PNG 编码 → aHash。失败返回 None
+fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
+    let w = img.width as u32;
+    let h = img.height as u32;
+    let rgba = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())?;
+    let thumb = if w > MAX_THUMB_DIM || h > MAX_THUMB_DIM {
+        let r = MAX_THUMB_DIM as f64 / w.max(h) as f64;
+        image::DynamicImage::ImageRgba8(rgba)
+            .resize_exact((w as f64 * r) as u32, (h as f64 * r) as u32, image::imageops::FilterType::Triangle)
+    } else {
+        image::DynamicImage::ImageRgba8(rgba)
+    };
+    let mut png = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    let b64 = base64_encode(&png.into_inner());
+    let ah = compute_ahash(&thumb);
+    println!("[clipbg] image {w}×{h} cached");
+    Some(serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah}))
+}
+
+/// 后台线程：每 CLIP_POLL_MS 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端
 fn start_clipboard_monitor(app_handle: AppHandle) {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     std::thread::spawn(move || {
         let mut last_seq = unsafe { GetClipboardSequenceNumber() };
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(800));
+            std::thread::sleep(std::time::Duration::from_millis(CLIP_POLL_MS));
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq == last_seq { continue; }
             last_seq = seq;
@@ -44,24 +77,9 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 let mut cb = match arboard::Clipboard::new() {
                     Ok(c) => c, Err(_) => continue,
                 };
-                if let Ok(img) = cb.get_image() {
-                    let w = img.width as u32; let h = img.height as u32;
-                    let rgba = match image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
-                        Some(r) => r, None => continue,
-                    };
-                    let thumb = if w > 1024 || h > 1024 {
-                        let r = 1024.0 / w.max(h) as f64;
-                        image::DynamicImage::ImageRgba8(rgba)
-                            .resize_exact((w as f64*r) as u32, (h as f64*r) as u32, image::imageops::FilterType::Triangle)
-                    } else { image::DynamicImage::ImageRgba8(rgba) };
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                        let b64 = base64_encode(&png.into_inner());
-                        let ah = compute_ahash(&thumb);
-                        println!("[clipbg] image {w}×{h} cached");
-                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah})
-                    } else { continue }
-                } else { continue }
+                match cb.get_image().ok().and_then(image_to_cache_entry) {
+                    Some(e) => e, None => continue,
+                }
             } else if let Some(paths) = read_clipboard_files() {
                 if paths.is_empty() { continue; }
                 let items: Vec<serde_json::Value> = paths.iter().map(|p| {
@@ -84,24 +102,11 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                         println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
                         serde_json::json!({"type":"text","content":text,"time":now_ms()})
                     } else { continue }
-                } else if let Ok(img) = cb.get_image() {
-                    let w = img.width as u32; let h = img.height as u32;
-                    let rgba = match image::RgbaImage::from_raw(w, h, img.bytes.to_vec()) {
-                        Some(r) => r, None => continue,
-                    };
-                    let thumb = if w > 1024 || h > 1024 {
-                        let r = 1024.0 / w.max(h) as f64;
-                        image::DynamicImage::ImageRgba8(rgba)
-                            .resize_exact((w as f64*r) as u32, (h as f64*r) as u32, image::imageops::FilterType::Triangle)
-                    } else { image::DynamicImage::ImageRgba8(rgba) };
-                    let mut png = std::io::Cursor::new(Vec::new());
-                    if thumb.write_to(&mut png, image::ImageFormat::Png).is_ok() {
-                        let b64 = base64_encode(&png.into_inner());
-                        let ah = compute_ahash(&thumb);
-                        println!("[clipbg] image {w}×{h} cached");
-                        serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah})
-                    } else { continue }
-                } else { continue }
+                } else {
+                    match cb.get_image().ok().and_then(image_to_cache_entry) {
+                        Some(e) => e, None => continue,
+                    }
+                }
             };
 
             let mut cache = CLIP_CACHE.lock().unwrap();
@@ -116,8 +121,8 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                     let cw = e["w"].as_u64().unwrap_or(0) as i64;
                     let ch = e["h"].as_u64().unwrap_or(0) as i64;
                     let ca = e["ahash"].as_u64().unwrap_or(0);
-                    let dim_ok = (cw - ew).abs() <= 2 && (ch - eh).abs() <= 2;
-                    dim_ok && (ah ^ ca).count_ones() <= 5
+                    let dim_ok = (cw - ew).abs() <= AHASH_MAX_DIM_DELTA && (ch - eh).abs() <= AHASH_MAX_DIM_DELTA;
+                    dim_ok && (ah ^ ca).count_ones() <= AHASH_MAX_HAMMING
                 });
                 if dup {
                     println!("[clipbg] image skipped (dup)");
@@ -130,7 +135,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 cache.retain(|e| e["content"] != entry["content"]);
             }
             cache.insert(0, entry.clone());
-            cache.truncate(20);
+            cache.truncate(CLIP_CACHE_MAX);
             let _ = app_handle.emit("clipboard-update", entry);
         }
     });
@@ -317,6 +322,7 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
 
     // raw FFI SHFileOperationW（windows crate 的 SHFILEOPSTRUCTW 类型不兼容）
     #[repr(C)]
+    #[allow(non_snake_case)] // 镜像 Win32 SHFILEOPSTRUCTW 字段名
     struct SHFILEOPSTRUCTW_RAW {
         hwnd: isize, wFunc: u32, pFrom: *const u16, pTo: *const u16,
         fFlags: u16, fAnyOperationsAborted: i32, hNameMappings: isize,
@@ -431,60 +437,6 @@ fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn read_clipboard() -> serde_json::Value {
-    let start = std::time::Instant::now();
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(c) => c,
-        Err(_) => return serde_json::json!({"type": "empty"}),
-    };
-    if let Ok(text) = clipboard.get_text() {
-        println!("[clipboard] read text in {:?}", start.elapsed());
-        if !text.is_empty() {
-            return serde_json::json!({"type": "text", "content": text});
-        }
-    }
-    if let Ok(img) = clipboard.get_image() {
-        let w = img.width as u32;
-        let h = img.height as u32;
-        let rgba = image::RgbaImage::from_raw(w, h, img.bytes.to_vec());
-        if let Some(rgba) = rgba {
-            // 大图缩放：最长边 > 1024px 时缩至 1024px，Triangle 滤镜追求速度
-            const MAX_DIM: u32 = 1024;
-            let thumb = if w > MAX_DIM || h > MAX_DIM {
-                let ratio = MAX_DIM as f64 / w.max(h) as f64;
-                let tw = (w as f64 * ratio) as u32;
-                let th = (h as f64 * ratio) as u32;
-                println!("[clipboard] image {w}×{h} → thumbnail {tw}×{th} in {:?}", start.elapsed());
-                image::DynamicImage::ImageRgba8(rgba).resize_exact(tw, th, image::imageops::FilterType::Triangle)
-            } else {
-                image::DynamicImage::ImageRgba8(rgba)
-            };
-            let mut png_buf = std::io::Cursor::new(Vec::new());
-            if thumb.write_to(&mut png_buf, image::ImageFormat::Png).is_ok() {
-                let b64 = base64_encode(&png_buf.into_inner());
-                return serde_json::json!({"type": "image", "content": format!("data:image/png;base64,{b64}")});
-            }
-        }
-    }
-    serde_json::json!({"type": "empty"})
-}
-
-/// 仅读文本（跳过图片），供轮询使用，避免每次读图编码的开销
-#[tauri::command]
-fn read_clipboard_text() -> serde_json::Value {
-    let mut clipboard = match arboard::Clipboard::new() {
-        Ok(c) => c,
-        Err(_) => return serde_json::json!({"type": "empty"}),
-    };
-    if let Ok(text) = clipboard.get_text() {
-        if !text.is_empty() {
-            return serde_json::json!({"type": "text", "content": text});
-        }
-    }
-    serde_json::json!({"type": "empty"})
-}
-
-#[tauri::command]
 fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
@@ -587,7 +539,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info,
             hide_window, open_file, paste_clipboard,
-            read_clipboard, read_clipboard_text, set_clipboard_image, get_clipboard_history, set_clipboard_files
+            set_clipboard_image, get_clipboard_history, set_clipboard_files
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -599,7 +551,7 @@ pub fn run() {
 
                     let t = now_ms();
                     let last = LAST_PRESS_MS.swap(t, Ordering::SeqCst);
-                    if t - last < 50 {
+                    if t - last < HOTKEY_DEBOUNCE_MS {
                         return; // 过滤同一次物理按键的重复事件
                     }
                     let window = app.get_webview_window("main").unwrap();

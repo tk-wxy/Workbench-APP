@@ -50,6 +50,7 @@ extern "system" {
 }
 
 #[repr(C)]
+#[allow(non_snake_case)] // 镜像 Win32 ICONINFO 字段名
 struct ICONINFO {
     fIcon: i32,
     xHotspot: u32,
@@ -60,6 +61,7 @@ struct ICONINFO {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+#[allow(non_snake_case)] // 镜像 Win32 BITMAPINFOHEADER 字段名
 struct BITMAPINFOHEADER {
     biSize: u32,
     biWidth: i32,
