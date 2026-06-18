@@ -15,6 +15,10 @@ static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔
 const CLIP_POLL_MS: u64 = 800;
+/// 剪贴板被占用（快速复制时源程序短暂锁定）时，本轮内的重试次数
+const CLIP_READ_RETRIES: u32 = 4;
+/// 每次读取重试的间隔
+const CLIP_READ_RETRY_MS: u64 = 60;
 /// 剪贴板历史缓存上限
 const CLIP_CACHE_MAX: usize = 20;
 /// 图片缩略图最长边（超过则缩放，避免 IPC 传输数十 MB）
@@ -54,6 +58,45 @@ fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
     Some(serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah}))
 }
 
+/// 读取当前剪贴板并构建缓存 entry。
+/// - `Ok(Some)` 成功读到内容
+/// - `Ok(None)` 剪贴板可访问但无可缓存内容（空 / 不支持的格式）→ 可推进 seq
+/// - `Err(())`  剪贴板打不开/被占用（快速复制时源程序短暂锁定）→ 应重试，**勿推进 seq**
+fn build_clip_entry() -> Result<Option<serde_json::Value>, ()> {
+    // 检测顺序：图片优先（截图同时有 CF_HDROP+CF_BITMAP/DIB/DIBV5）
+    if has_clipboard_image() {
+        let mut cb = arboard::Clipboard::new().map_err(|_| ())?;
+        let img = cb.get_image().map_err(|_| ())?;
+        return Ok(image_to_cache_entry(img));
+    }
+    if let Some(paths) = read_clipboard_files() {
+        if paths.is_empty() { return Ok(None); }
+        let items: Vec<serde_json::Value> = paths.iter().map(|p| {
+            let name = std::path::Path::new(p).file_name()
+                .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let ext = std::path::Path::new(p).extension()
+                .map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            let is_img = matches!(ext.as_str(), "jpg"|"jpeg"|"png"|"gif"|"webp"|"bmp"|"ico");
+            serde_json::json!({"path":p,"name":name,"ext":ext,"isImage":is_img})
+        }).collect();
+        let count = items.len();
+        println!("[clipbg] {} file(s) copied", count);
+        return Ok(Some(serde_json::json!({"type":"file","items":items,"time":now_ms(),"count":count})));
+    }
+    let mut cb = arboard::Clipboard::new().map_err(|_| ())?;
+    if let Ok(text) = cb.get_text() {
+        if !text.is_empty() {
+            println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
+            return Ok(Some(serde_json::json!({"type":"text","content":text,"time":now_ms()})));
+        }
+        return Ok(None);
+    }
+    if let Ok(img) = cb.get_image() {
+        return Ok(image_to_cache_entry(img));
+    }
+    Ok(None)
+}
+
 /// 后台线程：每 CLIP_POLL_MS 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端
 fn start_clipboard_monitor(app_handle: AppHandle) {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
@@ -63,51 +106,36 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             std::thread::sleep(std::time::Duration::from_millis(CLIP_POLL_MS));
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq == last_seq { continue; }
-            last_seq = seq;
-            // 跳过 set_clipboard_image 自身触发的 seq 变化
+
+            // 跳过 set_clipboard_* 自身写回触发的 seq 变化
             let skip = SKIP_CLIP_EVENTS.load(Ordering::SeqCst);
             if skip > 0 {
                 SKIP_CLIP_EVENTS.store(skip - 1, Ordering::SeqCst);
+                last_seq = seq;
                 continue;
             }
             println!("[clipbg] seq changed → reading");
 
-            // 检测顺序：图片优先（截图同时有 CF_HDROP+CF_BITMAP/DIB/DIBV5）
-            let entry = if has_clipboard_image() {
-                let mut cb = match arboard::Clipboard::new() {
-                    Ok(c) => c, Err(_) => continue,
-                };
-                match cb.get_image().ok().and_then(image_to_cache_entry) {
-                    Some(e) => e, None => continue,
-                }
-            } else if let Some(paths) = read_clipboard_files() {
-                if paths.is_empty() { continue; }
-                let items: Vec<serde_json::Value> = paths.iter().map(|p| {
-                    let name = std::path::Path::new(p).file_name()
-                        .map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let ext = std::path::Path::new(p).extension()
-                        .map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                    let is_img = matches!(ext.as_str(), "jpg"|"jpeg"|"png"|"gif"|"webp"|"bmp"|"ico");
-                    serde_json::json!({"path":p,"name":name,"ext":ext,"isImage":is_img})
-                }).collect();
-                let count = items.len();
-                println!("[clipbg] {} file(s) copied", count);
-                serde_json::json!({"type":"file","items":items,"time":now_ms(),"count":count})
-            } else {
-                let mut cb = match arboard::Clipboard::new() {
-                    Ok(c) => c, Err(_) => continue,
-                };
-                if let Ok(text) = cb.get_text() {
-                    if !text.is_empty() {
-                        println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
-                        serde_json::json!({"type":"text","content":text,"time":now_ms()})
-                    } else { continue }
-                } else {
-                    match cb.get_image().ok().and_then(image_to_cache_entry) {
-                        Some(e) => e, None => continue,
+            // 快速复制时源程序可能短暂占用剪贴板，读取瞬时失败。本轮内快速重试几次；
+            // 仍失败则【不推进 last_seq】，留到下个轮询周期重试——避免"复制过快→读取失败
+            // →seq 已消费→该条目永久不显示"。
+            let mut built: Result<Option<serde_json::Value>, ()> = Err(());
+            for attempt in 0..CLIP_READ_RETRIES {
+                match build_clip_entry() {
+                    Ok(opt) => { built = Ok(opt); break; }
+                    Err(()) => {
+                        if attempt + 1 < CLIP_READ_RETRIES {
+                            std::thread::sleep(std::time::Duration::from_millis(CLIP_READ_RETRY_MS));
+                        }
                     }
                 }
+            }
+            let entry = match built {
+                Ok(Some(e)) => e,
+                Ok(None) => { last_seq = seq; continue; }       // 可访问但无内容：推进，避免重复尝试
+                Err(()) => { println!("[clipbg] clipboard busy, retry next tick"); continue; } // 不推进 → 下轮重试
             };
+            last_seq = seq; // 成功读到内容才推进
 
             let mut cache = CLIP_CACHE.lock().unwrap();
 
