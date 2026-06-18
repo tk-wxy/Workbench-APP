@@ -20,6 +20,8 @@
 
 **结论**：OS 级钩子的正确性依赖极精确的 Win32 消息循环编排，一行错步步错。插件封装好的 API 比自己写的可靠一个数量级。
 
+> 该方案的遗留实现 `src-tauri/src/hotkey.rs`（自建 `WH_KEYBOARD_LL` 钩子）已于 2026-06-18 删除——它从未被 `mod` 声明、不参与编译，留着只会误导。本节保留作为踩坑记录。
+
 ---
 
 ## 2. 长短按判定：为何彻底放弃
@@ -170,12 +172,18 @@ HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
 
 ## 12. Git 版本历史（关键节点）
 
+（仅列关键节点，非完整历史；最新在上）
 ```
-a7c13b6 新增：剪贴板文件历史（CF_HDROP检测+写入+粘贴）
-d11bcf2 图片粘贴修复：去除冗余读写循环
-38df8b9 剪贴板后台监听 + 图片缩放 + 图片自动粘贴
-c04585c 稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
-77de932 修复：工作区定位 + outer→inner 偏移补偿
-9b745de 修复：transparent=true + 50ms防抖 + interval泄漏
-3508350 基线：纯 toggle 模式
+重构清理   删 hotkey.rs/once_cell/死命令 + 静音23警告 + 整合重复 + 修底栏热键
+264b8fa  修复：桌面粘贴冲突框 + 同名自动改名（FOF_RENAMEONCOLLISION）
+347a562  修复：呼出白闪（emit 提前预渲染 + set_focus 延迟）
+（Esc）   修复：Esc 幽灵界面（接 Rust window.hide + emit hotkey-hide 同步）
+f281f11  文档三件套初始化（CLAUDE/DECISIONS/MEMORY）
+a7c13b6  新增：剪贴板文件历史（CF_HDROP检测+写入+粘贴）
+d11bcf2  图片粘贴修复：去除冗余读写循环
+38df8b9  剪贴板后台监听 + 图片缩放 + 图片自动粘贴
+c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
+77de932  修复：工作区定位 + outer→inner 偏移补偿
+9b745de  修复：transparent=true + 50ms防抖 + interval泄漏
+3508350  基线：纯 toggle 模式
 ```

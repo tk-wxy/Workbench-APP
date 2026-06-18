@@ -56,7 +56,7 @@ src/
 
 ```
 src-tauri/src/
-  lib.rs           # 主逻辑：窗口全屏、热键 handler、剪贴板后台线程、Tauri 命令（~400行）
+  lib.rs           # 主逻辑：窗口全屏、热键 handler、剪贴板后台线程、Tauri 命令（~620行）
   apps.rs          # 应用扫描：Start Menu .lnk 解析、ExtractIconEx 图标提取、get_file_info
   main.rs          # Rust 入口
 src-tauri/tauri.conf.json   # 窗口配置：transparent:true/alwaysOnTop/decorations:false
@@ -114,16 +114,13 @@ src-tauri/Cargo.toml
 | `get_clipboard_history` | 获取后台缓存的剪贴板历史 |
 | `paste_clipboard` | 写入文本到剪贴板 + 焦点交还 + Ctrl+V |
 | `set_clipboard_image` | 图片粘贴：历史图写回剪贴板 + 焦点交还 + Ctrl+V |
-| `set_clipboard_files` | 文件粘贴：构造 CF_HDROP + 焦点交还 + Ctrl+V |
-| `read_clipboard` | 读取剪贴板（文本+图片，含大图缩放） |
-| `read_clipboard_text` | 仅读文本（轮询用，跳过图片编码） |
-| `hide_window` | 前端主动隐藏窗口 |
+| `set_clipboard_files` | 文件粘贴：CF_HDROP + 焦点交还 + Ctrl+V（桌面走 SHFileOperation）|
+| `hide_window` | 前端主动隐藏窗口（纯 hide + emit hotkey-hide）|
 | `open_file` | 用默认程序打开文件/文件夹 |
 | `launch_app` | 启动应用（`.exe`/`.lnk` 目标） |
 | `scan_start_menu` | 扫描开始菜单 .lnk 文件（带缓存） |
-| `refresh_apps` | 强制刷新应用列表 |
+| `refresh_apps` | 强制刷新应用列表（已注册，前端暂未接入）|
 | `get_file_info` | 获取文件/文件夹元信息 |
-| `notify_hidden` | 通知 Rust 窗口已隐藏 |
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
@@ -148,7 +145,6 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ## 八、已知问题 / 待优化 〔快照〕
 
 - **闪烁**：窗口约 15-20 次开关闪一次，图片 `<img>` 解码叠加 opacity 过渡时加重（独立问题，未根治）
-- **Esc 关闭**：偶尔不生效（幽灵界面——页面视觉消失但仍拦截点击）
 - **应用图标提取**：UWP 应用（如 Windows Terminal）提取失败，fallback 首字母
 - **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
 - **多显示器**：当前仅适配主显示器工作区
@@ -156,6 +152,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-18 (续：重构清理)
+- **死代码/死依赖**：删除孤儿文件 `hotkey.rs`（已废弃的 WH_KEYBOARD_LL 钩子方案，无 `mod` 声明从不编译）+ 移除其唯一引用的 `once_cell` 依赖；删除前端零调用的死命令 `read_clipboard`/`read_clipboard_text`（轮询早已迁至 Rust 后台）
+- **编译警告**：FFI 镜像结构体（`SHFILEOPSTRUCTW_RAW`/`ICONINFO`/`BITMAPINFOHEADER`）加 `#[allow(non_snake_case)]`，消除 23 条警告
+- **去重**：抽 `image_to_cache_entry` helper，消除后台监听里重复两次的图片处理块；魔法数字提为常量（`CLIP_POLL_MS`/`CLIP_CACHE_MAX`/`MAX_THUMB_DIM`/`AHASH_*`/`HOTKEY_DEBOUNCE_MS`）
+- **前端**：底栏热键提示 `Alt+F1`→`Ctrl+Space`（显示 Bug）；删 10 处 `[frontend]` 调试日志 + 残留 `visibleRef` + 诊断 useEffect
+- **文档**：§六 删除不存在的 `notify_hidden` 命令及已删的 read_clipboard 两条；§八 删去已修复的"Esc 偶尔不生效"
+- 未触碰焦点交还/Ctrl+V 粘贴流程。`cargo check` 零警告、`tsc --noEmit` 通过
 
 ### 2026-06-18
 - **桌面粘贴冲突框修复**：`desktop_copy_files` 的 `fFlags` 原为 `0x40|0x0040`（注释写错，实只生效 `FOF_ALLOWUNDO`），导致桌面同名/源==目标时弹冲突框只能取消。改为 `FOF_RENAMEONCOLLISION|FOF_NOCONFIRMATION|FOF_NOCONFIRMMKDIR|FOF_NOERRORUI`（=`0x0618`，windows crate `FILEOP_FLAGS` 常量 `.0 as u16`）。`RENAMEONCOLLISION` 为承重 flag（自动改名对齐 Explorer "X (2)"）；加 `NOERRORUI` 后补 `ret`/`fAnyOperationsAborted` 日志防静默失败

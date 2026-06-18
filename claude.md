@@ -43,7 +43,8 @@ npm run tauri build    # 打包
 - 加 ~50ms 防抖，过滤 Windows key repeat 的重复 Pressed 事件。
 
 ### 剪贴板
-- 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(800ms)`。
+> 下列可调数值（轮询 800ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+- 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(CLIP_POLL_MS)`。
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
 - 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）；`CLIP_CACHE` 最多 20 条。
 - 图片：>1024px 用 `image` crate `FilterType::Triangle` 缩到 1024px 缩略图再编码。**轮询不读图，只在内容变化时处理一次**。
