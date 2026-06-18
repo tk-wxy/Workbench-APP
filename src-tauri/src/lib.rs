@@ -687,13 +687,15 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // EXPERIMENTAL: WORKBENCH_SPIKE=1 时跳过生产热键注册，改跑 keystate spike（避免互相干扰）
-            if std::env::var("WORKBENCH_SPIKE").is_ok() {
-                println!("[spike] WORKBENCH_SPIKE set → 跳过生产热键注册，仅运行 keystate spike");
-                spike_keystate_monitor(app.handle().clone());
-            } else {
+            // EXPERIMENTAL（验证第 2 轮）：env 注入在本机 npm run tauri dev 链路不生效，
+            // 故反转为"默认直接跑 spike"，无需任何环境变量。
+            // 恢复生产 toggle：设 WORKBENCH_NOSPIKE=1，或直接回退本 spike commit。
+            if std::env::var("WORKBENCH_NOSPIKE").is_ok() {
                 app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
                 println!("[hotkey] Ctrl+Space registered (pure toggle)");
+            } else {
+                println!("[spike] ⚡ 默认激活：跳过生产热键注册，仅运行 keystate spike（恢复 toggle 请设 WORKBENCH_NOSPIKE=1 或回退本 commit）");
+                spike_keystate_monitor(app.handle().clone());
             }
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
             start_clipboard_monitor(app.handle().clone());
