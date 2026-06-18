@@ -153,6 +153,13 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-18 (续2：快速复制丢条目修复)
+- **Bug**：快速复制时偶发"复制后剪贴板不显示该条目"。根因——`start_clipboard_monitor` 在检测到 seq 变化后立刻推进 `last_seq`，再读内容；源程序短暂锁剪贴板导致读取 `continue`，但 seq 已消费，下轮不再重试 → 条目永久丢失
+- **修复**：抽 `build_clip_entry() -> Result<Option,()>` 三态；`Ok(Some)`=读到→推进+缓存、`Ok(None)`=可访问但空→推进、`Err(())`=被占用→本轮重试 `CLIP_READ_RETRIES`(4) 次×`CLIP_READ_RETRY_MS`(60ms)，仍失败则**不推进 last_seq**、下个轮询周期重试。写回跳过(SKIP)路径照常推进
+- 文件：`src-tauri/src/lib.rs`；根因记于 `DECISIONS.md §6`
+- **未真跑验证**（时序竞态只在 live app 后台线程发生，无法在无头环境确定性复现）；逻辑推演 + cargo check 零警告。可复现验证：连续快速复制多条看是否全进历史
+- **相关未修**：`SKIP_CLIP_EVENTS` 计数若写回实际只触发 1 次 seq 变化、残留的 +1 可能吃掉紧随其后的一次真实复制（粘贴后立刻复制的边缘场景，与本次快速复制不同源）——暂记录，未处理
+
 ### 2026-06-18 (续：重构清理)
 - **死代码/死依赖**：删除孤儿文件 `hotkey.rs`（已废弃的 WH_KEYBOARD_LL 钩子方案，无 `mod` 声明从不编译）+ 移除其唯一引用的 `once_cell` 依赖；删除前端零调用的死命令 `read_clipboard`/`read_clipboard_text`（轮询早已迁至 Rust 后台）
 - **编译警告**：FFI 镜像结构体（`SHFILEOPSTRUCTW_RAW`/`ICONINFO`/`BITMAPINFOHEADER`）加 `#[allow(non_snake_case)]`，消除 23 条警告
