@@ -154,6 +154,18 @@ HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
 
 **影响范围（扩展至图片，2026-06-17）**：`set_clipboard_image` 同样补入桌面检测——先 hide+sleep，再查 foreground class；WorkerW/Progman 时将图片解码为 PNG 写入 `%TEMP%\workbench_<ts>.png`，`desktop_copy_files` 落地后删除临时文件。`base64` 为空（当前剪贴板图）时从 arboard 读 RGBA 再编码；非空（历史缩略图）直接解码 base64。Ctrl+V 流程保持，不走桌面分支。
 
+### fFlags 选择（2026-06-18）
+
+**问题**：原 `fFlags` 写成 `0x40/*FOF_NOCONFIRMMKDIR*/|0x0040/*FOF_ALLOWUNDO*/`，注释错误——`0x40` 实为 `FOF_ALLOWUNDO`（真正的 `FOF_NOCONFIRMMKDIR` 是 `0x0200`），两项同值 `|` 后只剩 `FOF_ALLOWUNDO`。结果：① 源文件本就在桌面（源==目标）时弹"源文件名和目标文件名相同"只能取消；② 别处同名文件弹三选一冲突框。而 Explorer 原生 Ctrl+V 会自动改名为 "X (2).ext"。
+
+**决策**：`fFlags = FOF_RENAMEONCOLLISION | FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI`（= `0x0618`），用 `windows 0.58` 的 `FILEOP_FLAGS` 常量 `|` 组合（`.0 as u16`，因该 newtype 包 u32 而 Win32 `fFlags` 实为 WORD）。
+
+- **`FOF_RENAMEONCOLLISION` 是承重 flag**：它才是让同名自动改名（对齐 Explorer "X (2).ext"）的关键。**不能只用 `FOF_NOCONFIRMATION`**——`NOCONFIRMATION` 只是"不弹确认框"，其语义是默认"覆盖/跳过"而非"改名"，单用会静默覆盖或跳过同名文件（丢数据），必须配 `RENAMEONCOLLISION` 才得到改名行为。
+- `FOF_NOCONFIRMATION` / `FOF_NOCONFIRMMKDIR`：抑制其余确认框，全静默。
+- `FOF_NOERRORUI`：抑制错误弹窗（避免桌面粘贴时弹系统错误框打断）——代价是失败会静默，故调用后**必须把 `ret` 与 `fAnyOperationsAborted` 打日志**便于诊断。
+
+**验证**（P/Invoke `SHFileOperationW`，与代码同值 `fFlags=0x0618`、同裸指针双 null 缓冲）：T1 源==目标→生成 "X - 副本.png" 无弹窗（Win11 不拦源==目标，无需 fallback）；T2 别处同名→改名共存；T3 连续 3 次→(2)/(3)/(4)；T5 多文件冲突→各自改名。均 ret=0、aborted=0、零对话框。
+
 ---
 
 ## 12. Git 版本历史（关键节点）
