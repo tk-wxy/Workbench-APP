@@ -13,9 +13,9 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）
 - **进行中**：← 无
-- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）
+- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -81,7 +81,7 @@ src-tauri/Cargo.toml
 ## 四、关键配置 〔快照〕
 
 - **窗口**：`transparent:true / decorations:false / alwaysOnTop:true / skipTaskbar:true / visible:false / focus:false`
-- **当前热键**：`Ctrl+Space`
+- **当前热键**：`Ctrl+Space`——show/hide 由 `GetAsyncKeyState` 物理键态轮询驱动（`start_hotkey_monitor`，25ms）；RegisterHotKey 仅空 handler 消费按键防泄漏。长按 momentary / 短按 toggle，分界 `HOTKEY_TAP_MAX_MS=250ms`
 - **DPI**：开发机 200% 缩放（3200×2000 物理分辨率），窗口几何改动需考虑缩放
 - **工作区尺寸**：运行时用 `SPI_GETWORKAREA` 动态获取（非硬编码），保留任务栏
 - **开发端口**：Vite `1430`，HMR `1431`
@@ -90,7 +90,7 @@ src-tauri/Cargo.toml
 
 ## 五、核心功能模块 〔快照〕
 
-- ✅ 全局热键 toggle 呼出/隐藏（Ctrl+Space，纯 toggle 无长短按）
+- ✅ 全局热键呼出/隐藏（Ctrl+Space）：键态轮询驱动，**长按 momentary（按住显示/松开关闭）+ 短按 toggle**
 - ✅ 全屏窗口 + 毛玻璃背景（`transparent:true` + `backdrop-filter: blur`）
 - ✅ 全屏缝隙修复（SPI_GETWORKAREA + 动态 offset 补偿）
 - ✅ 系统托盘常驻 + 开机自启
@@ -155,6 +155,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-18 (续11：长按热键转正 — GetAsyncKeyState 键态轮询)
+- **历史死胡同破解**：长按 Ctrl+Space（按住显示/松开关闭）之前 rdev/WH_KEYBOARD_LL/RegisterHotKey 时长判定全失败，根因是"按键经 hook/消息队列、被焦点抢占或 500-800ms 抖动"。换信号源——`GetAsyncKeyState` 读物理键电平（不经队列、与焦点无关）——做成了
+- **验证流程**：隔离 spike（env 门控 `73046e3` → 默认激活 `708939d` → 混合语义 `8dfea37`）→ 真机实测松开沿零丢失/MSB 无抖动/tap≤153ms vs hold≥583ms 清晰可分 → 转正
+- **转正实现**（`src-tauri/src/lib.rs`）：
+  - `start_hotkey_monitor`（后台线程 25ms 轮询 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` MSB 边沿检测）驱动 show/hide
+  - 混合语义：长按>`HOTKEY_TAP_MAX_MS`(250ms)=momentary（按下开/松开关）；短按=toggle（按下沿开/松开不关/下次短按才关，用 `visible_at_press` 区分开关态）
+  - RegisterHotKey 降级为**空 handler 仅消费 Ctrl+Space**（防漏键给前台 IME/补全）；删除旧 toggle handler + `LAST_PRESS_MS`/`HOTKEY_DEBOUNCE_MS`/`AtomicI64`/`ShortcutState`
+  - 新增常量 `HOTKEY_POLL_MS`/`HOTKEY_TAP_MAX_MS`（顶部命名常量，调灵敏度改这两个）
+- **文档**：CLAUDE.md 全局热键节 + 死胡同节重写；DECISIONS §1/§2 改写并并入 spike 实测数据；临时 `SPIKE-keystate.md` 已删除
+- `cargo check` 零警告。show/hide 复用 §8 路径配方，未改焦点交还/粘贴流程
 
 ### 2026-06-18 (续10：设置面板 + 背景主题深色/浅色/系统)
 - **新功能**：顶栏右侧齿轮图标 → 居中模态设置面板（Esc / 点遮罩关闭，设置打开时屏蔽应用导航键）
