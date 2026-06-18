@@ -42,11 +42,13 @@ npm run tauri build    # 打包
 - "前台窗口"与"键盘输入焦点"是两个概念——推回焦点的死路见下方【💀 死胡同】。
 
 ### 全局热键
-- 用 `tauri-plugin-global-shortcut`（底层 `RegisterHotKey`），**纯 toggle 模式**（不做长短按，原因见【💀 死胡同】）。
-- 热键 `Ctrl+Space` + `~50ms 防抖（HOTKEY_DEBOUNCE_MS）`，过滤 Windows key repeat 的重复 Pressed 事件。修饰键避坑见【💀 死胡同】。
+- **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——那条路有 500-800ms 抖动（见【💀 死胡同】）。
+- `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
+- **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
+- 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
 
 ### 剪贴板
-> 下列可调数值（轮询 150ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+> 下列可调数值（轮询 150ms / 缓存 20 条 / 缩略图 1024px / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
 > ⚠️ `CLIP_POLL_MS` 别再调大：轮询式监听下，两次复制落在同一采样窗口会"塌缩"丢中间项（详见 DECISIONS §6）；要彻底根治需改事件驱动（`AddClipboardFormatListener`）。
 - 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(CLIP_POLL_MS)`。
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
@@ -63,7 +65,7 @@ npm run tauri build    # 打包
 ### 💀 死胡同（已验证失败，别再试，别浪费时间）
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
 - **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
-- **长短按判定**：`RegisterHotKey` 的 Pressed/Released 有 500–800ms 软件延迟，无法判物理按键时长，阈值 200/300/500ms 全失败。
+- **用 `RegisterHotKey` 的 Pressed/Released 事件判按键时长**：其事件经消息队列异步投递、有 500–800ms 抖动，阈值 200/300/500ms 全失败。⚠️ 注意区分：长短按本身**已实现**，但靠的是 `GetAsyncKeyState` 轮询物理电平（DECISIONS §2），**不是** RegisterHotKey 事件——别再回头试事件时长判定。
 - **修饰键 `Alt`（裸 Alt 触发菜单栏）/ `Alt+Space`（被系统窗口菜单占用）/ `Fn`（硬件键，OS 收不到）**：改用非 Alt 修饰键（`Ctrl+空格` / `Ctrl+反引号`）。
 
 ### 🔍 出问题时反查（症状 → 先查哪条铁律）

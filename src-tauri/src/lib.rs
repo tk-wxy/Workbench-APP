@@ -1,14 +1,13 @@
 mod apps;
 
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
-use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
-static LAST_PRESS_MS: AtomicI64 = AtomicI64::new(0);
 /// 后台监听跳过的 seq 事件次数（set_image 可能触发多次 seq 变化）
 static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
@@ -28,8 +27,11 @@ const MAX_THUMB_DIM: u32 = 1024;
 const AHASH_MAX_HAMMING: u32 = 5;
 /// 图片去重的尺寸近似阈值（px）
 const AHASH_MAX_DIM_DELTA: i64 = 2;
-/// 热键防抖窗口（过滤 Windows key repeat 的重复 Pressed）
-const HOTKEY_DEBOUNCE_MS: i64 = 50;
+/// 热键键态轮询间隔（25ms ≈ 40Hz；松开沿延迟上界即此值。读电平故无需防抖）
+const HOTKEY_POLL_MS: u64 = 25;
+/// 短按/长按分界：held ≤ 此值=短按(toggle 语义)，> 此值=长按(momentary)。
+/// 250ms 落在实测 tap≤153ms 与 hold≥583ms 的安全间隔内
+const HOTKEY_TAP_MAX_MS: u128 = 250;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -574,32 +576,28 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
 // ── 入口 ───────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════════════
-//  EXPERIMENTAL SPIKE — GetAsyncKeyState 物理键态轮询验证（可整段删除回退）
+//  热键监听 — GetAsyncKeyState 物理键态轮询（驱动 show/hide 的唯一真相）
 //
-//  目的：验证"按住 Ctrl+Space→显示，松开→隐藏"是否可行。历史上 rdev / WH_KEYBOARD_LL /
-//    RegisterHotKey 时长判定均失败（根因：按键经 hook/消息队列异步投递，被焦点抢占破坏或
-//    有 500-800ms 抖动，见 DECISIONS §1/§2）。本 spike 改用 GetAsyncKeyState 读"物理键电平"，
-//    不依赖焦点、不依赖消息队列——这是文档里从未试过的机制。
+//  为什么是轮询而非热键事件：历史上 rdev / WH_KEYBOARD_LL / RegisterHotKey 时长判定均失败
+//    （根因：按键经 hook/消息队列异步投递，被 WebView2 抢焦点破坏或有 500-800ms 抖动，
+//    见 DECISIONS §1/§2）。GetAsyncKeyState 读"物理键电平"，不依赖焦点、不依赖消息队列，
+//    实测松开沿零丢失、MSB 无抖动、时长精度 ±一个轮询周期——是唯一走通的机制。
 //
-//  激活：设环境变量 WORKBENCH_SPIKE=1 再启动；未设时本段完全不运行，现有逻辑零改动。
-//    ⚠️ spike 模式下跳过生产热键注册（见 setup），避免 toggle 与 spike 抢同一 Ctrl+Space、
-//       互相 hide/show 污染测量。现有 handler 闭包代码一字未改。
+//  混合语义（见 HOTKEY_TAP_MAX_MS）：
+//    · 长按 held > 阈值  → momentary：按下开、松开关
+//    · 短按 held ≤ 阈值  → toggle：按下沿开、松开不关；下一次短按才关
 //
-//  不接入现有交互：show/hide 在本函数内"复刻"现有 show 路径配方（emit→show→延迟 set_focus），
-//    但不调用、不修改现有 handler/toggle/set_focus。
+//  注：Ctrl+Space 另在 setup 里 RegisterHotKey 注册，但 handler 为空——仅借其"消费"按键、
+//     不漏给前台应用（IME 切换 / 编辑器补全）；show/hide 完全由本轮询驱动。
+//     show/hide 复刻 §8 路径配方（emit→show→延迟 set_focus / 纯 hide+emit）。
 // ════════════════════════════════════════════════════════════════════
-fn spike_keystate_monitor(app: AppHandle) {
+fn start_hotkey_monitor(app: AppHandle) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_SPACE};
-    /// spike 轮询间隔（25ms ≈ 40Hz，边沿延迟上界即此值）
-    const SPIKE_POLL_MS: u64 = 25;
-    /// 短按/长按分界：held ≤ 此值算短按(toggle 语义)，> 此值算长按(momentary 语义)。
-    /// 默认 250ms 落在实测 tap≤153ms 与 hold≥583ms 的安全间隔内
-    const SPIKE_TAP_MAX_MS: u128 = 250;
 
     std::thread::spawn(move || {
         let window = match app.get_webview_window("main") {
             Some(w) => w,
-            None => { eprintln!("[spike] no main window, abort"); return; }
+            None => { eprintln!("[hotkey] no main window, abort"); return; }
         };
         // MSB(0x8000)=当前物理按下。读"电平"而非"事件"——这是与 RegisterHotKey 的本质区别
         let is_down = |vk: u16| -> bool {
@@ -627,8 +625,7 @@ fn spike_keystate_monitor(app: AppHandle) {
         let mut down_at: Option<std::time::Instant> = None;  // 当前这次按住的起点
         let mut visible_at_press = false;                    // 按下瞬间窗口是否已可见（区分 toggle 开/关）
 
-        println!("[spike] started poll={SPIKE_POLL_MS}ms tap_max={SPIKE_TAP_MAX_MS}ms keys=Ctrl+Space");
-        println!("[spike] 混合语义: 长按>阈值=按下开/松开关(momentary)；短按≤阈值=toggle(松开不关，下次短按才关)");
+        println!("[hotkey] keystate monitor started poll={HOTKEY_POLL_MS}ms tap_max={HOTKEY_TAP_MAX_MS}ms keys=Ctrl+Space");
 
         loop {
             let combo = is_down(VK_CONTROL.0) && is_down(VK_SPACE.0);
@@ -638,29 +635,25 @@ fn spike_keystate_monitor(app: AppHandle) {
                 down_at = Some(std::time::Instant::now());
                 visible_at_press = window.is_visible().unwrap_or(false);
                 if !visible_at_press {
-                    // 关 → 开：长按和短按在按下沿都先开（长按要响应，短按打开后是否保持留到松开沿判）
+                    // 关 → 开：长按和短按在按下沿都先开（长按要即时响应，短按打开后是否保持留到松开沿判）
                     show(&app, &window);
                 }
-                println!("[spike] DOWN  visible_before={visible_at_press}");
             } else if !combo && prev_combo {
                 // ── 松开沿：按住时长决定语义 ──
                 let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
-                if held > SPIKE_TAP_MAX_MS {
+                if held > HOTKEY_TAP_MAX_MS {
                     // 长按 = momentary：松开即关（无论按下时开/关）
                     hide(&app, &window);
-                    println!("[spike] UP held={held}ms HOLD → hide(momentary)");
                 } else if visible_at_press {
                     // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
                     hide(&app, &window);
-                    println!("[spike] UP held={held}ms TAP(was-open) → hide(toggle close)");
                 } else {
-                    // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open）
-                    println!("[spike] UP held={held}ms TAP(was-closed) → keep(toggle open)");
+                    // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open），无需动作
                 }
             }
 
             prev_combo = combo;
-            std::thread::sleep(std::time::Duration::from_millis(SPIKE_POLL_MS));
+            std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
         }
     });
 }
@@ -679,44 +672,16 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, shortcut, event| {
-                    if shortcut.mods != Modifiers::CONTROL || shortcut.key != Code::Space { return; }
-                    if event.state != ShortcutState::Pressed { return; }
-
-                    let t = now_ms();
-                    let last = LAST_PRESS_MS.swap(t, Ordering::SeqCst);
-                    if t - last < HOTKEY_DEBOUNCE_MS {
-                        return; // 过滤同一次物理按键的重复事件
-                    }
-                    let window = app.get_webview_window("main").unwrap();
-                    if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
-                        println!("[hotkey] toggle → hide");
-                        let _ = app.emit("hotkey-hide", ());
-                    } else {
-                        let _ = app.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
-                        let _ = window.show();
-                        println!("[hotkey] toggle → show");
-                        let win = window.clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                            if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
-                        });
-                    }
-                })
+                // handler 故意为空：注册 Ctrl+Space 仅为"消费"该键、不漏给前台应用；
+                // 真正的 show/hide 由 start_hotkey_monitor 的物理键态轮询驱动（见该函数注释）
+                .with_handler(|_app, _shortcut, _event| {})
                 .build(),
         )
         .setup(|app| {
-            // EXPERIMENTAL（验证第 2 轮）：env 注入在本机 npm run tauri dev 链路不生效，
-            // 故反转为"默认直接跑 spike"，无需任何环境变量。
-            // 恢复生产 toggle：设 WORKBENCH_NOSPIKE=1，或直接回退本 spike commit。
-            if std::env::var("WORKBENCH_NOSPIKE").is_ok() {
-                app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
-                println!("[hotkey] Ctrl+Space registered (pure toggle)");
-            } else {
-                println!("[spike] ⚡ 默认激活：跳过生产热键注册，仅运行 keystate spike（恢复 toggle 请设 WORKBENCH_NOSPIKE=1 或回退本 commit）");
-                spike_keystate_monitor(app.handle().clone());
-            }
+            // 注册 Ctrl+Space 仅用于"消费"该键（防漏给前台：IME 切换 / 编辑器补全）；
+            // 实际 show/hide 由下面的物理键态轮询驱动（长按 momentary + 短按 toggle）
+            app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
+            start_hotkey_monitor(app.handle().clone());
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
             start_clipboard_monitor(app.handle().clone());
 

@@ -10,9 +10,11 @@
 
 ---
 
-## 1. 全局热键：RegisterHotKey vs 自建钩子
+## 1. 全局热键：RegisterHotKey vs 自建钩子 vs 键态轮询
 
-**最终方案**：`tauri-plugin-global-shortcut`（底层 `RegisterHotKey`），纯 toggle 模式，Ctrl+Space。
+**最终方案（2026-06-18 演进）**：**`GetAsyncKeyState` 物理键态轮询**驱动 show/hide（`start_hotkey_monitor`，25ms 读 MSB）；`RegisterHotKey`（`tauri-plugin-global-shortcut`）降级为**仅消费 Ctrl+Space**（空 handler，防漏键给前台），不再承担 show/hide。Ctrl+Space。
+
+> 早期（2026-06-14 ~ 06-15）为纯 toggle、由 RegisterHotKey 的 Pressed 事件驱动 + 50ms 防抖过滤 key repeat。06-18 实现"长按 momentary + 短按 toggle"时，证明 RegisterHotKey 事件不堪用（§2），改走键态轮询。
 
 ### 踩坑路径
 
@@ -30,13 +32,25 @@
 
 ---
 
-## 2. 长短按判定：为何彻底放弃
+## 2. 长短按判定：从"彻底放弃"到"换信号源做成"
 
-**最终方案**：不做长短按，纯 toggle。
+**最终方案（2026-06-18）**：用 `GetAsyncKeyState` 轮询物理键电平做长短按区分，**成了**。
+- 长按（`held > HOTKEY_TAP_MAX_MS=250ms`）= momentary：按下开、松开关。
+- 短按（`held ≤ 250ms`）= toggle：按下沿开、松开不关；下一次短按才关（用"按下瞬间窗口是否已可见"区分开/关态）。
 
-**根因**：`RegisterHotKey` 的 `Pressed` 和 `Released` 事件通过 Windows 消息队列异步投递。两台真实机器上实测延迟在 500-800ms。用两个异步事件的时间差判定物理按键时长，从根本上不可靠。
+**当年为何放弃（仍成立的死路）**：`RegisterHotKey` 的 `Pressed`/`Released` 经 Windows 消息队列异步投递，两台真机实测 500-800ms 抖动；用两个异步事件的时间差判物理按键时长，本质不可靠。阈值 200/300/500ms 全失败——**问题在信号源，不在阈值**。
 
-**尝试的阈值**：200ms / 300ms / 500ms — 全部失败。调整数值无效，信号源本质有不可控延迟抖动。
+**这次为何成（关键洞察）**：根因是"信号源是事件"，不是"长短按思路不可行"。换一条**从未试过**的信号源——`GetAsyncKeyState` 读物理键电平（MSB=当前是否按下），它不经消息队列、不依赖焦点、不受 key repeat 影响。
+
+**Spike 实测数据（2026-06-18，真机）**：
+- 松开沿：每个 DOWN 恰好跟随 1 个 UP，**零丢失**（rdev 在 WebView2 抢焦点后丢 KeyRelease 的反面）。
+- 时长：TAP held=52/153/52ms vs HOLD held=583~1165ms，拉开数百 ms，250ms 阈值安全。
+- 抖动：一次物理按住 = 1 DOWN+1 UP，**MSB 无抖动**（vs RegisterHotKey 的 500-800ms）。
+- 泄漏：纯轮询不消费按键 → 故保留 RegisterHotKey 空 handler 仅作"消费"屏蔽（见 §1）。
+
+**轮询代价**：25ms × 2 次 `GetAsyncKeyState`（µs 级 syscall）+ 常驻线程，开销可忽略。
+
+> 验证用的隔离 spike（env 门控 → 默认激活 → 混合语义三次迭代）见 git 历史 `73046e3`/`708939d`/`8dfea37`；转正后临时记录 `SPIKE-keystate.md` 已删除，结论并入本节。
 
 ---
 
