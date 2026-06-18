@@ -31,18 +31,19 @@ npm run tauri build    # 打包
 
 ### 窗口 / 焦点（最高危区）
 - **一次只改一个焦点 / 激活 / 窗口相关的变量**。捆绑改动必出连锁 bug。
-- `tauri.conf.json` 中 `transparent: true` **必须保持**。改成 false 会触发全屏 + blur 的 GPU 合成开销，导致 hide/show 延迟 + 空白页闪烁。
-- 窗口配置基线（在 tauri.conf.json）：`decorations:false, alwaysOnTop:true, skipTaskbar:true, visible:false, focus:false`。**`focus:false` 不能改**——抢焦点会破坏热键。
+- **`tauri.conf.json` 锁定项**：`transparent:true`（改 false → 全屏 + blur 的 GPU 合成开销 → hide/show 延迟 + 空白页闪烁）和 `focus:false`（抢焦点会破坏热键）**都不能改**；其余基线 `decorations:false / alwaysOnTop:true / skipTaskbar:true / visible:false`。
 - 可见性的**唯一真相是 `window.is_visible()`（Rust）**。Rust 直接 `show()/hide()`，`emit` 只用于同步前端状态。**绝不让前端管 hide**（会引入 IPC 往返延迟，表现为"空白页后延迟关闭"）。
-- 焦点交还机制（文本 / 图片 / 文件夹粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
+- **呼出(show)路径的三条耦合约束，别"顺手简化"**（横跨"幽灵界面 / Esc 失灵 / 白闪"三次修复才凑齐，两处 show 路径——hotkey handler + tray_toggle——必须一致）：
+  ① `emit("hotkey-show")` 必须**在 `window.show()` 之前**（前端先渲染深色 CSS，否则白闪）；
+  ② `set_focus()` **必须有**（否则键盘焦点不在窗口，Esc 的 keydown 到不了 JS → Esc 没反应）；
+  ③ `set_focus()` 必须**延迟执行**（50ms 后台线程 + 可见性守卫；立刻调会触发 `WM_ACTIVATE` 重绘 → 白闪）。
+- 关闭/粘贴的**焦点交还流程**（文本 / 图片 / 文件夹粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
   `window.hide()` → `sleep(150ms)` → `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
-- "前台窗口"与"键盘输入焦点"是两个概念。**不要再试 `WS_EX_NOACTIVATE` 推回焦点的方案——已验证失败**（WebView2 内部 `SetFocus` 会抢占路由，外部进程无权推回）。
+- "前台窗口"与"键盘输入焦点"是两个概念——推回焦点的死路见下方【💀 死胡同】。
 
 ### 全局热键
-- 用 `tauri-plugin-global-shortcut`（底层 `RegisterHotKey`）。**不要自己写 `rdev` / `WH_KEYBOARD_LL` 等 OS 级钩子**——均已踩坑失败。
-- **纯 toggle 模式，不做长短按判定**。`RegisterHotKey` 的 Pressed/Released 有 500–800ms 软件延迟，无法判物理按键时长，调阈值无效——别再尝试。
-- 修饰键：不用 `Alt`（裸 Alt 触发菜单栏）、不用 `Alt+Space`（被系统窗口菜单占用）、不用 `Fn`（硬件键，OS 收不到）。用非 Alt 修饰键（如 `Ctrl+空格` / `Ctrl+反引号`）。
-- 加 ~50ms 防抖（`HOTKEY_DEBOUNCE_MS`），过滤 Windows key repeat 的重复 Pressed 事件。
+- 用 `tauri-plugin-global-shortcut`（底层 `RegisterHotKey`），**纯 toggle 模式**（不做长短按，原因见【💀 死胡同】）。
+- 热键 `Ctrl+Space` + `~50ms 防抖（HOTKEY_DEBOUNCE_MS）`，过滤 Windows key repeat 的重复 Pressed 事件。修饰键避坑见【💀 死胡同】。
 
 ### 剪贴板
 > 下列可调数值（轮询 800ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
@@ -57,6 +58,24 @@ npm run tauri build    # 打包
 ### 窗口尺寸
 - 用**工作区（work area）尺寸**而非物理全屏，保留任务栏。
 - 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
+
+### 💀 死胡同（已验证失败，别再试，别浪费时间）
+- **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
+- **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
+- **长短按判定**：`RegisterHotKey` 的 Pressed/Released 有 500–800ms 软件延迟，无法判物理按键时长，阈值 200/300/500ms 全失败。
+- **修饰键 `Alt`（裸 Alt 触发菜单栏）/ `Alt+Space`（被系统窗口菜单占用）/ `Fn`（硬件键，OS 收不到）**：改用非 Alt 修饰键（`Ctrl+空格` / `Ctrl+反引号`）。
+
+### 🔍 出问题时反查（症状 → 先查哪条铁律）
+| 症状 | 大概率违反 |
+|------|-----------|
+| 空白页后延迟关闭 | 前端管了 hide / `transparent:false` |
+| 呼出白闪 | `set_focus` 太早 / `hotkey-show` 没提前于 `show()` |
+| Esc 没反应 | show 路径缺 `set_focus()` |
+| 焦点回不来、粘贴失败 | 碰了 `WS_EX_NOACTIVATE` 死胡同 |
+| 文件粘贴被 Explorer 拒绝 | `DROPFILES.fWide ≠ 1` |
+| 截图不显示缩略图 | 检测顺序没把图片排在 CF_HDROP 之前 |
+| 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
+| 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
 
 ---
 
