@@ -5490,7 +5490,6 @@ dependencies = [
  "enigo",
  "flate2",
  "image",
- "once_cell",
  "parselnk",
  "serde",
  "serde_json",
