@@ -15,8 +15,6 @@ async function hideWorkbench() { try { const { invoke } = await import("@tauri-a
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
-  // 诊断：监听 visible 变化
-  useEffect(() => { console.log("[frontend] visible state changed to:", visible); }, [visible]);
   const [search, setSearch] = useState("");
   const [time, setTime] = useState("");
   const [apps, setApps] = useState<AppInfo[]>([]);
@@ -38,29 +36,15 @@ export default function App() {
   const saveFiles = useCallback(async (list:FileEntry[]) => { setFiles(list); if(store){ await store.set("file-list",list.map(f=>f.path)); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const u={...appFreq,[p]:(appFreq[p]??0)+1}; setAppFreq(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appFreq,store]);
 
-  // ── 诊断 ref ──
-  const visibleRef = useRef(false);
-
-  // ── 核心：事件监听（只注册一次，依赖[]） ──
+  // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
     let cleanup: (() => void)[] = [];
-    console.log("[frontend] useEffect setup — registering listeners ONCE");
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const un1 = await listen("hotkey-show", () => {
-          console.log("[frontend] SHOW opacity→1 at", performance.now().toFixed(1), "ms");
-          visibleRef.current = true;
-          setVisible(true);
-        });
-        const un2 = await listen("hotkey-hide", () => {
-          console.log("[frontend] ← hotkey-hide received, current visibleRef=", visibleRef.current);
-          visibleRef.current = false;
-          setVisible(false);
-          // Rust 侧已直接 window.hide()，前端只需同步状态
-        });
+        const un1 = await listen("hotkey-show", () => setVisible(true));
+        const un2 = await listen("hotkey-hide", () => setVisible(false));
         const un3 = await listen("clipboard-update", (event: any) => {
-          console.log("[frontend] ← clipboard-update, type=", event.payload.type);
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
           setClipboard(prev => {
             const filtered = prev.filter(x => {
@@ -72,13 +56,9 @@ export default function App() {
           });
         });
         cleanup = [un1, un2, un3];
-        console.log("[frontend] listeners registered OK");
-      } catch (e) { console.error("[frontend] listen error:", e); }
+      } catch (e) { console.error("listen error:", e); }
     })();
-    return () => {
-      console.log("[frontend] useEffect cleanup — unlisten");
-      cleanup.forEach(fn => fn());
-    };
+    return () => { cleanup.forEach(fn => fn()); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
@@ -89,7 +69,6 @@ export default function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number}[]>("get_clipboard_history");
         if (history.length) {
-          console.log("[frontend] loaded", history.length, "clip items from cache");
           setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count })));
         }
       } catch {}
@@ -100,7 +79,7 @@ export default function App() {
       (async () => {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          let list = await invoke<AppInfo[]>("scan_start_menu");
+          const list = await invoke<AppInfo[]>("scan_start_menu");
           list.sort((a,b) => (appFreq[b.path]??0) - (appFreq[a.path]??0));
           setApps(list);
         } catch {}
@@ -119,7 +98,6 @@ export default function App() {
   const removeFile = useCallback(async (i:number) => { await saveFiles(files.filter((_,j)=>j!==i)); }, [files,saveFiles]);
   const openFile = useCallback(async (f:FileEntry) => { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("open_file",{path:f.path}); } catch{} await hideWorkbench(); }, []);
   const copyAndPaste = useCallback(async (item:ClipItem) => {
-    console.log("[frontend] copyAndPaste called, type=", item.type);
     if (item.type === "text") { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
     else if (item.type === "file" && item.items) {
       try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); }
@@ -206,7 +184,7 @@ export default function App() {
       </main>
       <footer className="bottom-bar">
         <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} 核</span></div>
-        <div className="bot-center"><kbd>Alt+F1</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
+        <div className="bot-center"><kbd>Ctrl+Space</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
         <div className="bot-right"><span>Workbench v0.1.0</span></div>
       </footer>
     </div>
