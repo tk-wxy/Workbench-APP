@@ -13,8 +13,9 @@ static LAST_PRESS_MS: AtomicI64 = AtomicI64::new(0);
 static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 // ── 可调参数 ───────────────────────────────────────────────
-/// 剪贴板后台轮询间隔
-const CLIP_POLL_MS: u64 = 800;
+/// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
+/// 故压低采样窗口。seq 检查是 µs 级，提频几乎零成本）
+const CLIP_POLL_MS: u64 = 150;
 /// 剪贴板被占用（快速复制时源程序短暂锁定）时，本轮内的重试次数
 const CLIP_READ_RETRIES: u32 = 4;
 /// 每次读取重试的间隔

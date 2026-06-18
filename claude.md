@@ -46,7 +46,8 @@ npm run tauri build    # 打包
 - 热键 `Ctrl+Space` + `~50ms 防抖（HOTKEY_DEBOUNCE_MS）`，过滤 Windows key repeat 的重复 Pressed 事件。修饰键避坑见【💀 死胡同】。
 
 ### 剪贴板
-> 下列可调数值（轮询 800ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+> 下列可调数值（轮询 150ms / 缓存 20 条 / 缩略图 1024px / 防抖 50ms / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `HOTKEY_DEBOUNCE_MS` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+> ⚠️ `CLIP_POLL_MS` 别再调大：轮询式监听下，两次复制落在同一采样窗口会"塌缩"丢中间项（详见 DECISIONS §6）；要彻底根治需改事件驱动（`AddClipboardFormatListener`）。
 - 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(CLIP_POLL_MS)`。
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
 - 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）；`CLIP_CACHE` 最多 20 条。

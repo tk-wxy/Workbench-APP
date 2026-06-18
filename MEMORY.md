@@ -153,6 +153,12 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-18 (续3：快速连复制采样塌缩)
+- **Bug**：连续快速复制两个文件，少一个进历史。根因 ≠ 续2 的锁定问题——是**轮询采样塌缩**：两次复制落在同一 800ms 窗口内，醒来只读到后者，前者内容已被覆盖、不可恢复
+- **修复（用户选"提速轮询"）**：`CLIP_POLL_MS` 800→150ms。改一个常量、零新架构。手动连复制（两次通常 >300ms）基本不丢；seq 检查 µs 级，提频近乎零成本
+- **残留**：<150ms 的脚本级超快连发仍可能塌缩。彻底根治需事件驱动（`AddClipboardFormatListener`+`WM_CLIPBOARDUPDATE`），代价是 message-only 窗口+线程消息循环（DECISIONS §1 风险区），用户暂选不上
+- 文件：`src-tauri/src/lib.rs`（仅常量）；根因记于 `DECISIONS.md §6`。⚠️ `CLIP_POLL_MS` 别再调大
+
 ### 2026-06-18 (续2：快速复制丢条目修复)
 - **Bug**：快速复制时偶发"复制后剪贴板不显示该条目"。根因——`start_clipboard_monitor` 在检测到 seq 变化后立刻推进 `last_seq`，再读内容；源程序短暂锁剪贴板导致读取 `continue`，但 seq 已消费，下轮不再重试 → 条目永久丢失
 - **修复**：抽 `build_clip_entry() -> Result<Option,()>` 三态；`Ok(Some)`=读到→推进+缓存、`Ok(None)`=可访问但空→推进、`Err(())`=被占用→本轮重试 `CLIP_READ_RETRIES`(4) 次×`CLIP_READ_RETRY_MS`(60ms)，仍失败则**不推进 last_seq**、下个轮询周期重试。写回跳过(SKIP)路径照常推进
