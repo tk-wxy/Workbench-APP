@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-17
+> **最后更新**：2026-06-18
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,9 +13,9 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复
+- **当前稳定**：Ctrl+Space 热键 toggle + Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）
 - **进行中**：← 无
-- **下一步**：文件中转区独立于剪贴板文件历史
+- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -102,6 +102,7 @@ src-tauri/Cargo.toml
 - ✅ 快捷入口（常用 Windows 位置快速打开）
 - ✅ Esc 关闭（已修复幽灵界面：改接 Rust `window.hide()` + `emit hotkey-hide` 状态同步）
 - ✅ 呼出白闪（已修复：emit hotkey-show 提前到 show 前预渲染，set_focus 延迟 50ms 线程执行）
+- ✅ 设置面板（顶栏齿轮 → 居中模态）：背景主题（深色/浅色/系统默认，CSS 变量 + data-theme 切换）+ 清空剪贴板历史 + 关于/版本
 - 📋 窗口偶发闪烁（图片解码时加重，预渲染方案已大幅缓解，剩余概率未知）
 
 ---
@@ -121,6 +122,8 @@ src-tauri/Cargo.toml
 | `scan_start_menu` | 扫描开始菜单 .lnk 文件（带缓存） |
 | `refresh_apps` | 强制刷新应用列表（已注册，前端暂未接入）|
 | `get_file_info` | 获取文件/文件夹元信息 |
+| `delete_clipboard_item` | 从后台缓存删除指定剪贴板条目（按 time）|
+| `clear_clipboard_history` | 清空后台 CLIP_CACHE 全部条目（设置面板"清空"）|
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
@@ -152,6 +155,59 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-18 (续10：设置面板 + 背景主题深色/浅色/系统)
+- **新功能**：顶栏右侧齿轮图标 → 居中模态设置面板（Esc / 点遮罩关闭，设置打开时屏蔽应用导航键）
+- **背景主题**：深色 / 浅色 / 系统默认。CSS 把散落的白色系 `rgba(255,255,255,*)` 表面填充收敛为变量 `--fill-1/--fill-2`，新增 `[data-theme="light"]` 覆盖配色变量（置于 `:root` 之后取胜）；前端 `theme` state 解析为 `data-theme` 属性挂到 `<html>`，"系统"用 `matchMedia('(prefers-color-scheme: dark)')` 跟随 OS 并实时响应切换；持久化到 store key `theme`
+- **设置项**：① 背景主题 segmented 控件 ② 清空剪贴板历史（新增 Rust 命令 `clear_clipboard_history` 清空 CLIP_CACHE + 前端 state）③ 关于/版本（v0.1.0 + 热键提示）
+- 未纳入（本轮用户未选）：开机自启开关、清空文件中转区
+- 文件：`src-tauri/src/lib.rs`（+`clear_clipboard_history` 命令及注册）/ `src/App.tsx`（theme/settingsOpen state + 主题 effect + changeTheme/clearClipboard + 齿轮按钮 + 模态 JSX + Esc 分流）/ `src/App.css`（`--fill-*` 变量 + light 主题块 + 设置/模态样式）
+- **验证**：`tsc --noEmit` 零错误、`cargo check` 零警告。⚠️ 主题视觉效果与模态交互**未真跑 GUI**（无头环境无法驱动）；逻辑与编译已确认，需 `npm run tauri dev` 实测浅色配色观感 + 主题切换 + 清空按钮
+- 未触碰窗口/焦点/热键/粘贴流程
+
+### 2026-06-18 (续9：去除图标快捷方式箭头 overlay — 已验证)
+- **失败尝试**：`SHGFI_ICONLOCATION + ExtractIconExW`——66% 应用的 `szDisplayName` 为空（数据：`nosrc=124/188`），大量走 fallback，基本无效
+- **正确方案**：`SHGFI_ICON | SHGFI_LARGEICON | SHGFI_SYSICONINDEX` 取系统图像列表句柄 himl，再 `ImageList_GetIcon(himl, shfi.iIcon, ILD_NORMAL)` 取 base icon。系统图像列表存无 overlay 的原始图标，overlay 是 Shell 绘制时叠加的，`ILD_NORMAL(0)` 不含 overlay mask
+- **实测数据**：改后 `clean=188 fallback=0`（100% 覆盖），用户确认箭头消失
+- 文件：`src-tauri/src/apps.rs`（comctl32 FFI `ImageList_GetIcon` + 重写 `extract_icon_base64`）
+
+### 2026-06-18 (续8：应用面板扩容 + 显示上限)
+- app-panel 宽 320→600px，grid 4列→6列，GRID_COLS=6
+- filteredApps slice 24→200，188 个应用全部可滚动浏览
+- center-panel min-width 0→200px（避免被挤没）
+- 清除所有诊断日志（`ICON_LOG_ONCE`/`HICON_DIAG_DONE` 及对应 println!）
+- 文件：`src/App.tsx` / `src/App.css` / `src-tauri/src/apps.rs`
+
+### 2026-06-18 (续7：图标全黑/首字母根因修复)
+- **根因**：`hicon_to_png` 第一次调用 `GetDIBits(cLines=0, lpvBits=NULL)` 是"查询尺寸"模式，此模式返回值**永远是 0**（表示复制了 0 行，不代表失败）。旧代码检查 `ret == 0` 就直接 return None，导致所有图标被丢弃
+- **修复**：去掉第一次 GetDIBits 的 `|| ret == 0` 判断，只保留 `width <= 0 || height <= 0`
+- 诊断路径：日志显示 `ret=1 hIcon=38209677`（SHGetFileInfoW 成功）但 `0 with icons`，定位到 hicon_to_png 内部
+- 文件：`src-tauri/src/apps.rs`；`cargo check` 零警告
+
+### 2026-06-18 (续6：应用扫描重写 — 图标/数量/过滤/去重)
+- **根因**：`parselnk.relative_path()` 返回相对路径 → `ExtractIconExW` 找不到文件 → 图标全 None；`take(30)` 限制导致应用极少；无过滤逻辑
+- **修复**：
+  - 图标：改用 `SHGetFileInfoW(lnk路径, SHGFI_ICON|SHGFI_LARGEICON)`，Shell API 自动解析 .lnk 目标，无需手动 resolve
+  - 启动：改用 `ShellExecuteW`（替代 `Command::new`），直接支持 .lnk + .exe + 系统命令
+  - 扫描：去掉 30 条限制，上限 400；新增当前用户桌面+公共桌面扫描源
+  - 过滤：`SKIP_KEYWORDS` 常量（uninstall/help/readme/release notes 等 14 个关键词）
+  - 去重：按名称小写 HashSet，All Users 优先（先扫）
+  - hicon_to_png：`biHeight` 改负数（top-down），避免图像上下翻转
+  - 移除 `parselnk = "0.1"` 依赖（不再使用）
+- 文件：`src-tauri/src/apps.rs`（完全重写）/ `Cargo.toml`（删 parselnk）；`cargo check` 零警告
+
+### 2026-06-18 (续5：应用启动器改图标宫格)
+- **重构**：应用启动器从竖列（24px 图标+单行名）改为 4 列宫格（48px 图标+2 行名称居中）
+- **CSS**：删旧 `.app-list/.app-row/.app-icon-sm/.app-name-text`，加 `.app-grid/.app-tile/.app-tile-icon/.app-tile-label`；grid 用 `repeat(4,1fr)+gap:4px`
+- **键盘导航**：ArrowUp/Down 改为跨行（步长 GRID_COLS=4），加 ArrowLeft/Right 横向导航
+- **交互**：单击打开+消失（`launchApp` 不变），悬停/selected 高亮不变
+- 文件：`src/App.tsx` / `src/App.css`；`tsc --noEmit` 零错误；GUI 需真跑确认图标渲染效果
+
+### 2026-06-18 (续4：剪贴板条目删除)
+- **功能**：剪贴板历史区每个条目悬停时右上角显示 `×` 按钮，点击删除该条目（前端 state + Rust 后台缓存同步移除）
+- **实现**：Rust 新增 `delete_clipboard_item(time: i64)` 命令，按 `time` 字段从 `CLIP_CACHE` 中 `retain` 过滤；前端 `deleteClipItem` 先乐观更新 state，再异步调用命令；CSS 新增 `clip-del-btn` 绝对定位，复用 `rm-btn` 悬停显示模式
+- 文件：`src-tauri/src/lib.rs`（新增命令+注册）/ `src/App.tsx`（deleteClipItem + 按钮）/ `src/App.css`（clip-del-btn 样式）
+- `cargo check` 零警告，`tsc --noEmit` 零错误；GUI 链路未真跑
 
 ### 2026-06-18 (续3：快速连复制采样塌缩)
 - **Bug**：连续快速复制两个文件，少一个进历史。根因 ≠ 续2 的锁定问题——是**轮询采样塌缩**：两次复制落在同一 800ms 窗口内，醒来只读到后者，前者内容已被覆盖、不可恢复

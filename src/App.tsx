@@ -24,14 +24,24 @@ export default function App() {
   const [dragOver, setDragOver] = useState(false);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
 
   // ── 时钟 ──
   useEffect(() => { const u=()=>setTime(new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})); u(); const t=setInterval(u,1000); return ()=>clearInterval(t); }, []);
 
+  // ── 主题：把 theme 解析为 data-theme（"system" 跟随 OS prefers-color-scheme 并实时响应切换）──
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => { const resolved = theme==="system" ? (mq.matches?"dark":"light") : theme; document.documentElement.setAttribute("data-theme", resolved); };
+    apply();
+    if (theme==="system") { mq.addEventListener("change", apply); return ()=>mq.removeEventListener("change", apply); }
+  }, [theme]);
+
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const freq=await s.get<Record<string,number>>("app-frequency")??{}; setAppFreq(freq); const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const infos:FileEntry[]=[]; for(const fp of fps.slice(0,10)){ try { infos.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } setFiles(infos); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const freq=await s.get<Record<string,number>>("app-frequency")??{}; setAppFreq(freq); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const infos:FileEntry[]=[]; for(const fp of fps.slice(0,10)){ try { infos.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } setFiles(infos); } } catch{} })(); }, []);
 
   const saveFiles = useCallback(async (list:FileEntry[]) => { setFiles(list); if(store){ await store.set("file-list",list.map(f=>f.path)); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const u={...appFreq,[p]:(appFreq[p]??0)+1}; setAppFreq(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appFreq,store]);
@@ -90,13 +100,33 @@ export default function App() {
 
   // ── 搜索过滤 ──
   const q = search.toLowerCase().trim();
-  const filteredApps = useMemo(() => q ? apps.filter(a=>a.name.toLowerCase().includes(q)||a.path.toLowerCase().includes(q)).slice(0,24) : apps.slice(0,24), [apps, q]);
+  const filteredApps = useMemo(() => q ? apps.filter(a=>a.name.toLowerCase().includes(q)||a.path.toLowerCase().includes(q)).slice(0,200) : apps.slice(0,200), [apps, q]);
 
   // ── 操作函数 ──
-  const launchApp = useCallback(async (app:AppInfo) => { await recordUse(app.path); try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("launch_app",{path:app.path}); } catch{} await hideWorkbench(); }, [recordUse]);
+  const launchApp = useCallback((app:AppInfo) => {
+    // 立即 hide，不等 launch 和 store 写完——消除点击后的视觉延迟
+    hideWorkbench();
+    recordUse(app.path);
+    import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:app.path})).catch(()=>{});
+  }, [recordUse]);
   const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); const nf=[...files]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=10) break; if(nf.some(f=>f.path===fp)) continue; try { nf.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } await saveFiles(nf.slice(0,10)); }, [files,saveFiles]);
   const removeFile = useCallback(async (i:number) => { await saveFiles(files.filter((_,j)=>j!==i)); }, [files,saveFiles]);
-  const openFile = useCallback(async (f:FileEntry) => { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("open_file",{path:f.path}); } catch{} await hideWorkbench(); }, []);
+  const openFile = useCallback((f:FileEntry) => {
+    hideWorkbench();
+    import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:f.path})).catch(()=>{});
+  }, []);
+  const deleteClipItem = useCallback(async (time:number) => {
+    setClipboard(prev => prev.filter(c => c.time !== time));
+    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("delete_clipboard_item",{time}); } catch{}
+  }, []);
+  const changeTheme = useCallback(async (t:"dark"|"light"|"system") => {
+    setTheme(t);
+    if(store){ await store.set("theme",t); await store.save(); }
+  }, [store]);
+  const clearClipboard = useCallback(async () => {
+    setClipboard([]);
+    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
+  }, []);
   const copyAndPaste = useCallback(async (item:ClipItem) => {
     if (item.type === "text") { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
     else if (item.type === "file" && item.items) {
@@ -104,21 +134,28 @@ export default function App() {
     }
     else { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_image",{base64:item.content}); } catch{} await hideWorkbench(); }
   }, []);
-  const openShortcut = useCallback(async (target:string) => { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("launch_app",{path:target}); } catch{} await hideWorkbench(); }, []);
+  const openShortcut = useCallback((target:string) => {
+    hideWorkbench();
+    import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
+  }, []);
   const fi = (ext:string)=>({pdf:"📄",doc:"📝",docx:"📝",xls:"📊",xlsx:"📊",ppt:"📽️",pptx:"📽️",jpg:"🖼️",png:"🖼️",gif:"🖼️",mp4:"🎬",mp3:"🎵",zip:"📦",rar:"📦",exe:"⚙️",txt:"📃"}[ext.toLowerCase()]??"📎");
 
   // ── 键盘 ──
+  const GRID_COLS = 6;
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();setVisible(false);hideWorkbench();return;}
-      if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
-      if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
+      if(e.key==="Escape"){e.preventDefault();if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(settingsOpen)return; // 设置打开时屏蔽应用导航/启动按键
+      if(e.key==="ArrowLeft"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
+      if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
+      if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
+      if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
       if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a);}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, filteredApps, selectedIdx, launchApp]);
+  }, [visible, filteredApps, selectedIdx, launchApp, settingsOpen]);
 
   return (
     <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}`}>
@@ -131,19 +168,24 @@ export default function App() {
             <input ref={searchRef} className="search-field" placeholder="搜索应用、文件..." value={search} onChange={e=>{setSearch(e.target.value);setSelectedIdx(0);}} spellCheck={false} />
           </div>
         </div>
-        <div className="top-right"><span className="clock">{time}</span></div>
+        <div className="top-right">
+          <span className="clock">{time}</span>
+          <button className="settings-btn" onClick={()=>setSettingsOpen(true)} title="设置" aria-label="设置">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </button>
+        </div>
       </header>
       <main className="main-area">
         <section className="app-panel">
           <div className="section-label">应用启动器</div>
-          <div className="app-list">
+          <div className="app-grid">
             {filteredApps.map((a,i)=>(
-              <div key={a.path} className={`app-row${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(a)} onMouseEnter={()=>setSelectedIdx(i)}>
-                <div className="app-icon-sm">{a.icon?<img src={a.icon} alt=""/>:<span>{a.name[0]}</span>}</div>
-                <span className="app-name-text">{a.name}</span>
+              <div key={a.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(a)} onMouseEnter={()=>setSelectedIdx(i)}>
+                <div className="app-tile-icon">{a.icon?<img src={a.icon} alt=""/>:<span>{a.name[0]}</span>}</div>
+                <span className="app-tile-label">{a.name}</span>
               </div>
             ))}
-            {!filteredApps.length && <p className="empty-hint">{apps.length?"无匹配":"扫描中..."}</p>}
+            {!filteredApps.length && <p className="empty-hint" style={{gridColumn:"1/-1"}}>{apps.length?"无匹配":"扫描中..."}</p>}
           </div>
         </section>
         <section className="center-panel">
@@ -170,6 +212,7 @@ export default function App() {
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
               <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"点击粘贴":c.type==="file"?"点击粘贴文件":"点击复制"}>
+                <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
                 {c.type==="image"? <img className="clip-image" src={c.content} alt=""/>
                 : c.type==="file"? <div className="file-clip-preview">
                     <span className="file-clip-icon">{c.items?.[0]?.isImage?"🖼️":"📁"}</span>
@@ -182,6 +225,37 @@ export default function App() {
           </div>
         </section>
       </main>
+      {settingsOpen && (
+        <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
+          <div className="settings-modal" onClick={e=>e.stopPropagation()}>
+            <div className="settings-head">
+              <span className="settings-title">设置</span>
+              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div className="settings-body">
+              <div className="settings-section-label">外观</div>
+              <div className="settings-row">
+                <span className="settings-row-label">背景主题</span>
+                <div className="seg">
+                  {([["dark","深色"],["light","浅色"],["system","系统"]] as const).map(([v,l])=>(
+                    <button key={v} className={`seg-btn${theme===v?" seg-active":""}`} onClick={()=>changeTheme(v)}>{l}</button>
+                  ))}
+                </div>
+              </div>
+              <div className="settings-section-label">通用</div>
+              <div className="settings-row">
+                <span className="settings-row-label">剪贴板历史<span className="settings-row-sub">{clipboard.length} 条</span></span>
+                <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
+              </div>
+              <div className="settings-section-label">关于</div>
+              <div className="settings-about">
+                <div>Workbench <b>v0.1.0</b></div>
+                <div>呼出 / 隐藏 <kbd>Ctrl+Space</kbd> · 关闭 <kbd>Esc</kbd></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       <footer className="bottom-bar">
         <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} 核</span></div>
         <div className="bot-center"><kbd>Ctrl+Space</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
