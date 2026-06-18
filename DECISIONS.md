@@ -1,6 +1,12 @@
 # Workbench App — 架构决策与踩坑根因
 
-> 本文件记录"为什么这样做"和"哪些路走不通"。铁律见 `CLAUDE.md`。
+> 本文件记录"为什么这样做"和"哪些路走不通"。需要硬规则（怎么做、别碰什么）看 `CLAUDE.md` 的【铁律】；本文件是其背后的证据与根因。
+
+## 目录（按主题）
+- **热键**：§1 RegisterHotKey vs 自建钩子 · §2 放弃长短按 · §9 修饰键选择
+- **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪
+- **剪贴板 / 粘贴**：§3 粘贴可靠性 6 轮演进 · §6 后台缓存架构 · §7 CF_HDROP/DROPFILES · §10 检测优先级(截图去重) · §11 桌面 SHFileOperation 兜底 + fFlags
+- **其他**：§12 Git 版本历史（关键节点）
 
 ---
 
@@ -119,7 +125,11 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 
 **双重 SHOW 事件**：`hotkey-show` 在同帧内被 emit 两次（间隔 <1ms），导致 `useEffect([visible])` 重复执行。原因未根除但影响已被现有架构吸收（`useEffect` 第二次执行是幂等的）。
 
-**Esc 幽灵界面修复（2026-06-17）**：原 Esc handler 只调 `setVisible(false)`（纯 CSS opacity/pointer-events 切换），从未调 `window.hide()`，Rust 侧 `is_visible()` 始终 true。CSS `pointer-events:none` 不可靠地等同于 OS-level click-through，偶发拦截点击。修复方案：① Rust `hide_window` 命令在 `window.hide()` 后补 `emit("hotkey-hide")` 通知前端同步 visible 状态；② Esc handler 改为 `setVisible(false)` + `hideWorkbench()`（前者即时 CSS 反馈，后者接 Rust `window.hide()`）；③ 热键 show 路径补 `window.set_focus()`（与 `tray_toggle` 对齐）——热键呼出后窗口无键盘焦点导致 Esc 的 keydown 事件无法到达 JS 监听器。Esc 路径不含焦点交还/Ctrl+V，不会误触发粘贴。
+**Esc 幽灵界面修复（2026-06-17, `3784f6d`/`14583c0`）**：原 Esc handler 只调 `setVisible(false)`（纯 CSS opacity/pointer-events 切换），从未调 `window.hide()`，Rust 侧 `is_visible()` 始终 true。CSS `pointer-events:none` 不可靠地等同于 OS-level click-through，偶发拦截点击。修复方案：① Rust `hide_window` 命令在 `window.hide()` 后补 `emit("hotkey-hide")` 通知前端同步 visible 状态；② Esc handler 改为 `setVisible(false)` + `hideWorkbench()`（前者即时 CSS 反馈，后者接 Rust `window.hide()`）；③ 热键 show 路径补 `window.set_focus()`（与 `tray_toggle` 对齐）——热键呼出后窗口无键盘焦点导致 Esc 的 keydown 事件无法到达 JS 监听器。Esc 路径不含焦点交还/Ctrl+V，不会误触发粘贴。
+
+**呼出白闪修复（2026-06-17, `347a562`，接上）**：上一步给 show 路径补 `set_focus()` 后，呼出瞬间变成"先白一下再显示"。根因：`set_focus()` 触发 `WM_ACTIVATE`/`WM_NCACTIVATE`，WebView2 据此做激活重绘；而窗口未设 `backgroundColor`、WebView2 默认白底，此刻深色 CSS 还没上屏 → 白帧。修复（两条缺一不可）：① 把 `emit("hotkey-show")` 提到 `window.show()` **之前**——前端先把深色 overlay 渲染好，show 出来已是深色；② `set_focus()` 移到 50ms 后台线程延迟执行（附 `is_visible()` 守卫），错开激活重绘时机。两处 show 路径（hotkey handler + `tray_toggle`）必须同步改。
+
+> 这一连串 show 路径修复（幽灵界面 → Esc 失灵 → 白闪）凝结成 `CLAUDE.md`【铁律】窗口/焦点节的"呼出(show)路径三条耦合约束"——改 show 路径前务必先读那三条。
 
 ---
 
@@ -172,12 +182,16 @@ HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
 
 ## 12. Git 版本历史（关键节点）
 
-（仅列关键节点，非完整历史；最新在上）
+（仅列关键节点，非完整历史；最新在上。完整记录见 `MEMORY.md` §九变更记录）
 ```
-重构清理   删 hotkey.rs/once_cell/死命令 + 静音23警告 + 整合重复 + 修底栏热键
+bff986f  文档：优化铁律（show 路径 + 死胡同清单 + 症状速查表）
+9fc89a7  重构：删 hotkey.rs/once_cell/死命令 + 静音23警告 + 整合重复（+f65f2c3 修底栏热键）
 264b8fa  修复：桌面粘贴冲突框 + 同名自动改名（FOF_RENAMEONCOLLISION）
+fefb623  新增：图片粘贴桌面（SHFileOperation 落地）
 347a562  修复：呼出白闪（emit 提前预渲染 + set_focus 延迟）
-（Esc）   修复：Esc 幽灵界面（接 Rust window.hide + emit hotkey-hide 同步）
+14583c0  修复：Esc 无响应（热键 show 补 set_focus）
+3784f6d  修复：Esc 幽灵界面（接 Rust window.hide + emit hotkey-hide 同步）
+22334d6  剪贴板图片 aHash 去重 + 整体落盘
 f281f11  文档三件套初始化（CLAUDE/DECISIONS/MEMORY）
 a7c13b6  新增：剪贴板文件历史（CF_HDROP检测+写入+粘贴）
 d11bcf2  图片粘贴修复：去除冗余读写循环
