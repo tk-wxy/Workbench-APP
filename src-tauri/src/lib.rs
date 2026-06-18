@@ -176,6 +176,18 @@ fn get_clipboard_history() -> Vec<serde_json::Value> {
     CLIP_CACHE.lock().unwrap().clone()
 }
 
+/// 前端调用：按 time 字段删除缓存中的指定条目
+#[tauri::command]
+fn delete_clipboard_item(time: i64) {
+    CLIP_CACHE.lock().unwrap().retain(|e| e["time"].as_i64().unwrap_or(0) != time);
+}
+
+/// 前端调用：清空全部剪贴板历史缓存
+#[tauri::command]
+fn clear_clipboard_history() {
+    CLIP_CACHE.lock().unwrap().clear();
+}
+
 /// 获取窗口类名
 fn get_window_class(hwnd: isize) -> String {
     unsafe {
@@ -568,7 +580,8 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info,
             hide_window, open_file, paste_clipboard,
-            set_clipboard_image, get_clipboard_history, set_clipboard_files
+            set_clipboard_image, get_clipboard_history, set_clipboard_files,
+            delete_clipboard_item, clear_clipboard_history
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
