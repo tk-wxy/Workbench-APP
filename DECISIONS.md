@@ -220,7 +220,30 @@ HDROP=true  BITMAP=true  DIB=true  DIBV5=true  UNICODE=false
 
 ---
 
-## 12. Git 版本历史（关键节点）
+## 12. Light dismiss：点击外部应用自动隐藏（2026-06-19）
+
+**需求**：作为辅助工具，overlay 显示时用户一旦操作别的应用（点任务栏图标 / 点别处窗口 / Alt+Tab），应自动隐藏，无需再按快捷键——即 Win11 flyout（通知/日历卡片等）的「点外部即退」行为。
+
+**必要性**：窗口 `alwaysOnTop:true` + 全屏，没有自动隐藏时点别的应用，那个应用虽拿到焦点却仍被全屏 overlay 盖住、根本看不见。所以这不是锦上添花，是可用性前提。
+
+**机制**：Rust 后台线程 `start_focus_watch` 轮询 `GetForegroundWindow()`（`FOCUS_POLL_MS=50ms`），前台切到别的窗口就 `hide()`。
+- **为什么轮询而非 `WindowEvent::Focused(false)`**：与 §1/§2 同理，本项目对窗口/焦点信号一贯用物理轮询、不信事件。show 路径的 `set_focus` 是 50ms 延迟异步的，focus 事件在这套 dance 里会抖动误触发；`focus:false` + WebView2 焦点怪癖也不可靠。`GetForegroundWindow` 是即时真值、µs 级、不经消息队列。
+- **为什么不让前端 `blur` 管**：违反铁律「绝不让前端管 hide」（IPC 往返延迟）。隐藏决策与调用必须在 Rust。
+
+**arm-after-focus 状态机（防呼出瞬间误关，关键）**：
+- 窗口不可见 → `disarm`
+- 前台 == 本窗口 → `arm`（确认真正拿到焦点）
+- 已 `arm` 且 前台 != 本窗口（且前台 ≠ NULL）→ 用户切走了 → `hide()` + `emit("hotkey-hide")` + `disarm`
+
+直接"前台不是我就关"会在呼出瞬间误关：`emit→show→(50ms)set_focus`，set_focus 落地前前台还是上一个应用 → 立刻判定"不是我"→ 窗口闪一下就关。arm-after-focus 只在确认拿到焦点后才布防：set_focus 未落地不会误关；set_focus 彻底失败则永不 arm、永不乱关（优雅降级，用户仍可 Esc/快捷键）。`fg != 0` 守卫防应用切换瞬间的空前台误关。
+
+**HWND 比较避坑**：取本窗口 HWND 用 `window.hwnd()`（Tauri 内部 windows-core 0.61 类型），与 `GetForegroundWindow()`（本 crate windows 0.58 类型）**只比较 `.0 as isize` 指针整数**，不互传——避免 §5 附录那种 `Param<HWND>` trait 版本冲突。
+
+**隐藏复用**纯 `hide()+emit` 路径，不碰焦点交还/粘贴流程。与粘贴/托盘的交互均 gate 在 `is_visible()` 上，幂等无冲突。实测场景 1/2（点任务栏、Alt+Tab）生效，3（点窗口内部）、4（反复呼出）、5（长按）、6（点项粘贴）均无误关。
+
+---
+
+## 13. Git 版本历史（关键节点）
 
 （仅列关键节点，非完整历史；最新在上。完整记录见 `MEMORY.md` §九变更记录）
 ```

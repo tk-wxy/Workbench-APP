@@ -46,6 +46,7 @@ npm run tauri build    # 打包
 - `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
 - **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
 - 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
+- **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
 
 ### 剪贴板
 > 下列可调数值（轮询 150ms / 缓存 20 条 / 缩略图 1024px / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
