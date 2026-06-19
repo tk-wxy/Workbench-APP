@@ -15,7 +15,7 @@
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
 - **进行中**：← 无
-- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
+- **下一步**：搜索算法升级（模糊匹配 + 缩写匹配，进行中）；**应用排序引入 last_used 时间衰减做"近期常用"**（纯 count 排序固有局限：远古高频 app 永占顶；需把 `app-frequency` 由 `Record<string,number>` 迁移为带时间戳的结构，读取兼容旧格式——已确认有必要，暂不实现）；文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -94,7 +94,7 @@ src-tauri/Cargo.toml
 - ✅ 全屏窗口 + 毛玻璃背景（`transparent:true` + `backdrop-filter: blur`）
 - ✅ 全屏缝隙修复（SPI_GETWORKAREA + 动态 offset 补偿）
 - ✅ 系统托盘常驻 + 开机自启
-- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 搜索 / 点击启动 / **使用频率排序：常用 app 自动浮前，响应式**）
+- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 点击启动 / **使用频率排序：常用 app 自动浮前，响应式** / **模糊搜索：子序列打分(模糊+缩写) + 相关度排序 + 命中高亮** / 键盘导航 ←→↑↓ + Tab 循环 + Enter）
 - ✅ 剪贴板文本（复制/粘贴，auto Ctrl+V 到焦点窗口）
 - ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V/aHash 去重）
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
@@ -155,6 +155,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续17：应用搜索升级 — 模糊匹配 + 相关度排序 + 命中高亮 + Tab 导航)
+- **从 includes 子串升级为子序列打分器**（`App.tsx` 组件外 `fuzzyScore`）：统一解决模糊（非连续、容错，`vscde`→VS Code）+ 缩写（词首加分使 `vsc`→Visual Studio Code 自然涌现）。打分维度：完全子串最高分(+前缀)、词首/连续/靠前加分。返回 `score` + `ranges`(命中区间)。
+- **filteredApps 重构**：单 memo 统一输出 `{app, ranges}[]`（合并 spec 的 filteredApps/displayApps 两套结构，避免渲染侧双类型）。有查询：name 主、path basename 降权(×0.6)取较高分，按 相关度→频率→字母 排序，阈值 score>0 淘汰，上限 200。空查询：频率序、ranges 空。
+- **命中高亮**：`HighlightText` 组件按 ranges 加粗匹配字符，色 `var(--accent,#60a5fa)`。注：贪心子序列，高亮取首个匹配位（`vsc` 高亮 viSual 的 s 非 studio），匹配/排名正确，仅高亮非最优对齐——按 spec 不上更重对齐算法。
+- **键盘导航**：新增 Tab=下一个 / Shift+Tab=上一个（取模循环，区别于方向键的 clamp）；`preventDefault` 防 Tab 移焦出搜索框。Enter 取 `filteredApps[idx].app`。
+- 纯前端、零 Rust 改动。`tsc --noEmit` 零错误。实测 vsc/ps/chrome/vscde/空查询/Enter/方向键/Tab 全通过。
+- 文件：`src/App.tsx`（+`fuzzyScore` +`HighlightText` +filteredApps 重构 +Tab 键）
 
 ### 2026-06-20 (续16：应用使用频率排序 — 响应式)
 - **背景**：需求是"常用 app 自动浮前"。诊断发现该功能**已基本存在**——`appFreq`(path-keyed count) + `recordUse(path)` + 持久化到 `workbench-data.json/app-frequency`，`launchApp` 已在调用。唯一缺陷：排序只在首次扫描那一次发生（`loadedRef` 守卫挡重扫），`filteredApps` 又不依赖 `appFreq` → 刚用过的 app 下次打开不浮上来。
