@@ -399,7 +399,8 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
 // ── 动态全屏 ───────────────────────────────────────────────
 fn make_fullscreen(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let window = app.get_webview_window("main").unwrap();
-    let scale = window.current_monitor()?.unwrap().scale_factor();
+    let monitor = window.current_monitor()?.unwrap();
+    let scale = monitor.scale_factor();
 
     // 通过 Windows API 获取工作区（屏幕减去任务栏）
     let mut rect = windows::Win32::Foundation::RECT::default();
@@ -438,6 +439,9 @@ fn make_fullscreen(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     println!("[fullscreen] result: outer={0}x{1}, inner={2}x{3}, pos=({4},{5}), offset=({offset_x},{offset_y})",
         outer.width, outer.height, inner.width, inner.height, pos.x, pos.y);
 
+    // 用 Tauri 官方 set_shadow(false) 去阴影（走正规 DWM 路径），
+    // 替代会破坏透明边、逼出底部蓝缝的 DWMWA_NCRENDERING_POLICY=DISABLED。
+    let _ = window.set_shadow(false);
     Ok(())
 }
 
@@ -466,7 +470,6 @@ fn hide_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
         let _ = app.emit("hotkey-hide", ());
-        println!("[hotkey] hide_window: is_visible={}", window.is_visible().unwrap_or(false));
     }
 }
 
