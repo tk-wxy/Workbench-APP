@@ -12,6 +12,63 @@ function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60)
 
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
 
+// ── 模糊搜索：子序列打分器（统一解决模糊 + 缩写）──
+interface MatchResult { score: number; ranges: [number, number][]; } // ranges 基于 target 原始字符串
+function fuzzyScore(query: string, target: string): MatchResult {
+  if (!query) return { score: 0, ranges: [] };
+  const q = query.toLowerCase();
+  const t = target.toLowerCase();
+
+  // 完全子串：最高分直接返回（前缀额外加分）
+  const exactIdx = t.indexOf(q);
+  if (exactIdx !== -1) return { score: 100 + (exactIdx === 0 ? 20 : 0), ranges: [[exactIdx, exactIdx + q.length - 1]] };
+
+  // 子序列匹配：query 字符按序出现在 target（不要求连续）
+  let qi = 0;
+  const idxs: number[] = [];
+  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
+    if (t[ti] === q[qi]) { idxs.push(ti); qi++; }
+  }
+  if (qi < q.length) return { score: 0, ranges: [] }; // 子序列不成立
+
+  // 打分：词首 / 连续 / 靠前 加分（缩写匹配靠词首加分自然涌现）
+  let score = 10;
+  let consecutive = 0;
+  for (let i = 0; i < idxs.length; i++) {
+    const idx = idxs[i];
+    const prev = idx > 0 ? target[idx - 1] : null;
+    const isWordStart = idx === 0 || prev === " " || prev === "_" || prev === "-"
+      || (target[idx] === target[idx].toUpperCase() && prev !== null && prev === prev.toLowerCase() && prev !== " ");
+    if (isWordStart) score += 8;
+    if (i > 0 && idxs[i] === idxs[i - 1] + 1) { consecutive++; score += 3 + consecutive; } else { consecutive = 0; }
+    score += Math.max(0, 5 - Math.floor(idx / 5));
+  }
+
+  // 压缩为连续区间，供高亮
+  const ranges: [number, number][] = [];
+  let start = idxs[0], end = idxs[0];
+  for (let i = 1; i < idxs.length; i++) {
+    if (idxs[i] === end + 1) end = idxs[i];
+    else { ranges.push([start, end]); start = end = idxs[i]; }
+  }
+  ranges.push([start, end]);
+  return { score, ranges };
+}
+
+// 高亮命中字符（色用 --accent 兜底，贴合主题系统）
+function HighlightText({ text, ranges }: { text: string; ranges: [number, number][] }) {
+  if (!ranges.length) return <>{text}</>;
+  const parts: React.ReactNode[] = [];
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (start > cursor) parts.push(text.slice(cursor, start));
+    parts.push(<span key={start} style={{ color: "var(--accent, #60a5fa)", fontWeight: 600 }}>{text.slice(start, end + 1)}</span>);
+    cursor = end + 1;
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return <>{parts}</>;
+}
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -103,9 +160,26 @@ export default function App() {
     (appFreq[b.path]??0) - (appFreq[a.path]??0) || a.name.localeCompare(b.name)
   ), [apps, appFreq]);
 
-  // ── 搜索过滤（基于已排序列表）──
-  const q = search.toLowerCase().trim();
-  const filteredApps = useMemo(() => q ? sortedApps.filter(a=>a.name.toLowerCase().includes(q)||a.path.toLowerCase().includes(q)).slice(0,200) : sortedApps.slice(0,200), [sortedApps, q]);
+  // ── 搜索过滤（模糊打分 + 相关度排序）。统一输出 {app, ranges}，空查询时 ranges 为空 ──
+  const filteredApps = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
+    const query = search.trim();
+    if (!query) return sortedApps.slice(0, 200).map(app => ({ app, ranges: [] }));
+    return sortedApps
+      .map(app => {
+        const nameR = fuzzyScore(query, app.name);
+        const basename = app.path.split(/[\\/]/).pop() ?? "";
+        const pathScore = fuzzyScore(query, basename).score * 0.6; // path basename 降权
+        const useName = nameR.score >= pathScore;
+        return { app, score: useName ? nameR.score : pathScore, ranges: useName ? nameR.ranges : [] };
+      })
+      .filter(it => it.score > 0) // 子序列不成立的淘汰
+      .sort((a, b) =>
+        b.score - a.score                                            // 相关度降序
+        || (appFreq[b.app.path] ?? 0) - (appFreq[a.app.path] ?? 0)   // 同分按频率
+        || a.app.name.localeCompare(b.app.name))                     // 再按字母
+      .slice(0, 200)
+      .map(({ app, ranges }) => ({ app, ranges }));
+  }, [search, sortedApps, appFreq]);
 
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo) => {
@@ -156,7 +230,8 @@ export default function App() {
       if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
       if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
-      if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a);}
+      if(e.key==="Tab"){e.preventDefault();const n=filteredApps.length;if(n)setSelectedIdx(i=>e.shiftKey?(i-1+n)%n:(i+1)%n);} // Tab 下一个 / Shift+Tab 上一个（循环）
+      if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app);}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
@@ -184,10 +259,10 @@ export default function App() {
         <section className="app-panel">
           <div className="section-label">应用启动器</div>
           <div className="app-grid">
-            {filteredApps.map((a,i)=>(
-              <div key={a.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(a)} onMouseEnter={()=>setSelectedIdx(i)}>
-                <div className="app-tile-icon">{a.icon?<img src={a.icon} alt=""/>:<span>{a.name[0]}</span>}</div>
-                <span className="app-tile-label">{a.name}</span>
+            {filteredApps.map(({app,ranges},i)=>(
+              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(app)} onMouseEnter={()=>setSelectedIdx(i)}>
+                <div className="app-tile-icon">{app.icon?<img src={app.icon} alt=""/>:<span>{app.name[0]}</span>}</div>
+                <span className="app-tile-label"><HighlightText text={app.name} ranges={ranges} /></span>
               </div>
             ))}
             {!filteredApps.length && <p className="empty-hint" style={{gridColumn:"1/-1"}}>{apps.length?"无匹配":"扫描中..."}</p>}
