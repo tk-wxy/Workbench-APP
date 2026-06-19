@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-19
+> **最后更新**：2026-06-20
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -94,7 +94,7 @@ src-tauri/Cargo.toml
 - ✅ 全屏窗口 + 毛玻璃背景（`transparent:true` + `backdrop-filter: blur`）
 - ✅ 全屏缝隙修复（SPI_GETWORKAREA + 动态 offset 补偿）
 - ✅ 系统托盘常驻 + 开机自启
-- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 搜索 / 点击启动）
+- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 搜索 / 点击启动 / **使用频率排序：常用 app 自动浮前，响应式**）
 - ✅ 剪贴板文本（复制/粘贴，auto Ctrl+V 到焦点窗口）
 - ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V/aHash 去重）
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
@@ -155,6 +155,12 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续16：应用使用频率排序 — 响应式)
+- **背景**：需求是"常用 app 自动浮前"。诊断发现该功能**已基本存在**——`appFreq`(path-keyed count) + `recordUse(path)` + 持久化到 `workbench-data.json/app-frequency`，`launchApp` 已在调用。唯一缺陷：排序只在首次扫描那一次发生（`loadedRef` 守卫挡重扫），`filteredApps` 又不依赖 `appFreq` → 刚用过的 app 下次打开不浮上来。
+- **实现**（仅 `src/App.tsx` 两处）：① 删掉扫描时的一次性 `list.sort`；② 新增 `sortedApps`（`useMemo` 依赖 `[apps, appFreq]`，频率降序、同频按 `name.localeCompare` 兜底），`filteredApps` 改基于 `sortedApps`。**零 Rust 改动、不新建 store、沿用已积累计数。**
+- **偏离参考 spec**：spec 建议新建 Rust 命令 `record_app_launch`/`get_app_usage` + 新 store `app_data.json`(name-keyed) + last_used。判定为**重复造并行系统**（与现有 path-keyed 并存两套真相、name 作 key 不如 path 唯一、last_used 排序未用属死数据、丢失旧计数），故弃用，改为复用现有按 path 的系统。用户已确认此方向。
+- **实测**：启动靠后 app 3 次 → 浮到最前；重启后排序保留；搜索过滤基于排序列表。`tsc --noEmit` 零错误，无 Rust 改动。
 
 ### 2026-06-19 (续15：light dismiss — 点外部应用自动隐藏)
 - **需求**：overlay 显示时用户操作别的应用（点任务栏/点别处窗口/Alt+Tab）应自动隐藏，免再按快捷键（Win11 flyout 行为）。因 alwaysOnTop+全屏，没自动隐藏时别的应用拿到焦点也被盖住看不见——可用性前提。
