@@ -90,7 +90,7 @@ export default function App() {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           const list = await invoke<AppInfo[]>("scan_start_menu");
-          list.sort((a,b) => (appFreq[b.path]??0) - (appFreq[a.path]??0));
+          // 不在此处定死顺序：排序交给 sortedApps（响应 appFreq 变化，刚用过的 app 下次浮上来）
           setApps(list);
         } catch {}
       })();
@@ -98,9 +98,14 @@ export default function App() {
     setTimeout(() => searchRef.current?.focus(), 100);
   }, [visible]);
 
-  // ── 搜索过滤 ──
+  // ── 按使用频率排序（响应 appFreq：启动后下次打开即浮上来；同频率按名字兜底）──
+  const sortedApps = useMemo(() => [...apps].sort((a,b) =>
+    (appFreq[b.path]??0) - (appFreq[a.path]??0) || a.name.localeCompare(b.name)
+  ), [apps, appFreq]);
+
+  // ── 搜索过滤（基于已排序列表）──
   const q = search.toLowerCase().trim();
-  const filteredApps = useMemo(() => q ? apps.filter(a=>a.name.toLowerCase().includes(q)||a.path.toLowerCase().includes(q)).slice(0,200) : apps.slice(0,200), [apps, q]);
+  const filteredApps = useMemo(() => q ? sortedApps.filter(a=>a.name.toLowerCase().includes(q)||a.path.toLowerCase().includes(q)).slice(0,200) : sortedApps.slice(0,200), [sortedApps, q]);
 
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo) => {
