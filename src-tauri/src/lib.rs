@@ -32,6 +32,9 @@ const HOTKEY_POLL_MS: u64 = 25;
 /// 短按/长按分界：held ≤ 此值=短按(toggle 语义)，> 此值=长按(momentary)。
 /// 250ms 落在实测 tap≤153ms 与 hold≥583ms 的安全间隔内
 const HOTKEY_TAP_MAX_MS: u128 = 250;
+/// 前台窗口轮询间隔（50ms）：light dismiss——窗口可见时若前台切到别的应用则自动隐藏。
+/// GetForegroundWindow 是 µs 级调用，50ms 轮询近乎零成本
+const FOCUS_POLL_MS: u64 = 50;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -661,6 +664,59 @@ fn start_hotkey_monitor(app: AppHandle) {
     });
 }
 
+// ════════════════════════════════════════════════════════════════════
+//  焦点监听 — light dismiss（点击外部应用时自动隐藏，免再按快捷键）
+//
+//  为什么轮询前台窗口而非 WindowEvent::Focused：与 start_hotkey_monitor 同理，本项目
+//  对窗口/焦点信号一贯用物理轮询、不信事件——show 路径的 set_focus 是 50ms 延迟异步的，
+//  focus 事件在这套 dance 里会抖动误触发；focus:false + WebView2 焦点怪癖见 DECISIONS §1。
+//  GetForegroundWindow 是即时真值、µs 级、不经消息队列。
+//
+//  arm-after-focus 状态机（防呼出瞬间误关）：
+//    · 窗口不可见            → disarm
+//    · 前台 == 本窗口        → arm（确认真正拿到了焦点）
+//    · 已 arm 且 前台 != 本窗口 → 用户切走了 → hide + emit + disarm
+//  好处：show 的 set_focus 未落地前前台还是上一个应用，未 arm 故不会误关；若 set_focus
+//  彻底失败则永不 arm、永不乱关（优雅降级，用户仍可 Esc/快捷键关）。
+//  隐藏复用纯 hide()+emit("hotkey-hide") 路径，不碰焦点交还/粘贴流程。
+// ════════════════════════════════════════════════════════════════════
+fn start_focus_watch(app: AppHandle) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    std::thread::spawn(move || {
+        let window = match app.get_webview_window("main") {
+            Some(w) => w,
+            None => { eprintln!("[focus] no main window, abort"); return; }
+        };
+        // 本窗口 HWND 指针值。只与前台窗口比较整数，避免 windows-core 版本 trait 冲突
+        let my_hwnd = match window.hwnd() {
+            Ok(h) => h.0 as isize,
+            Err(e) => { eprintln!("[focus] hwnd 不可用: {e:?}"); return; }
+        };
+
+        let mut armed = false;
+        println!("[focus] light-dismiss watch started poll={FOCUS_POLL_MS}ms");
+
+        loop {
+            if window.is_visible().unwrap_or(false) {
+                let fg = unsafe { GetForegroundWindow() }.0 as isize;
+                if fg == my_hwnd {
+                    armed = true;
+                } else if armed && fg != 0 {
+                    // 前台切到另一个真实窗口（fg==0 是切换瞬间的空窗，不误关）→ light dismiss
+                    let _ = window.hide();
+                    let _ = app.emit("hotkey-hide", ());
+                    armed = false;
+                    println!("[focus] foreground lost → auto hide");
+                }
+            } else {
+                armed = false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(FOCUS_POLL_MS));
+        }
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -685,6 +741,7 @@ pub fn run() {
             // 实际 show/hide 由下面的物理键态轮询驱动（长按 momentary + 短按 toggle）
             app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
             start_hotkey_monitor(app.handle().clone());
+            start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
             start_clipboard_monitor(app.handle().clone());
 

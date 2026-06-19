@@ -13,7 +13,7 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
 - **进行中**：← 无
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
 - **阻塞 / 待决策**：← 无
@@ -155,6 +155,15 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-19 (续15：light dismiss — 点外部应用自动隐藏)
+- **需求**：overlay 显示时用户操作别的应用（点任务栏/点别处窗口/Alt+Tab）应自动隐藏，免再按快捷键（Win11 flyout 行为）。因 alwaysOnTop+全屏，没自动隐藏时别的应用拿到焦点也被盖住看不见——可用性前提。
+- **实现**（`src-tauri/src/lib.rs`）：新增 `start_focus_watch` 后台线程，`FOCUS_POLL_MS=50ms` 轮询 `GetForegroundWindow`；前台切到别的真实窗口（`fg!=0 && fg!=本窗口`）→ `hide()+emit("hotkey-hide")`。
+- **arm-after-focus 状态机**（防呼出瞬间误关）：不可见→disarm；前台==本窗口→arm；已 arm 且前台变了→关。set_focus 未落地前不会误关，彻底失败则永不乱关（降级）。
+- **选型**：轮询前台而非 `WindowEvent::Focused` 事件（事件在 set_focus dance 里抖动）；不让前端 blur 管 hide（铁律）。HWND 只比较 `.0 as isize` 指针整数，避开 windows-core 版本 trait 冲突，无需重引 `raw-window-handle`。
+- **实测**：场景 1（点任务栏）/2（Alt+Tab）生效；3（点窗口内部）/4（反复呼出）/5（长按 momentary）/6（点项粘贴）均无误关。`cargo check` 零警告。
+- **文档**：DECISIONS §12 新增；CLAUDE.md 全局热键节补 light dismiss 条。
+- 文件：`src-tauri/src/lib.rs`（+`FOCUS_POLL_MS` 常量 +`start_focus_watch` +setup 调用）
 
 ### 2026-06-19 (续14：去阴影 + 底部蓝缝 — 真实根因，supersedes 续12/13)
 - **真相**：续12 的 `disable_shadow`（`DWMWA_NCRENDERING_POLICY=DISABLED`）才是蓝缝元凶——禁用透明 wry 窗的非客户区渲染会在底边自画一条实色蓝边。续13 的 accent 假设、Plan B 全部证伪并已撤回。
