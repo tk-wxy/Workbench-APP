@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-18
+> **最后更新**：2026-06-19
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,7 +13,7 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
 - **进行中**：← 无
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
 - **阻塞 / 待决策**：← 无
@@ -155,6 +155,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-19 (续14：去阴影 + 底部蓝缝 — 真实根因，supersedes 续12/13)
+- **真相**：续12 的 `disable_shadow`（`DWMWA_NCRENDERING_POLICY=DISABLED`）才是蓝缝元凶——禁用透明 wry 窗的非客户区渲染会在底边自画一条实色蓝边。续13 的 accent 假设、Plan B 全部证伪并已撤回。
+- **正确修复**：去阴影改用 Tauri 官方 `window.set_shadow(false)`（`make_fullscreen` 末尾）。一行：阴影消、蓝缝无、透明完好、全屏正常。**禁用 `NCRENDERING_POLICY=DISABLED` 去阴影。**
+- **决定性诊断**：单变量关掉 `disable_shadow` → 缝消失+阴影回归 → 锁定自己加的改动即元凶。教训：改动后冒出的新问题先怀疑那个改动本身（绕了 8 条死路才回头查）。完整死路清单见 DECISIONS §5 延伸。
+- **清理**：删 `disable_shadow`/`fix_webview_gap`/`align_bottom_to_workarea`/`diag_*` 全部诊断与中间实现；撤 Plan B（`make_fullscreen` 高度回到工作区 `h`、`App.css` 回 `bottom:0`、`App.tsx` 删 `--work-area-h`）；移除 `raw-window-handle` 依赖 + `Win32_Graphics_Dwm`/`Win32_Graphics_Gdi` feature。`cargo check` 零警告。
+- 文件：`src-tauri/src/lib.rs` / `src-tauri/Cargo.toml` / `src/App.tsx` / `src/App.css` / `DECISIONS.md` / `CLAUDE.md`
+
+### ~~2026-06-19 (续13：Plan B 窗口延伸到全屏高)~~ —— 已废弃，见续14（accent 假设错误，已整体撤回）
+
+### ~~2026-06-19 (续12：disable_shadow 去阴影)~~ —— 已废弃，见续14（NCRENDERING_POLICY=DISABLED 即蓝缝元凶，已删，改用 set_shadow(false)）
 
 ### 2026-06-18 (续11：长按热键转正 — GetAsyncKeyState 键态轮询)
 - **历史死胡同破解**：长按 Ctrl+Space（按住显示/松开关闭）之前 rdev/WH_KEYBOARD_LL/RegisterHotKey 时长判定全失败，根因是"按键经 hook/消息队列、被焦点抢占或 500-800ms 抖动"。换信号源——`GetAsyncKeyState` 读物理键电平（不经队列、与焦点无关）——做成了

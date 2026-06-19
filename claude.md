@@ -79,6 +79,7 @@ npm run tauri build    # 打包
 | 截图不显示缩略图 | 检测顺序没把图片排在 CF_HDROP 之前 |
 | 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
+| 窗口底部细蓝缝 / 透明窗边异常 | `NCRENDERING_POLICY=DISABLED` 破坏透明边自画的；去阴影改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
 
 ---
 
