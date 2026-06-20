@@ -92,6 +92,7 @@ export default function App() {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的项 time，用于按钮 ✓ 反馈
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
 
@@ -223,6 +224,17 @@ export default function App() {
     }
     else { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_image",{base64:item.content}); } catch{} await hideWorkbench(); }
   }, []);
+  // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
+  const copyToClipboard = useCallback(async (item:ClipItem) => {
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      if (item.type === "text") await invoke("copy_text_to_clipboard",{text:item.content});
+      else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard",{paths:item.items.map(f=>f.path)});
+      else await invoke("copy_image_to_clipboard",{base64:item.content});
+      setCopiedTime(item.time);
+      setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
+    } catch {}
+  }, []);
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
@@ -302,7 +314,14 @@ export default function App() {
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
               <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"点击粘贴":c.type==="file"?"点击粘贴文件":"点击复制"}>
-                <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                <div className="clip-actions">
+                  <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?"已复制":"复制到剪贴板"}>
+                    {copiedTime===c.time
+                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                  </button>
+                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                </div>
                 {c.type==="image"? <img className="clip-image" src={c.content} alt=""/>
                 : c.type==="file"? <div className="file-clip-preview">
                     <span className="file-clip-icon">{c.items?.[0]?.isImage?"🖼️":"📁"}</span>
