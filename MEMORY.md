@@ -13,7 +13,7 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
 - **进行中**：← 无
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
@@ -100,6 +100,7 @@ src-tauri/Cargo.toml
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
 - ✅ 文件中转区（拖入暂存/元信息显示/拖出/持久化到 store）
 - ✅ 快捷入口（常用 Windows 位置快速打开）
+- ✅ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴/不隐藏 overlay，自行 Ctrl+V；seq 水位 `SKIP_CLIP_UNTIL_SEQ` 防自写回流历史；复制钮 ~1s ✓ 反馈）
 - ✅ Esc 关闭（已修复幽灵界面：改接 Rust `window.hide()` + `emit hotkey-hide` 状态同步）
 - ✅ 呼出白闪（已修复：emit hotkey-show 提前到 show 前预渲染，set_focus 延迟 50ms 线程执行）
 - ✅ 设置面板（顶栏齿轮 → 居中模态）：背景主题（深色/浅色/系统默认，CSS 变量 + data-theme 切换）+ 清空剪贴板历史 + 关于/版本
@@ -124,6 +125,9 @@ src-tauri/Cargo.toml
 | `get_file_info` | 获取文件/文件夹元信息 |
 | `delete_clipboard_item` | 从后台缓存删除指定剪贴板条目（按 time）|
 | `clear_clipboard_history` | 清空后台 CLIP_CACHE 全部条目（设置面板"清空"）|
+| `copy_text_to_clipboard` | 只复制文本到当前剪贴板（不粘贴/不隐藏；seq 水位防回流历史）|
+| `copy_image_to_clipboard` | 只复制图片（缩略图）到当前剪贴板（同上）|
+| `copy_files_to_clipboard` | 只复制文件 CF_HDROP 到当前剪贴板（同上）|
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
@@ -155,6 +159,15 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续20：剪贴板卡片加「复制到剪贴板」按钮 — 只复制不粘贴)
+- **需求**：卡片原只有删除按钮。增加「复制到剪贴板」——用户没有"立刻自动粘贴"需求时，只把历史项放进当前系统剪贴板，自行 Ctrl+V 到想去的地方（补现有整卡自动粘贴"猜目标窗口"最脆的那块）。overlay **保持打开**（可连续复制多条，Ctrl+V 出最后一条）。
+- **防循环（关键设计）**：写剪贴板会触发后台监听把内容回流历史面板（文本/图片 dedup 后 `insert(0)` → 跳顶刷新时间；文件不去重 → 多出重复）。需抑制。现有计数式 `SKIP_CLIP_EVENTS` 在"保持打开连续复制"下不可靠（续2 记的残留坑：写回只 1 次 seq 跳变时 `store(2)` 残留 +1 吃掉下一次真实复制）。
+- **解法：seq 水位**（新增 `SKIP_CLIP_UNTIL_SEQ: AtomicU32`）。copy_* 写后记当前 `GetClipboardSequenceNumber()` 为水位；监听加判断 `seq ≤ 水位 → 跳过`。按 seq 而非计数 → 与跳变次数/轮询时序无关，连续复制不残留、不吞后续真实复制。**additive**：现有计数机制 + 两条 paste 路径原样不动，只往监听加一条判断。
+- **Rust**（`lib.rs`）：①`SKIP_CLIP_UNTIL_SEQ` + `suppress_clip_until_now()`；②监听加水位 skip；③抽 `write_cf_hdrop(paths)` 共用助手，`set_clipboard_files` 改调它（计数 `store(2)` 时机不变）；④3 新命令 `copy_text/image/files_to_clipboard`（只写、不 hide、不查前台、无桌面分支、无 Ctrl+V，写后 `suppress_clip_until_now`）+ 注册。图片写 1024px 缩略图（继承现有限制）。
+- **前端**（`App.tsx`/`App.css`）：`copyToClipboard(item)` 按类型 invoke、不 hide；卡片右下角 hover 区改 `clip-actions` 容器放 复制+删除 两钮（都 stopPropagation，整卡 onClick 仍=自动粘贴）；`copiedTime` state 驱动复制钮 ~1s 变绿 ✓ 反馈。
+- **验证**：`cargo clippy` 8 条历史警告、零新增；`tsc --noEmit` 零错误。⚠️ **GUI 未真跑**（无头环境无法点击/驱动剪贴板）。需真跑验证：①点复制后别处 Ctrl+V 能粘出文本/图片/文件；②被复制项不跳顶/不重复；③复制后再真实复制别的东西，历史正常收录不被吞。
+- 文件：`src-tauri/src/lib.rs` / `src/App.tsx` / `src/App.css`。未碰焦点/热键/粘贴流程。
 
 ### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
 - **新问题**：续14 用 `set_shadow(false)` 去阴影后，WebView 子窗（`WRY_WEBVIEW`）填满外框（含隐形边框），底边落在 `outer.bottom`，比工作区底（任务栏顶）低约 7px → 深色 overlay 盖住任务栏顶部一条。

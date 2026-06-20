@@ -10,6 +10,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 
 /// 后台监听跳过的 seq 事件次数（set_image 可能触发多次 seq 变化）
 static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+/// 后台监听跳过的 seq 水位：copy_* 命令「只复制不粘贴」写回剪贴板后记下当前 seq，监听跳过
+/// seq ≤ 此值的变化，使自写内容不回流到历史面板（防循环）。按 seq 水位而非计数——与跳变次数/
+/// 轮询时序无关，连续复制不残留、不吞掉后续真实复制（区别于计数式 SKIP_CLIP_EVENTS）。
+static SKIP_CLIP_UNTIL_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
@@ -117,6 +121,11 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             let skip = SKIP_CLIP_EVENTS.load(Ordering::SeqCst);
             if skip > 0 {
                 SKIP_CLIP_EVENTS.store(skip - 1, Ordering::SeqCst);
+                last_seq = seq;
+                continue;
+            }
+            // 跳过 copy_*「只复制不粘贴」的自写：seq ≤ 水位即自写或更早 → 不入历史面板（防循环）
+            if seq <= SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst) {
                 last_seq = seq;
                 continue;
             }
@@ -281,6 +290,35 @@ fn read_clipboard_files() -> Option<Vec<String>> {
     }
 }
 
+/// 把文件路径列表以 CF_HDROP 格式写入剪贴板（DROPFILES 头 fWide=1 + UTF-16 路径、双 \0 结尾）。
+/// 纯写入——不含焦点交还/Ctrl+V/skip 信号，由调用方各自处理（paste 用计数、copy 用 seq 水位）。
+fn write_cf_hdrop(paths: &[String]) -> Result<(), String> {
+    let mut raw: Vec<u8> = Vec::new();
+    raw.extend_from_slice(&20u32.to_ne_bytes()); // pFiles：路径数据偏移
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.x
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.y
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // fNC
+    raw.extend_from_slice(&1u32.to_ne_bytes());  // fWide=1（必须：UTF-16 路径，否则 Explorer 解析失败）
+    for p in paths {
+        let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
+        for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
+    }
+    raw.push(0); raw.push(0); // 双 \0 结尾
+
+    unsafe {
+        let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
+        if h == 0 { return Err("GlobalAlloc 失败".into()); }
+        let ptr = GlobalLock(h);
+        std::ptr::copy_nonoverlapping(raw.as_ptr(), ptr, raw.len());
+        GlobalUnlock(h);
+        OpenClipboard(0);
+        EmptyClipboard();
+        SetClipboardData(CF_HDROP, h);
+        CloseClipboard();
+    }
+    Ok(())
+}
+
 /// 将文件路径列表写回剪贴板（CF_HDROP 格式）或桌面落地 + 粘贴
 #[tauri::command]
 fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
@@ -304,30 +342,8 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
     }
 
     // 非桌面：CF_HDROP 写回 + Ctrl+V
-    let mut raw: Vec<u8> = Vec::new();
-    raw.extend_from_slice(&20u32.to_ne_bytes());
-    raw.extend_from_slice(&0u32.to_ne_bytes());
-    raw.extend_from_slice(&0u32.to_ne_bytes());
-    raw.extend_from_slice(&0u32.to_ne_bytes());
-    raw.extend_from_slice(&1u32.to_ne_bytes());
-    for p in &paths {
-        let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
-        for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
-    }
-    raw.push(0); raw.push(0);
-
     SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
-    unsafe {
-        let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
-        if h == 0 { return Err("GlobalAlloc 失败".into()); }
-        let ptr = GlobalLock(h);
-        std::ptr::copy_nonoverlapping(raw.as_ptr(), ptr, raw.len());
-        GlobalUnlock(h);
-        OpenClipboard(0);
-        EmptyClipboard();
-        SetClipboardData(CF_HDROP, h);
-        CloseClipboard();
-    }
+    write_cf_hdrop(&paths)?;
 
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
@@ -601,6 +617,49 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── 只复制到剪贴板（不粘贴、不隐藏窗口）─────────────────────────
+// 场景：用户没有"立刻自动粘贴"需求，只想把历史项放进当前剪贴板，自行 Ctrl+V 到想要的地方。
+// 与 paste/set_clipboard_* 的区别：不 hide、不查前台、无桌面分支、无 Ctrl+V。
+// 写后调 suppress_clip_until_now()，使自写内容不回流历史面板（防循环）。
+
+/// copy_* 写回剪贴板后调用：记当前 seq 为水位，令后台监听跳过本次自写，避免自写内容回流历史面板。
+fn suppress_clip_until_now() {
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
+    let now = unsafe { GetClipboardSequenceNumber() };
+    SKIP_CLIP_UNTIL_SEQ.store(now, Ordering::SeqCst);
+}
+
+#[tauri::command]
+fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+    cb.set_text(&text).map_err(|e| format!("写入: {}", e))?;
+    suppress_clip_until_now();
+    Ok(())
+}
+
+#[tauri::command]
+fn copy_image_to_clipboard(base64: String) -> Result<(), String> {
+    // 历史项始终带 base64 缩略图（1024px）；解码为 RGBA 再写回（与 set_clipboard_image 同款，写的是缩略图非原图）
+    let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+    let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
+    let rgba = img.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+    cb.set_image(arboard::ImageData {
+        width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+    }).map_err(|e| format!("写入: {}", e))?;
+    suppress_clip_until_now();
+    Ok(())
+}
+
+#[tauri::command]
+fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    write_cf_hdrop(&paths)?;
+    suppress_clip_until_now();
+    Ok(())
+}
+
 // ── 入口 ───────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════════════
@@ -747,7 +806,8 @@ pub fn run() {
             apps::launch_app, apps::get_file_info,
             hide_window, open_file, paste_clipboard,
             set_clipboard_image, get_clipboard_history, set_clipboard_files,
-            delete_clipboard_item, clear_clipboard_history
+            delete_clipboard_item, clear_clipboard_history,
+            copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
