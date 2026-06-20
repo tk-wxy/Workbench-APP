@@ -87,6 +87,13 @@ const SETTINGS_TABS = [
 ] as const;
 type SettingsTab = typeof SETTINGS_TABS[number]["id"];
 
+// 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
+// 时长可调；放大幅度在 CSS @keyframes launch-pop 里（克制档 scale 1.4）。
+const LAUNCH_ANIM_MS = 200;
+// 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
+// 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
+interface LaunchAnim { icon: string | null; name: string; rect: { top: number; left: number; width: number; height: number }; }
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -103,8 +110,10 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的项 time，用于按钮 ✓ 反馈
+  const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
+  const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
 
   // ── 时钟 ──
   useEffect(() => { const u=()=>setTime(new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})); u(); const t=setInterval(u,1000); return ()=>clearInterval(t); }, []);
@@ -130,7 +139,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => setVisible(false));
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); launchingRef.current = false; }); // 复位启动动画
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
           setClipboard(prev => {
@@ -203,11 +212,19 @@ export default function App() {
   }, [search, sortedApps, appUsage]);
 
   // ── 操作函数 ──
-  const launchApp = useCallback((app:AppInfo) => {
-    // 立即 hide，不等 launch 和 store 写完——消除点击后的视觉延迟
-    hideWorkbench();
+  const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
+    if (launchingRef.current) return; // 防连点：动画进行中忽略后续触发
     recordUse(app.path);
+    // 立即发起启动，不等动画——app 照常秒开，只把覆盖层的「消失」动画化
     import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:app.path})).catch(()=>{});
+    // 无障碍 / 拿不到图标坐标：跳过动画，沿用即时隐藏（与改造前一致）
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || !iconEl) { hideWorkbench(); return; }
+    // 放大暂留：克隆图标到顶层浮层做 scale+淡出，覆盖层整体淡出露桌面，LAUNCH_ANIM_MS 后再 Rust hide
+    launchingRef.current = true;
+    const r = iconEl.getBoundingClientRect();
+    setLaunchAnim({ icon: app.icon, name: app.name, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [recordUse]);
   const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); const nf=[...files]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=10) break; if(nf.some(f=>f.path===fp)) continue; try { nf.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } await saveFiles(nf.slice(0,10)); }, [files,saveFiles]);
   const removeFile = useCallback(async (i:number) => { await saveFiles(files.filter((_,j)=>j!==i)); }, [files,saveFiles]);
@@ -263,14 +280,15 @@ export default function App() {
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
       if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
       if(e.key==="Tab"){e.preventDefault();const n=filteredApps.length;if(n)setSelectedIdx(i=>e.shiftKey?(i-1+n)%n:(i+1)%n);} // Tab 下一个 / Shift+Tab 上一个（循环）
-      if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app);}
+      if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
   }, [visible, filteredApps, selectedIdx, launchApp, settingsOpen]);
 
   return (
-    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}`}>
+   <>
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${launchAnim ? " launching" : ""}`}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
@@ -292,7 +310,7 @@ export default function App() {
           <div className="section-label">应用启动器</div>
           <div className="app-grid">
             {filteredApps.map(({app,ranges},i)=>(
-              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(app)} onMouseEnter={()=>setSelectedIdx(i)} title="单击打开">
+              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={e=>launchApp(app, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))} onMouseEnter={()=>setSelectedIdx(i)} title="单击打开">
                 <div className="app-tile-icon">{app.icon?<img src={app.icon} alt=""/>:<span>{app.name[0]}</span>}</div>
                 <span className="app-tile-label"><HighlightText text={app.name} ranges={ranges} /></span>
               </div>
@@ -406,5 +424,12 @@ export default function App() {
         <div className="bot-right"><span>Workbench v0.1.0</span></div>
       </footer>
     </div>
+    {/* 启动放大暂留：顶层克隆，#overlay 的兄弟节点（避开 backdrop-filter 的定位上下文与宫格 overflow 裁剪），按点击瞬间坐标定位、自播 scale+淡出 */}
+    {launchAnim && (
+      <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
+        {launchAnim.icon ? <img src={launchAnim.icon} alt=""/> : <span>{launchAnim.name[0]}</span>}
+      </div>
+    )}
+   </>
   );
 }
