@@ -3,12 +3,21 @@ import "./App.css";
 
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
+interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; }
 
 function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
 function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return "刚刚"; if (s<3600) return `${Math.floor(s/60)}分钟前`; return `${Math.floor(s/3600)}小时前`; }
+
+// ── 应用使用打分：频率为主 × 近期乘数（频率高且近期用过的排前）──
+// score = count × 0.5^(距上次使用 / 半衰期)。30 天没用，权重掉一半。要调"近期"敏感度改这个常量。
+const USAGE_HALFLIFE_S = 30 * 24 * 3600;
+function usageScore(u: AppUsage | undefined, nowS: number): number {
+  if (!u || u.count <= 0) return 0;
+  return u.count * Math.pow(0.5, (nowS - u.last_used) / USAGE_HALFLIFE_S);
+}
 
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
 
@@ -76,7 +85,7 @@ export default function App() {
   const [time, setTime] = useState("");
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
-  const [appFreq, setAppFreq] = useState<Record<string,number>>({});
+  const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   const [store, setStore] = useState<any>(null);
   const [dragOver, setDragOver] = useState(false);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
@@ -98,10 +107,10 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const freq=await s.get<Record<string,number>>("app-frequency")??{}; setAppFreq(freq); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const infos:FileEntry[]=[]; for(const fp of fps.slice(0,10)){ try { infos.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } setFiles(infos); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const infos:FileEntry[]=[]; for(const fp of fps.slice(0,10)){ try { infos.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } setFiles(infos); } } catch{} })(); }, []);
 
   const saveFiles = useCallback(async (list:FileEntry[]) => { setFiles(list); if(store){ await store.set("file-list",list.map(f=>f.path)); await store.save(); } }, [store]);
-  const recordUse = useCallback(async (p:string) => { const u={...appFreq,[p]:(appFreq[p]??0)+1}; setAppFreq(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appFreq,store]);
+  const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
@@ -147,7 +156,7 @@ export default function App() {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           const list = await invoke<AppInfo[]>("scan_start_menu");
-          // 不在此处定死顺序：排序交给 sortedApps（响应 appFreq 变化，刚用过的 app 下次浮上来）
+          // 不在此处定死顺序：排序交给 sortedApps（响应 appUsage 变化，刚用过的 app 下次浮上来）
           setApps(list);
         } catch {}
       })();
@@ -155,15 +164,16 @@ export default function App() {
     setTimeout(() => searchRef.current?.focus(), 100);
   }, [visible]);
 
-  // ── 按使用频率排序（响应 appFreq：启动后下次打开即浮上来；同频率按名字兜底）──
-  const sortedApps = useMemo(() => [...apps].sort((a,b) =>
-    (appFreq[b.path]??0) - (appFreq[a.path]??0) || a.name.localeCompare(b.name)
-  ), [apps, appFreq]);
+  // ── 按使用打分排序（频率为主×近期乘数：常用且近期用过的浮前；同分按名字兜底）──
+  const sortedApps = useMemo(() => { const nowS=Math.floor(Date.now()/1000); return [...apps].sort((a,b) =>
+    usageScore(appUsage[b.path],nowS) - usageScore(appUsage[a.path],nowS) || a.name.localeCompare(b.name)
+  ); }, [apps, appUsage]);
 
   // ── 搜索过滤（模糊打分 + 相关度排序）。统一输出 {app, ranges}，空查询时 ranges 为空 ──
   const filteredApps = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
     const query = search.trim();
     if (!query) return sortedApps.slice(0, 200).map(app => ({ app, ranges: [] }));
+    const nowS = Math.floor(Date.now()/1000);
     return sortedApps
       .map(app => {
         const nameR = fuzzyScore(query, app.name);
@@ -174,12 +184,12 @@ export default function App() {
       })
       .filter(it => it.score > 0) // 子序列不成立的淘汰
       .sort((a, b) =>
-        b.score - a.score                                            // 相关度降序
-        || (appFreq[b.app.path] ?? 0) - (appFreq[a.app.path] ?? 0)   // 同分按频率
-        || a.app.name.localeCompare(b.app.name))                     // 再按字母
+        b.score - a.score                                                              // 相关度降序
+        || usageScore(appUsage[b.app.path],nowS) - usageScore(appUsage[a.app.path],nowS) // 同分按使用打分
+        || a.app.name.localeCompare(b.app.name))                                       // 再按字母
       .slice(0, 200)
       .map(({ app, ranges }) => ({ app, ranges }));
-  }, [search, sortedApps, appFreq]);
+  }, [search, sortedApps, appUsage]);
 
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo) => {
