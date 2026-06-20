@@ -18,7 +18,8 @@
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
-- **下一步**：文件中转区独立于剪贴板文件历史；设置面板各条目继续扩项（常规加开机自启开关、快捷键做成可配置等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
+- **新增（续26 实测通过）**：文件中转区升级为「混合条目」模型（文件/文本/图片），剪贴板卡片 📌 钉入 + 中转条目单击取走（写回剪贴板+粘贴）/复制/打开/删除。store 由 `file-list`(路径数组)→`stage-items`(异构条目)、带旧格式迁移。**GUI 实测**：钉入/取走粘贴/复制/重启读回（含图片缩略图）全通过；迁移因本机无遗留 `file-list` 未触发（兜底逻辑，非 bug）
+- **下一步**：① **阶段 2：拖拽** —— 先诊断 Tauri v2 `tauri://drag-drop` 能否拿真实路径（现 `handleDrop` 读 `dataTransfer.path` 大概率失效），再评估「拖动中途呼出接住 drop」「拖出到 Explorer（需 DoDragDrop FFI，最难）」；② 阶段 3 可选：文件「复制固化一份」防源删失效；③ 设置面板继续扩项；长按阈值/采样率体感微调
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -101,7 +102,7 @@ src-tauri/Cargo.toml
 - ✅ 剪贴板文本（复制/粘贴，auto Ctrl+V 到焦点窗口）
 - ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V/aHash 去重）
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
-- ✅ 文件中转区（拖入暂存/元信息显示/拖出/持久化到 store）
+- ✅ 文件中转区（**混合条目**：文件/文本/图片；剪贴板📌钉入 + 单击取走粘贴/复制/打开/删除；持久化 `stage-items`，旧 `file-list` 迁移。拖入待阶段2实测）
 - ✅ 快捷入口（常用 Windows 位置快速打开）
 - ✅ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴/不隐藏 overlay，自行 Ctrl+V；seq 水位 `SKIP_CLIP_UNTIL_SEQ` 防自写回流历史；复制钮 ~1s ✓ 反馈）
 - ✅ Esc 关闭（已修复幽灵界面：改接 Rust `window.hide()` + `emit hotkey-hide` 状态同步）
@@ -163,6 +164,16 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续26：文件中转区升级为「混合条目」+ 剪贴板互导 — 阶段1，纯前端，GUI 实测通过)
+- **前瞻商讨结论（用户拍板）**：① 存储=**混合条目模型**（文件存路径引用、文本/图片存内容），非真容器；② 传输通道先做简单的（剪贴板互导 + 取走粘贴），**拖拽留阶段2实测后再上**；③ 中转站与剪贴板历史**两个独立面板、互相导**（剪贴板=自动滚动传送带，中转=手动持久托盘）
+- **数据模型**：新增 `StageItem`（与 `ClipItem` 同构 type/content/items/count + `id` + file 显示辅助 name/ext/isDir/size）→ 直接复用现成 `copyAndPaste`/`writeItemToClipboard` 出口。`copyAndPaste` 参数泛化为 `Pasteable` 结构类型（ClipItem 与 StageItem 都满足）
+- **持久化迁移**：store key `file-list`(`string[]` 路径) → `stage-items`(异构数组)。加载优先读 `stage-items`，无则回退 `file-list` 经 `get_file_info` 迁成 file 条目（旧数据不丢；`file-list` 残留无害，load 优先新 key）
+- **互导**：剪贴板卡片加 📌「钉到中转」按钮（`addToStage`，同类型同内容去重、置顶）；中转条目单击=取走（`copyAndPaste` 写回剪贴板+焦点交还+Ctrl+V，复用启动/粘贴的淡出动画）、复制按钮=只写剪贴板（`copyStageToClipboard`，独立 ✓ 反馈 `copiedStageId`）、file 额外「打开」按钮、删除
+- **抽取去重**：`writeItemToClipboard(Pasteable)` 模块级助手，剪贴板 `copyToClipboard` 与中转 `copyStageToClipboard` 共用；删 `file-row` 死 CSS，加 `.stage-*` 样式
+- **零 Rust 改动**：copy/paste 三类型命令全现成，不碰窗口/焦点/热键/剪贴板锁高危区
+- **文件**：`src/App.tsx`（StageItem/Pasteable/STAGE_MAX + 转换助手 + stage state/操作 + 中转区&剪贴板 JSX）/ `src/App.css`（`.stage-*` + `.clip-pin-btn`）
+- **验证**：`tsc --noEmit` 零错误、`vite build` 通过。**GUI 实测通过**（用户确认）：① 文字/图片/文件钉入中转、重复钉不重复；② 单击取走粘贴 + 复制按钮 ✓ 反馈；③ 重启 app 后 2 条（文字+图片缩略图）正常读回——并经 store 文件核对 `stage-items` 落盘正确、无残留 `file-list`（本机无遗留数据，迁移兜底未触发，非 bug）。⚠️ 现有拖入 `handleDrop` 读 `dataTransfer.path` 在 Tauri v2 可能失效，归阶段2诊断
 
 ### 2026-06-20 (续20：剪贴板卡片加「复制到剪贴板」按钮 — 只复制不粘贴)
 - **需求**：卡片原只有删除按钮。增加「复制到剪贴板」——用户没有"立刻自动粘贴"需求时，只把历史项放进当前系统剪贴板，自行 Ctrl+V 到想去的地方（补现有整卡自动粘贴"猜目标窗口"最脆的那块）。overlay **保持打开**（可连续复制多条，Ctrl+V 出最后一条）。

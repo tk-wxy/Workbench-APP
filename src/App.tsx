@@ -7,6 +7,12 @@ interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; }
+// 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
+// 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
+interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; }
+// copyAndPaste/复制 只读这三个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
+type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; };
+const STAGE_MAX = 20; // 中转区上限
 
 function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
 function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return "刚刚"; if (s<3600) return `${Math.floor(s/60)}分钟前`; return `${Math.floor(s/3600)}小时前`; }
@@ -20,6 +26,24 @@ function usageScore(u: AppUsage | undefined, nowS: number): number {
 }
 
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
+
+// ── 文件中转：转换 + 写剪贴板助手 ──
+const IMG_EXTS = ["jpg","jpeg","png","gif","bmp","webp","svg","ico"];
+const stageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // 稳定唯一 id（key/去重）
+function fileEntryToStage(f: FileEntry): StageItem {
+  const isImage = IMG_EXTS.includes(f.ext.toLowerCase());
+  return { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
+}
+function clipToStage(c: ClipItem): StageItem {
+  return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name };
+}
+// 只写当前系统剪贴板（不粘贴、不隐藏 overlay），复用现成 copy_* 命令；剪贴板卡片与中转条目共用
+async function writeItemToClipboard(item: Pasteable) {
+  const { invoke } = await import("@tauri-apps/api/core");
+  if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
+  else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
+  else await invoke("copy_image_to_clipboard", { base64: item.content });
+}
 
 // ── 模糊搜索：子序列打分器（统一解决模糊 + 缩写）──
 interface MatchResult { score: number; ranges: [number, number][]; } // ranges 基于 target 原始字符串
@@ -100,7 +124,7 @@ export default function App() {
   const [search, setSearch] = useState("");
   const [time, setTime] = useState("");
   const [apps, setApps] = useState<AppInfo[]>([]);
-  const [files, setFiles] = useState<FileEntry[]>([]);
+  const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   const [store, setStore] = useState<any>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -109,7 +133,8 @@ export default function App() {
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
-  const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的项 time，用于按钮 ✓ 反馈
+  const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的剪贴板项 time，用于按钮 ✓ 反馈
+  const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const searchRef = useRef<HTMLInputElement>(null);
@@ -128,9 +153,9 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const infos:FileEntry[]=[]; for(const fp of fps.slice(0,10)){ try { infos.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } setFiles(infos); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } } catch{} })(); }, []);
 
-  const saveFiles = useCallback(async (list:FileEntry[]) => { setFiles(list); if(store){ await store.set("file-list",list.map(f=>f.path)); await store.save(); } }, [store]);
+  const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
@@ -228,11 +253,19 @@ export default function App() {
     setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [recordUse]);
-  const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); const nf=[...files]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=10) break; if(nf.some(f=>f.path===fp)) continue; try { nf.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } await saveFiles(nf.slice(0,10)); }, [files,saveFiles]);
-  const removeFile = useCallback(async (i:number) => { await saveFiles(files.filter((_,j)=>j!==i)); }, [files,saveFiles]);
-  const openFile = useCallback((f:FileEntry) => {
+  // 拖入文件 → 中转区（⚠️ Tauri v2 默认拦截系统拖放，dataTransfer.path 可能拿不到真实路径，待阶段 2 实测）
+  const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); let nf=[...stage]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=STAGE_MAX) break; if(nf.some(s=>s.type==="file"&&s.items?.[0]?.path===fp)) continue; try { nf.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } await saveStage(nf.slice(0,STAGE_MAX)); }, [stage,saveStage]);
+  const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
+  // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶
+  const addToStage = useCallback((c:ClipItem) => {
+    const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
+    if (exists) return;
+    saveStage([clipToStage(c), ...stage].slice(0,STAGE_MAX));
+  }, [stage,saveStage]);
+  const openStageFile = useCallback((s:StageItem) => {
+    if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
-    import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:f.path})).catch(()=>{});
+    import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:s.items![0].path})).catch(()=>{});
   }, []);
   const deleteClipItem = useCallback(async (time:number) => {
     setClipboard(prev => prev.filter(c => c.time !== time));
@@ -246,7 +279,7 @@ export default function App() {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
   }, []);
-  const copyAndPaste = useCallback((item:ClipItem) => {
+  const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
     if (launchingRef.current) return; // 与启动共用锁：动画进行中忽略
     // 实际粘贴：hide+交还焦点+Ctrl+V 全在 Rust 命令内（流程不变），此处仅负责调用
     const doPaste = async () => {
@@ -270,12 +303,17 @@ export default function App() {
   // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
   const copyToClipboard = useCallback(async (item:ClipItem) => {
     try {
-      const {invoke}=await import("@tauri-apps/api/core");
-      if (item.type === "text") await invoke("copy_text_to_clipboard",{text:item.content});
-      else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard",{paths:item.items.map(f=>f.path)});
-      else await invoke("copy_image_to_clipboard",{base64:item.content});
+      await writeItemToClipboard(item);
       setCopiedTime(item.time);
       setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
+    } catch {}
+  }, []);
+  // 中转条目「复制到剪贴板」：同上，独立 ✓ 反馈（按 id）
+  const copyStageToClipboard = useCallback(async (s:StageItem) => {
+    try {
+      await writeItemToClipboard(s);
+      setCopiedStageId(s.id);
+      setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
     } catch {}
   }, []);
   const openShortcut = useCallback((target:string) => {
@@ -337,14 +375,26 @@ export default function App() {
         <section className="center-panel">
           <div className="section-label">文件中转区</div>
           <div className={`drop-area${dragOver?" drag-active":""}`} onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={handleDrop}>
-            {files.length? files.map((f,i)=>(
-              <div key={f.path} className="file-row" onClick={()=>openFile(f)} onContextMenu={e=>{e.preventDefault();removeFile(i);}}>
-                <span className="file-emoji">{f.isDir?"📁":fi(f.ext)}</span>
-                <span className="file-title">{f.name}</span>
-                <span className="file-meta-sm">{f.isDir?"":f.ext.toUpperCase()}{!f.isDir&&` · ${fmtSize(f.size)}`}</span>
-                <button className="rm-btn" onClick={e=>{e.stopPropagation();removeFile(i);}}>×</button>
-              </div>
-            )): <p className="empty-hint">拖入文件或文件夹</p>}
+            {stage.length? <div className="stage-list">{stage.map(s=>{
+              const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
+              return (
+              <div key={s.id} className="stage-item" onClick={()=>copyAndPaste(s)} title={s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）"}>
+                {s.type==="image"
+                  ? <img className="stage-thumb" src={s.content} alt=""/>
+                  : <span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
+                <span className="stage-title">{label}</span>
+                {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
+                <div className="stage-actions">
+                  <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?"已复制":"复制到剪贴板"}>
+                    {copiedStageId===s.id
+                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                  </button>
+                  {s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
+                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="移除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                </div>
+              </div>);
+            })}</div>: <p className="empty-hint">复制后点剪贴板卡片的 📌 钉入，或拖入文件</p>}
           </div>
           <div className="section-label" style={{marginTop:16}}>快捷入口</div>
           <div className="shortcut-row">
@@ -359,6 +409,7 @@ export default function App() {
             {clipboard.length? clipboard.map((c,i)=>(
               <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
                 <div className="clip-actions">
+                  <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title="钉到中转区"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-2-4V7a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v6z"/></svg></button>
                   <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?"已复制":"复制到剪贴板"}>
                     {copiedTime===c.time
                       ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
