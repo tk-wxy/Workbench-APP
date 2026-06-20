@@ -71,6 +71,7 @@ npm run tauri build    # 打包
 - **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
 - **用 `RegisterHotKey` 的 Pressed/Released 事件判按键时长**：其事件经消息队列异步投递、有 500–800ms 抖动，阈值 200/300/500ms 全失败。⚠️ 注意区分：长短按本身**已实现**，但靠的是 `GetAsyncKeyState` 轮询物理电平（DECISIONS §2），**不是** RegisterHotKey 事件——别再回头试事件时长判定。
 - **修饰键 `Alt`（裸 Alt 触发菜单栏）/ `Alt+Space`（被系统窗口菜单占用）/ `Fn`（硬件键，OS 收不到）**：改用非 Alt 修饰键（`Ctrl+空格` / `Ctrl+反引号`）。
+- **拖入 target「每次 show 经 `run_on_main_thread` 幂等重注册」**：实测重注册虽报成功、产出的 IDropTarget 却收不到回调、破坏正常拖入（单变量隔离确认）。拖入注册**只在 setup 做一次**。详见 DECISIONS §14。（注：原生拖入本身**可行、已实现**，别误删——曾被错误登记为死胡同后已推翻。）
 
 ### 🔍 出问题时反查（症状 → 先查哪条铁律）
 | 症状 | 大概率违反 |

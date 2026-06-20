@@ -127,7 +127,6 @@ export default function App() {
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   const [store, setStore] = useState<any>(null);
-  const [dragOver, setDragOver] = useState(false);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
@@ -140,6 +139,8 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
+  const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
+  const storeRef = useRef<any>(null); storeRef.current = store;
 
   // ── 时钟 ──
   useEffect(() => { const u=()=>setTime(new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})); u(); const t=setInterval(u,1000); return ()=>clearInterval(t); }, []);
@@ -177,7 +178,27 @@ export default function App() {
             return [item, ...filtered].slice(0, 20);
           });
         });
-        cleanup = [un1, un2, un3];
+        // 原生拖入：Rust IDropTarget 收到外部文件 → emit 真实路径 → 转 file 型 StageItem 入中转（复用续26 去重/置顶/持久化）
+        const un4 = await listen("files-dropped", async (event: any) => {
+          const paths: string[] = event.payload || [];
+          if (!paths.length) return;
+          const { invoke } = await import("@tauri-apps/api/core");
+          const built: StageItem[] = [];
+          for (const p of paths) { try { built.push(fileEntryToStage(await invoke<FileEntry>("get_file_info", { path: p }))); } catch {} }
+          if (!built.length) return;
+          let next = [...stageRef.current];
+          for (const it of built) {
+            if (next.length >= STAGE_MAX) break;
+            if (next.some(s => s.type === "file" && s.items?.[0]?.path === it.items?.[0]?.path)) continue; // 同路径去重
+            next.push(it);
+          }
+          next = next.slice(0, STAGE_MAX);
+          setStage(next);
+          if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+          // Step 3：拖入后回焦点，让 Esc 可用（overlay 已显示+深色渲染，无白闪风险）
+          try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().setFocus(); } catch {}
+        });
+        cleanup = [un1, un2, un3, un4];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); };
@@ -253,8 +274,7 @@ export default function App() {
     setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [recordUse]);
-  // 拖入文件 → 中转区（⚠️ Tauri v2 默认拦截系统拖放，dataTransfer.path 可能拿不到真实路径，待阶段 2 实测）
-  const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); let nf=[...stage]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=STAGE_MAX) break; if(nf.some(s=>s.type==="file"&&s.items?.[0]?.path===fp)) continue; try { nf.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } await saveStage(nf.slice(0,STAGE_MAX)); }, [stage,saveStage]);
+  // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶
   const addToStage = useCallback((c:ClipItem) => {
@@ -374,7 +394,7 @@ export default function App() {
         </section>
         <section className="center-panel">
           <div className="section-label">文件中转区</div>
-          <div className={`drop-area${dragOver?" drag-active":""}`} onDragOver={e=>{e.preventDefault();setDragOver(true);}} onDragLeave={()=>setDragOver(false)} onDrop={handleDrop}>
+          <div className="drop-area">
             {stage.length? <div className="stage-list">{stage.map(s=>{
               const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
               return (
@@ -394,7 +414,7 @@ export default function App() {
                   <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="移除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
                 </div>
               </div>);
-            })}</div>: <p className="empty-hint">复制后点剪贴板卡片的 📌 钉入，或拖入文件</p>}
+            })}</div>: <p className="empty-hint">拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入</p>}
           </div>
           <div className="section-label" style={{marginTop:16}}>快捷入口</div>
           <div className="shortcut-row">

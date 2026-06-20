@@ -19,7 +19,8 @@
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
 - **新增（续26 实测通过）**：文件中转区升级为「混合条目」模型（文件/文本/图片），剪贴板卡片 📌 钉入 + 中转条目单击取走（写回剪贴板+粘贴）/复制/打开/删除。store 由 `file-list`(路径数组)→`stage-items`(异构条目)、带旧格式迁移。**GUI 实测**：钉入/取走粘贴/复制/重启读回（含图片缩略图）全通过；迁移因本机无遗留 `file-list` 未触发（兜底逻辑，非 bug）
-- **下一步**：① **阶段 2：拖拽** —— 先诊断 Tauri v2 `tauri://drag-drop` 能否拿真实路径（现 `handleDrop` 读 `dataTransfer.path` 大概率失效），再评估「拖动中途呼出接住 drop」「拖出到 Explorer（需 DoDragDrop FFI，最难）」；② 阶段 3 可选：文件「复制固化一份」防源删失效；③ 设置面板继续扩项；长按阈值/采样率体感微调
+- **新增（续27 实测通过）**：原生拖入（drag-in）落地——`dragDropEnabled:false` + 自注册 IDropTarget（`dragdrop.rs`）接外部文件拖放，emit 路径 → 前端转 file StageItem 入中转。曾误判为死胡同（错误变量「先呼出再拖」+wry 占槽），spike 推翻、已实现。耐久性：setup 注册一次（「每次 show 重注册」实测破坏回调、已弃）。T1–T8 GUI 实测全过。**拖出 drag-out 未做**（需 DoDragDrop FFI，非死胡同、是未实现）
+- **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -160,10 +161,22 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
 - **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。**已决定保持位图**（用户 2026-06-20 确认，不做双格式/临时 PNG 方案，别当 TODO 去"修"）。若日后真要支持：copy_image 同时落临时 PNG + 写 CF_HDROP（双格式上剪贴板）
 - **多显示器**：当前仅适配主显示器工作区
+- **🐛 中转区与快捷入口视觉重合（待修，2026-06-21 记录，未改代码）**：`center-panel` 内「文件中转区(drop-area, flex:1)」+「快捷入口(shortcut-row)」纵向排布；中转条目变多时 drop-area 内容溢出、与下方快捷入口按钮视觉重合/挤压。根因＝drop-area 用 flex:1 撑高但内容无独立滚动容器、未与 shortcut-row 隔离。候选修法：drop-area 内套可滚动列表（`overflow-y:auto` + 限高），或给两区明确分隔/各自滚动。**用户指示先记录不改。**
 
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-21 (续27：原生拖入 drag-in 落地——先误判死胡同、spike 推翻、再实现，GUI 实测通过)
+- **弯路（已纠正，留教训）**：先用「先呼出再拖」（错误变量）+ 临时 on-screen 探针测，得「红色禁止+零事件」→ 误判全屏覆盖层收不到 OLE 拖放、登记为死胡同、删了 `handleDrop`、写了 §14「废弃」。根因没查清就下了硬限制结论。
+- **spike 推翻**：换正确流程「先抓住文件再呼出」+ 自注册最小 IDropTarget（`dragDropEnabled:false` 让 wry 不抢 target 槽）→ DragEnter/Drop **触发**于最深 `Chrome_RenderWidgetHostHWND`、拿到真实 CF_HDROP 路径。原失败真因＝错误变量 + wry 占槽（`AllowExternalDrop` 默认 false 拒收）。
+- **Step 0 微测（定耐久策略）**：只注册祖先 `WRY_WEBVIEW`→DragEnter 零触发，证 OLE **不沿父链 walk-up**。故注册「顶层+全部子孙窗」。
+- **实现**：新增 `src-tauri/src/dragdrop.rs`（windows crate `#[implement]` IDropTarget）：`OleInitialize`+`EnumChildWindows`+`RegisterDragDrop`（setup 一次）；DragEnter/Over 按 CF_HDROP 设光标；Drop 取路径 `emit("files-dropped")` 即返回（不碰剪贴板/不 hide）。前端 listen→`get_file_info`→file StageItem→入中转（复用续26 去重/置顶/持久化）+ 拖入后 `setFocus` 让 Esc 可用（无白闪）。`Cargo.toml` 加 windows features（Ole/SystemServices/Com_StructuredStorage/Graphics_Gdi/implement）+ `windows-core` 直接依赖（`#[implement]` 宏需）；`tauri.conf.json` `dragDropEnabled:false`（永久）。
+- **关键回退**：曾加「每次 show 经 `run_on_main_thread` 幂等重注册」扛 webview 重建——**实测重注册产出的 target 收不到回调、破坏正常拖入**（单变量隔离：停掉即恢复），已删。代价：渲染进程重建后失效到重启（罕见，T9 已知限制）。
+- **验证**：`cargo clippy` 零新增警告（基线8）、`tsc --noEmit` 零错误。**GUI 实测（用户）T1–T8 全过**：单/多文件、文件夹、混合、连续拖入（Drop 日志佐证 `Drop 4/3/2 path(s)`）、取走/Esc/light dismiss 回归。T9（渲染重建）= 已知限制未测。
+- **文档**：DECISIONS §14 改写为「可行」（机制+confidence+原失败根因+教训）；CLAUDE.md💀死胡同 改为「重注册回退」条 + 标注拖入可行别误删。
+- **拖出（drag-out）未做**：需 `DoDragDrop` 拖放源 FFI，更难、优先级低。
+- 文件：`src-tauri/src/dragdrop.rs`(新) / `lib.rs`(mod+setup 调用) / `Cargo.toml` / `tauri.conf.json` / `src/App.tsx` / `CLAUDE.md` / `DECISIONS.md`。未碰焦点交还/热键/剪贴板锁/粘贴 dance。
 
 ### 2026-06-20 (续26：文件中转区升级为「混合条目」+ 剪贴板互导 — 阶段1，纯前端，GUI 实测通过)
 - **前瞻商讨结论（用户拍板）**：① 存储=**混合条目模型**（文件存路径引用、文本/图片存内容），非真容器；② 传输通道先做简单的（剪贴板互导 + 取走粘贴），**拖拽留阶段2实测后再上**；③ 中转站与剪贴板历史**两个独立面板、互相导**（剪贴板=自动滚动传送带，中转=手动持久托盘）
