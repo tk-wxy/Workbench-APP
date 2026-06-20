@@ -1,4 +1,5 @@
 mod apps;
+mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
 
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
@@ -858,6 +859,7 @@ pub fn run() {
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
             start_clipboard_monitor(app.handle().clone());
+            dragdrop::register_drag_drop(app); // 中转区原生拖入
 
             let toggle_item = MenuItemBuilder::with_id("toggle", "显示窗口").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;

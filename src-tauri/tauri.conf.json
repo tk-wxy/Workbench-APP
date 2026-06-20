@@ -15,6 +15,7 @@
         "title": "Workbench App",
         "width": 900,
         "height": 560,
+        "dragDropEnabled": false,
         "resizable": false,
         "decorations": false,
         "transparent": true,

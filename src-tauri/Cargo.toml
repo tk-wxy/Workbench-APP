@@ -28,7 +28,15 @@ windows = { version = "0.58", features = [
   "Win32_System_Memory",
   "Win32_UI_Shell",
   "Win32_System_Com",
+  # 原生拖入（中转区 drag-in）：自注册 IDropTarget 所需
+  "Win32_System_Ole",
+  "Win32_System_SystemServices",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_Graphics_Gdi",
+  "implement",
 ] }
+# #[implement] 宏生成 windows_core:: 路径，用 umbrella windows crate 时需把它列为直接依赖
+windows-core = "0.58"
 walkdir = "2.5"
 flate2 = "1.1"
 tauri-plugin-store = "2"

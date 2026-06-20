@@ -4,7 +4,7 @@
 
 ## 目录（按主题）
 - **热键**：§1 RegisterHotKey vs 自建钩子 · §2 放弃长短按 · §9 修饰键选择
-- **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪
+- **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪 · §14 原生拖入(drag-in)废弃
 - **剪贴板 / 粘贴**：§3 粘贴可靠性 6 轮演进 · §6 后台缓存架构 · §7 CF_HDROP/DROPFILES · §10 检测优先级(截图去重) · §11 桌面 SHFileOperation 兜底 + fFlags
 - **其他**：§12 Git 版本历史（关键节点）
 
@@ -278,3 +278,34 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 9b745de  修复：transparent=true + 50ms防抖 + interval泄漏
 3508350  基线：纯 toggle 模式
 ```
+
+---
+
+## 14. 原生拖入（drag-in）：可行——dragDropEnabled:false + 自注册 IDropTarget（2026-06-21）
+
+**需求**：文件中转区支持「从资源管理器拖文件进来」——流程「源处按住拖动 → Ctrl+Space 呼出 → 拖入中转区松手」。
+
+**结论：可行，已实现。** 拖入（drag-in）落地为中转区正式功能；拖出（drag-out）未做（见末尾）。
+
+> ⚠️ 本节曾错误地把拖入登记为「死胡同/废弃」（2026-06-20）。那个结论是**错误变量**测出来的，已被后续 spike 推翻。下面记录正确机制、真实失败根因、以及这条教训。
+
+**confidence 分类**：
+- **已实测确认（高）**：`dragDropEnabled:false` + 在「顶层+全部子孙窗」自注册 IDropTarget → mid-drag 端到端通；DragEnter/Drop 触发于最深的 `Chrome_RenderWidgetHostHWND`、CF_HDROP 真实路径正确；单/多文件、文件夹、混合、连续拖入、取走/Esc/light dismiss 回归全过（T1–T8，2026-06-21 GUI 实测 + Drop 日志佐证 `Drop N path(s)`）。
+- **推断未实测（中）**：渲染进程崩溃/重建后拖入失效（render host 句柄变了、setup 那次注册作废）——本应用极难触发，未验证（T9 标注为已知限制）。
+
+**正确机制**：
+1. **`tauri.conf.json` `dragDropEnabled:false`**（永久）：让 wry 不抢 OLE drop target 槽、不拦 HTML5，把槽留给我们自注册。（HTML5 拖放本未用，无损失。）
+2. **自注册 IDropTarget**（`src-tauri/src/dragdrop.rs`，windows crate `#[implement]`）：`OleInitialize`（RegisterDragDrop 要求之，仅 `CoInitializeEx` 会 `CO_E_NOTINITIALIZED`）→ `EnumChildWindows` 枚举窗口树 → `RegisterDragDrop` 到顶层 + 全部子孙窗。**DragEnter/DragOver** 查 CF_HDROP 设 `DROPEFFECT_COPY`/`NONE`（光标反馈）；**Drop** 用 `DragQueryFileW` 取路径 → `emit("files-dropped", paths)` 后立即返回（handler 极简，不碰剪贴板/不 hide/不阻塞）。
+3. **路径入中转**（前端）：listen `files-dropped` → 每条 `get_file_info` → file 型 StageItem（isDir 区分）→ 复用续26 的去重/置顶/持久化。拖入后 `getCurrentWindow().setFocus()` 让 Esc 可用（overlay 已显示+深色渲染，实测无白闪）。
+
+**耐久性（关键设计，Step 0 微测定）**：OLE **不沿父链 walk-up**——只注册祖先 `WRY_WEBVIEW` 时 DragEnter 零触发；drop 只投递给光标正下方最深窗口。故注册「顶层+全部子孙窗」。**只在 setup 注册一次**：曾试「每次 show 经 `run_on_main_thread` 幂等重注册」扛 webview 重建，实测**重注册虽报成功、产出的 target 却收不到回调、破坏正常拖入**（单变量隔离：停掉重注册即恢复）——已回退，接受「渲染进程重建后失效到重启」的罕见代价。
+
+**原失败根因（为何曾误判死胡同）**：
+- **错误变量**：当时测「先呼出再拖」——全屏覆盖层盖住源应用、够不到文件，误以为是拖放本身不行。真实流程是「先抓住文件再呼出」。
+- **wry 占槽**：`dragDropEnabled` 默认 `true` 时 wry/WebView2 占了 `Chrome_RenderWidgetHostHWND` 的 drop target 槽并拒收外部拖放（`AllowExternalDrop` 默认 false）→ 红色禁止 + 零事件。关掉它把槽让出来即通。
+
+**教训**：曾把「没查清的现象」当成「硬限制」写进死胡同（红色禁止 + 零事件 → 直接判窗口收不到拖放）。正确做法是**自注册一个 IDropTarget 主动验证 hit-test 到底发生没有**（spike 一拖即推翻原结论）。呼应本文档既有原则：诊断要查到根因，未证实的不当定论。
+
+**拖出（drag-out）未做**：从 WebView 拖文件出去到 Explorer 需原生 `DoDragDrop`/`IDataObject` 拖放源 FFI（WebView2 不原生支持），比拖入更难；且优先级低（「单击取走→Ctrl+V」已覆盖取走）。暂不做，非死胡同、是未实现。
+
+**死胡同登记**：CLAUDE.md【💀 死胡同】已补一条。后续若仍想要「主动加文件/文件夹」，走原生文件选择器（`tauri-plugin-dialog`，未装），不要回头试拖拽。
