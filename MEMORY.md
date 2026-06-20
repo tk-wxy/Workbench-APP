@@ -15,7 +15,7 @@
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
 - **进行中**：← 无
-- **下一步**：搜索算法升级（模糊匹配 + 缩写匹配，进行中）；**应用排序引入 last_used 时间衰减做"近期常用"**（纯 count 排序固有局限：远古高频 app 永占顶；需把 `app-frequency` 由 `Record<string,number>` 迁移为带时间戳的结构，读取兼容旧格式——已确认有必要，暂不实现）；文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）
+- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -94,7 +94,7 @@ src-tauri/Cargo.toml
 - ✅ 全屏窗口 + 毛玻璃背景（`transparent:true` + `backdrop-filter: blur`）
 - ✅ 全屏缝隙修复（SPI_GETWORKAREA + 动态 offset 补偿）
 - ✅ 系统托盘常驻 + 开机自启
-- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 点击启动 / **使用频率排序：常用 app 自动浮前，响应式** / **模糊搜索：子序列打分(模糊+缩写) + 相关度排序 + 命中高亮** / 键盘导航 ←→↑↓ + Tab 循环 + Enter）
+- ✅ 应用启动器（扫描 Start Menu / 图标提取 / 点击启动 / **使用排序：频率为主×近期乘数（`count×0.5^(age/30天)` 时间衰减），响应式** / **模糊搜索：子序列打分(模糊+缩写) + 相关度排序 + 命中高亮** / 键盘导航 ←→↑↓ + Tab 循环 + Enter）
 - ✅ 剪贴板文本（复制/粘贴，auto Ctrl+V 到焦点窗口）
 - ✅ 剪贴板图片（后台缩略图缓存/历史切换粘贴/原图 Ctrl+V/aHash 去重）
 - ✅ 剪贴板文件（CF_HDROP 格式检测/写入/粘贴，单文件+多文件）
@@ -155,6 +155,13 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续18：应用排序加 last_used 时间衰减 — 近期常用)
+- **解决续16 遗留的纯 count 局限**（远古高频 app 永占顶）。模型：**频率为主 × 近期乘数**——`usageScore = count × 0.5^(距上次使用 / 半衰期)`，半衰期常量 `USAGE_HALFLIFE_S = 30 天`（要调近期敏感度改它）。用户在 频率为主/近期为主(EMA) 两模型 + 7/30/90 天里选了 频率为主 + 30 天。
+- **数据迁移**（`App.tsx`）：`app-frequency` 由 `Record<string,number>` → `Record<string,{count,last_used}>`（last_used=Unix 秒）。加载时兼容旧格式：遇 number 迁成 `{count:n, last_used:当前时间}`，不丢历史排序。
+- **改动点**：`usageScore` 组件外助手；`appFreq`→`appUsage` state 重命名；`recordUse` 同时自增 count + 写 last_used；`sortedApps` 与 `filteredApps` 同分兜底改用 `usageScore`（memo 内取 `nowS`）。
+- 纯前端、零 Rust 改动。`tsc --noEmit` 零错误。实测排序正常、旧数据迁移不丢。注：30 天半衰期下衰减是长期行为，短时肉眼无差异（预期）。
+- 文件：`src/App.tsx`（+`AppUsage` +`USAGE_HALFLIFE_S` +`usageScore` + 迁移/记录/排序改造）
 
 ### 2026-06-20 (续17：应用搜索升级 — 模糊匹配 + 相关度排序 + 命中高亮 + Tab 导航)
 - **从 includes 子串升级为子序列打分器**（`App.tsx` 组件外 `fuzzyScore`）：统一解决模糊（非连续、容错，`vscde`→VS Code）+ 缩写（词首加分使 `vsc`→Visual Studio Code 自然涌现）。打分维度：完全子串最高分(+前缀)、词首/连续/靠前加分。返回 `score` + `ranges`(命中区间)。
