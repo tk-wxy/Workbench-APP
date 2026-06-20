@@ -43,9 +43,6 @@ const HOTKEY_TAP_MAX_MS: u128 = 250;
 /// 前台窗口轮询间隔（50ms）：light dismiss——窗口可见时若前台切到别的应用则自动隐藏。
 /// GetForegroundWindow 是 µs 级调用，50ms 轮询近乎零成本
 const FOCUS_POLL_MS: u64 = 50;
-/// 短按 toggle 关闭的覆盖层淡出时长（仅此一条关闭路径走淡出，与启动/粘贴同款观感）。
-/// ⚠️ 必须与前端 `LAUNCH_ANIM_MS` 及 CSS `.overlay-simple.dismissing` 的 200ms 三处一致。
-const DISMISS_FADE_MS: u64 = 200;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -54,10 +51,6 @@ fn now_ms() -> i64 {
 // ── 剪贴板后台缓存 ─────────────────────────────────────────
 
 static CLIP_CACHE: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
-
-/// 短按 toggle 关闭的「淡出代际」防竞态计数：关闭时延迟 DISMISS_FADE_MS 才真正 hide，
-/// 这期间任何 show 都会 bump 它，使那个已排程的延迟 hide 作废——防「淡出途中又呼出、200ms 后被误关」。
-static HIDE_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 将 arboard 图片处理为缓存 entry：>MAX_THUMB_DIM 时缩放(Triangle) → PNG 编码 → aHash。失败返回 None
 fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
@@ -733,7 +726,6 @@ fn start_hotkey_monitor(app: AppHandle) {
         // ── 内嵌的 show / hide 配方（复刻现有路径，不调用/不改现有 handler）──
         // show：§8 三约束——emit 先于 show（防白闪）；set_focus 延迟 50ms（防 WM_ACTIVATE 重绘）
         let show = |app: &AppHandle, window: &tauri::WebviewWindow| {
-            HIDE_GEN.fetch_add(1, Ordering::SeqCst); // 作废任何排程中的淡出延迟 hide（防重开竞态）
             let _ = app.emit("hotkey-show", ());
             let _ = window.show();
             let win = window.clone();
@@ -742,27 +734,10 @@ fn start_hotkey_monitor(app: AppHandle) {
                 if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
             });
         };
-        // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）。
-        // 用于长按 momentary 松开——即时关，不淡出（保持 peek 手感）。
+        // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
         let hide = |app: &AppHandle, window: &tauri::WebviewWindow| {
             let _ = window.hide();
             let _ = app.emit("hotkey-hide", ());
-        };
-        // dismiss_fade：仅短按 toggle 关闭走此路——先 emit 让前端播 DISMISS_FADE_MS 覆盖层淡出，
-        // 延迟到淡出结束再真正 hide（hide 仍由 Rust 执行，不违反「可见性真相归 Rust」）。
-        // 防竞态：排程时记下 HIDE_GEN 令牌，到点仅当令牌未被 show bump 走 且 窗口仍可见才隐藏。
-        let dismiss_fade = |app: &AppHandle, window: &tauri::WebviewWindow| {
-            let gen_token = HIDE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-            let _ = app.emit("hotkey-dismiss", ()); // 前端置 dismissing=true 播 CSS 淡出
-            let win = window.clone();
-            let app2 = app.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(DISMISS_FADE_MS));
-                if HIDE_GEN.load(Ordering::SeqCst) == gen_token && win.is_visible().unwrap_or(false) {
-                    let _ = win.hide();
-                    let _ = app2.emit("hotkey-hide", ());
-                }
-            });
         };
 
         let mut prev_combo = false;                          // 上一拍 Ctrl+Space 是否同时按下
@@ -786,11 +761,11 @@ fn start_hotkey_monitor(app: AppHandle) {
                 // ── 松开沿：按住时长决定语义 ──
                 let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
                 if held > HOTKEY_TAP_MAX_MS {
-                    // 长按 = momentary：松开即关（无论按下时开/关）——瞬关不淡出，保 peek 手感
+                    // 长按 = momentary：松开即关（无论按下时开/关）
                     hide(&app, &window);
                 } else if visible_at_press {
-                    // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）——走淡出
-                    dismiss_fade(&app, &window);
+                    // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
+                    hide(&app, &window);
                 } else {
                     // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open），无需动作
                 }
