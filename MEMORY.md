@@ -246,6 +246,16 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **文档**：CLAUDE.md 全局热键节 + 死胡同节重写；DECISIONS §1/§2 改写并并入 spike 实测数据；临时 `SPIKE-keystate.md` 已删除
 - `cargo check` 零警告。show/hide 复用 §8 路径配方，未改焦点交还/粘贴流程
 
+### 2026-06-20 (续24：剪贴板粘贴消失动画统一为启动式快速淡出 — 待 GUI 实测)
+- **需求**：用户更喜欢应用启动那种「快速淡出露桌面」，要求剪贴板点击粘贴的消失动画全部替换为同款
+- **根因**：启动 = 先淡出 200ms 再 Rust hide；剪贴板粘贴命令一进来就 `window.hide()` 瞬隐（无淡出）→ 观感不一致
+- **改法（纯前端，不改粘贴语义）**：把「淡出」从启动专属抽成共享 `dismissing` 状态（CSS `.overlay-simple.launching`→`.dismissing`，启动与粘贴共用）。`copyAndPaste` 改为：先 `setDismissing(true)` 播 200ms 淡出 → 再 invoke 三类粘贴命令（命令内部 hide+交还焦点+Ctrl+V 流程**完全不变**）。启动 `launchApp` 同步加 `setDismissing(true)`
+- **复位**：粘贴命令不发 `hotkey-hide`，故 setTimeout 内 `finally` 手动复位 `dismissing`/`launchingRef`（窗口已隐藏，不可见）；启动仍靠 `hotkey-hide` 监听复位（监听也补了 `setDismissing(false)`）
+- **新增守卫**：延迟 200ms 引入「点完按 Esc 反悔」窗口 → setTimeout 内 `if(!launchingRef.current)return` 放弃粘贴；`launchingRef` 现为启动+粘贴共用防连点锁
+- **顺带**：图片粘贴去掉冗余的二次 `hideWorkbench()`（`set_clipboard_image` 内部已 hide），与文本/文件路径一致
+- 文件：`src/App.tsx`（`dismissing` state + `launchApp`/`copyAndPaste`/`hotkey-hide` 改）、`src/App.css`（类重命名）。`tsc`+`vite build` 通过；⚠️ 观感与「Esc 反悔不粘贴」**未真跑 GUI**，需 `npm run tauri dev` 实测
+- 未碰 Rust 粘贴命令/焦点交还/热键/窗口几何
+
 ### 2026-06-20 (续23：应用启动「放大暂留」动画 — GUI 实测通过)
 - **已落地**：路线 B 克隆浮层 + 克制档 scale1.4/200ms。`tsc --noEmit` + `vite build` 通过；**用户 GUI 实测：效果符合预期，未发现 bug**
 - **实现位置**：`src/App.tsx`——`LAUNCH_ANIM_MS=200`/`LaunchAnim` 类型（组件外）；`launchAnim` state + `launchingRef`（防连点）；`launchApp(app, iconEl?)` 改写（量 rect→立即 invoke launch_app→setLaunchAnim→延迟 hide；reduced-motion 或无 iconEl 走即时 hide 兜底）；`hotkey-hide` 监听复位；点击/Enter 两处传图标元素；return 包 fragment、`#overlay` 兄弟渲染 `.launch-clone`。`src/App.css`——`.overlay-simple.launching{opacity:0;transition:200ms}` + `.launch-clone` + `@keyframes launch-pop`

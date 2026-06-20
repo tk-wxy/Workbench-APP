@@ -111,6 +111,7 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的项 time，用于按钮 ✓ 反馈
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
+  const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
@@ -139,7 +140,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); launchingRef.current = false; }); // 复位启动动画
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; }); // 复位启动/粘贴动画
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
           setClipboard(prev => {
@@ -224,6 +225,7 @@ export default function App() {
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
     setLaunchAnim({ icon: app.icon, name: app.name, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [recordUse]);
   const handleDrop = useCallback(async (e:React.DragEvent) => { e.preventDefault(); setDragOver(false); const items=Array.from(e.dataTransfer.files??[]); if(!items.length) return; const {invoke}=await import("@tauri-apps/api/core"); const nf=[...files]; for(const item of items){ const fp=(item as any).path??item.name; if(nf.length>=10) break; if(nf.some(f=>f.path===fp)) continue; try { nf.push(await invoke<FileEntry>("get_file_info",{path:fp})); } catch{} } await saveFiles(nf.slice(0,10)); }, [files,saveFiles]);
@@ -244,12 +246,26 @@ export default function App() {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
   }, []);
-  const copyAndPaste = useCallback(async (item:ClipItem) => {
-    if (item.type === "text") { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
-    else if (item.type === "file" && item.items) {
-      try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); }
-    }
-    else { try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("set_clipboard_image",{base64:item.content}); } catch{} await hideWorkbench(); }
+  const copyAndPaste = useCallback((item:ClipItem) => {
+    if (launchingRef.current) return; // 与启动共用锁：动画进行中忽略
+    // 实际粘贴：hide+交还焦点+Ctrl+V 全在 Rust 命令内（流程不变），此处仅负责调用
+    const doPaste = async () => {
+      const {invoke}=await import("@tauri-apps/api/core");
+      if (item.type === "text") { try { await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
+      else if (item.type === "file" && item.items) { try { await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); } }
+      else { try { await invoke("set_clipboard_image",{base64:item.content}); } catch{ await hideWorkbench(); } }
+    };
+    // 无障碍：跳过淡出，沿用即时粘贴
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce) { doPaste(); return; }
+    // 与启动一致：先播 LAUNCH_ANIM_MS 覆盖层淡出露桌面，再调粘贴命令（命令自身会 hide+粘贴）
+    launchingRef.current = true;
+    setDismissing(true);
+    setTimeout(async () => {
+      if (!launchingRef.current) return; // 淡出期间被 Esc/热键复位（用户反悔）→ 放弃粘贴
+      try { await doPaste(); }
+      finally { setDismissing(false); launchingRef.current = false; } // 粘贴命令不发 hotkey-hide，手动复位（窗口此时已隐藏，复位不可见）
+    }, LAUNCH_ANIM_MS);
   }, []);
   // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
   const copyToClipboard = useCallback(async (item:ClipItem) => {
@@ -288,7 +304,7 @@ export default function App() {
 
   return (
    <>
-    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${launchAnim ? " launching" : ""}`}>
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}`}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
