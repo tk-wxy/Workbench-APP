@@ -354,7 +354,12 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
 
     // 非桌面：CF_HDROP 写回 + Ctrl+V
     SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
-    write_cf_hdrop(&paths)?;
+    {
+        // 仅罩 write_cf_hdrop 的 OpenClipboard…CloseClipboard；锁在此处不进 write_cf_hdrop
+        // （它被已持锁的 copy_files_to_clipboard 共用，进函数会重入死锁）。下面焦点交还/Ctrl+V 在锁外
+        let _g = CLIPBOARD_LOCK.lock().unwrap();
+        write_cf_hdrop(&paths)?;
+    }
 
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
@@ -553,9 +558,12 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
             let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
             base64_decode(b64).ok_or("base64 解码失败")?
         } else {
-            // 当前图：从 arboard 读取 RGBA 再编码为 PNG
-            let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
-            let img_data = cb.get_image().map_err(|e| format!("读图: {}", e))?;
+            // 当前图：从 arboard 读取 RGBA 再编码为 PNG（读也走锁，与监听串行；仅罩读取临界区）
+            let img_data = {
+                let _g = CLIPBOARD_LOCK.lock().unwrap();
+                let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+                cb.get_image().map_err(|e| format!("读图: {}", e))?
+            };
             let rgba_img = image::RgbaImage::from_raw(
                 img_data.width as u32, img_data.height as u32, img_data.bytes.into_owned(),
             ).ok_or("图片构造失败")?;
@@ -581,9 +589,13 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
         let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
         let rgba = img.to_rgba8();
         let (w, h) = rgba.dimensions();
-        let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
-        cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
-            .map_err(|e| format!("写入: {}", e))?;
+        {
+            // 仅罩写入临界区；下面焦点交还/Ctrl+V 在锁外
+            let _g = CLIPBOARD_LOCK.lock().unwrap();
+            let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+            cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
+                .map_err(|e| format!("写入: {}", e))?;
+        }
         println!("[imgpaste] thumbnail {w}×{h} written back");
     }
 
@@ -606,8 +618,12 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
     let t0 = std::time::Instant::now();
-    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
-    clipboard.set_text(&text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
+    {
+        // 仅罩写入临界区；绝不跨下面的 hide/sleep/焦点交还/Ctrl+V 持锁（否则阻塞监听线程）
+        let _g = CLIPBOARD_LOCK.lock().unwrap();
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
+        clipboard.set_text(&text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
+    }
 
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
     std::thread::sleep(std::time::Duration::from_millis(150));

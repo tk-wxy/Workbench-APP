@@ -55,7 +55,8 @@ npm run tauri build    # 打包
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
 - 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）；`CLIP_CACHE` 最多 20 条。
 - 图片：>1024px 用 `image` crate `FilterType::Triangle` 缩到 1024px 缩略图再编码。**轮询不读图，只在内容变化时处理一次**。
-- 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（用计数器非布尔——arboard 的 get+set 可能触发 2 次 seq 变化），后台 `swap` 递减跳过。
+- **所有剪贴板读写必须走 `CLIPBOARD_LOCK` 串行化**（监听读 + 全部写入者：copy/paste × 文本/图片/文件，含 `set_clipboard_image` 桌面分支读当前图的 `get_image`）。根因：监听线程占着 `OpenClipboard` 句柄时，写入者的 `SetClipboardData`/`EmptyClipboard` 抢不到 → `os error 1418`（线程没有打开的剪贴板）。锁粒度**仅限 `OpenClipboard…CloseClipboard` 临界区**（arboard 的 set/get 调用本身、或裸 FFI `write_cf_hdrop`）——写入者**绝不跨 `hide()`/`sleep()`/焦点交还/`enigo` Ctrl+V 持锁**（会阻塞监听线程、emit 往返时可能死锁）。桌面分支 `SHFileOperation`/`desktop_copy_files` 落地文件、**不碰系统剪贴板，不加锁**。`write_cf_hdrop` 被 paste 与 copy 共用 → 锁加在**调用方**、**别进 `write_cf_hdrop`**（否则 copy 重入死锁）。锁序：监听**先放 `CLIPBOARD_LOCK` 再取 `CLIP_CACHE`**，写入者只取 `CLIPBOARD_LOCK`，无环。**新增任何剪贴板读写路径必须取此锁。**（唯一例外：监听读在剪贴板被外部占用时，持锁跨有界 retry-sleep `CLIP_READ_RETRIES×CLIP_READ_RETRY_MS`——此时外部正占着剪贴板、写入者本就进不来，无额外损害；见 DECISIONS §6。）
+- 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（用计数器非布尔——arboard 的 get+set 可能触发 2 次 seq 变化），后台 `swap` 递减跳过。`CLIPBOARD_LOCK` 与 `SKIP_CLIP_EVENTS`/seq 水位是两层正交防护：前者防**并发抢句柄(1418)**，后者防**自写回流历史面板**。
 - 写文件用 `CF_HDROP` raw FFI（`SetClipboardData` / `DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径）。别用 `[0u8;16]` 清零，会导致 fWide=FALSE 解析失败。
 - 去重**只在同类型内进行**（跨类型去重会误删）：文件按 `items[0].path`，文本/图片按 `content`，不同类型永久保留。
 
@@ -80,6 +81,7 @@ npm run tauri build    # 打包
 | 文件粘贴被 Explorer 拒绝 | `DROPFILES.fWide ≠ 1` |
 | 截图不显示缩略图 | 检测顺序没把图片排在 CF_HDROP 之前 |
 | 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
+| 复制/粘贴写剪贴板报 os error 1418 | 写入段没取 `CLIPBOARD_LOCK`，与监听读并发抢 OpenClipboard 句柄 |
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
 | 窗口底部细蓝缝 / 透明窗边异常 | `NCRENDERING_POLICY=DISABLED` 破坏透明边自画的；去阴影改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
 | WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后 WebView 填满外框、底边越过任务栏顶；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
