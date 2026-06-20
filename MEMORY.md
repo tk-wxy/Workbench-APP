@@ -13,9 +13,10 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
 - **进行中**：← 无
-- **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
+- **待实现（方案已锁，见下「续23 计划」）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms
+- **下一步**：文件中转区独立于剪贴板文件历史；设置面板各条目继续扩项（常规加开机自启开关、快捷键做成可配置等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -244,6 +245,32 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
   - 新增常量 `HOTKEY_POLL_MS`/`HOTKEY_TAP_MAX_MS`（顶部命名常量，调灵敏度改这两个）
 - **文档**：CLAUDE.md 全局热键节 + 死胡同节重写；DECISIONS §1/§2 改写并并入 spike 实测数据；临时 `SPIKE-keystate.md` 已删除
 - `cargo check` 零警告。show/hide 复用 §8 路径配方，未改焦点交还/粘贴流程
+
+### 2026-06-20 (续23：应用启动「放大暂留」动画 — 方案已锁，待实现)
+- **目标**：点击应用后，图标做短暂放大+淡出（Mac 启动台式），覆盖层整体淡出露桌面，暗示刚启动了什么
+- **路线（已选 B）**：克隆图标到顶层 `position:fixed` 浮层做动画——避开 `.app-grid`(overflow-y:auto)/`.app-panel`/`.main-area`(overflow:hidden) 的裁剪。路线 A「就地 transform」被否（靠边图标会被裁切打折）
+- **参数（已选克制档）**：`scale 1.0→1.4`，时长 `LAUNCH_ANIM_MS=200`（命名常量，可调）
+- **实现要点（纯前端，不动 Rust/tauri.conf/show 路径/焦点交还/热键）**：
+  - state `launchingPath` + 克隆数据（图标 src + `getBoundingClientRect()` 屏幕 rect）
+  - `launchApp` 改：先量 rect → **立即** invoke `launch_app`（app 照常秒开，不拖慢）→ 渲染顶层克隆 + keyframes(scale+淡出) + `.main-area/.top-bar/.bottom-bar` 整体淡出 → `setTimeout(hideWorkbench, 200)`
+  - 复位：`hotkey-hide` 监听里清 `launchingPath`/克隆（窗口已隐藏后复位 → 下次呼出干净、无白闪/残留）
+  - 防护：`launchingPath` 非空忽略连点；`prefers-reduced-motion` 跳动画直接 hide；Enter 启动复用同逻辑
+- **铁律核对**：不违反「绝不让前端管 hide」——可见性真相仍归 Rust，仅把已有 `hideWorkbench()` invoke **刻意延迟 200ms** 播动画；区别于铁律所指的「IPC/blur 意外延迟」。建码时注释写清
+- **待实现时观察的风险**：启动 app 若 200ms 内抢前台 → `start_focus_watch` 提前 hide 截断动画（非 bug，效果略短）
+- **改动文件（实现时）**：`src/App.tsx`（state+常量+`launchApp` 改写+克隆浮层+`hotkey-hide` 复位+tile 挂 `data-path`）/ `src/App.css`（keyframes+克隆/淡出样式）
+
+### 2026-06-20 (续22：悬停提示 — 应用「单击打开」/ 剪贴板卡片「单击左键粘贴」)
+- 应用卡片 `app-tile` 加原生 `title="单击打开"`（原先无提示）；剪贴板卡片 `clip-block` 文案 `点击粘贴/点击粘贴文件/点击复制` → `单击左键粘贴/单击左键粘贴文件/单击左键复制`（image 实为写入剪贴板不自动粘贴，文案保留「复制」不假装）
+- 用原生 `title` 属性（与剪贴板卡片既有做法一致，零风险，未碰窗口/焦点）。⚠️ 原生 tooltip 有 ~0.5–1s 延迟 + OS 样式；若要即时/贴主题的自定义气泡需另做组件
+- 文件：`src/App.tsx`（两处 JSX `title`）。`tsc --noEmit` 零错误，GUI 观感未真跑
+
+### 2026-06-20 (续21：设置面板改左右分栏 — 条目导航 + 详情)
+- **布局重构**：原单列分段（外观/通用/关于）→ 左侧条目导航 + 右侧详情面板。条目由模块级常量 `SETTINGS_TABS`（id/icon/label）驱动，`settingsTab` state 控制选中（默认 `general`），后续扩条目只改这个数组 + 加一段面板 JSX
+- **条目（4 项，可扩展）**：① 常规 = 背景主题 ② 剪贴板 = 历史条数 + 清空 + 说明 ③ 快捷键 = 当前键位一览（暂只读，标注后续可配置）④ 关于 = 版本 + 简介。功能逻辑（changeTheme/clearClipboard）原样复用，未改行为
+- **CSS**：`.settings-modal` 改 flex 列 + 固定高 460px；新增 `.settings-layout/.settings-nav/.settings-nav-item/.settings-panel/.settings-panel-title/.settings-hint`；删除废弃 `.settings-body/.settings-section-label`
+- 文件：`src/App.tsx`（+`SETTINGS_TABS`/`SettingsTab` 类型 + `settingsTab` state + 模态 JSX 重写）/ `src/App.css`（模态两栏样式）
+- **验证**：`tsc --noEmit` 零错误。⚠️ 视觉/交互**未真跑 GUI**（无头环境），需 `npm run tauri dev` 实测条目切换观感
+- 未触碰窗口/焦点/热键/剪贴板/粘贴流程
 
 ### 2026-06-18 (续10：设置面板 + 背景主题深色/浅色/系统)
 - **新功能**：顶栏右侧齿轮图标 → 居中模态设置面板（Esc / 点遮罩关闭，设置打开时屏蔽应用导航键）

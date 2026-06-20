@@ -78,6 +78,15 @@ function HighlightText({ text, ranges }: { text: string; ranges: [number, number
   return <>{parts}</>;
 }
 
+// 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
+const SETTINGS_TABS = [
+  { id: "general",   icon: "⚙",  label: "常规" },
+  { id: "clipboard", icon: "📋", label: "剪贴板" },
+  { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
+  { id: "about",     icon: "ℹ",  label: "关于" },
+] as const;
+type SettingsTab = typeof SETTINGS_TABS[number]["id"];
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -92,6 +101,7 @@ export default function App() {
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的项 time，用于按钮 ✓ 反馈
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
@@ -282,7 +292,7 @@ export default function App() {
           <div className="section-label">应用启动器</div>
           <div className="app-grid">
             {filteredApps.map(({app,ranges},i)=>(
-              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(app)} onMouseEnter={()=>setSelectedIdx(i)}>
+              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={()=>launchApp(app)} onMouseEnter={()=>setSelectedIdx(i)} title="单击打开">
                 <div className="app-tile-icon">{app.icon?<img src={app.icon} alt=""/>:<span>{app.name[0]}</span>}</div>
                 <span className="app-tile-label"><HighlightText text={app.name} ranges={ranges} /></span>
               </div>
@@ -313,7 +323,7 @@ export default function App() {
           <div className="section-label">剪贴板历史</div>
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
-              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"点击粘贴":c.type==="file"?"点击粘贴文件":"点击复制"}>
+              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
                 <div className="clip-actions">
                   <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?"已复制":"复制到剪贴板"}>
                     {copiedTime===c.time
@@ -341,25 +351,50 @@ export default function App() {
               <span className="settings-title">设置</span>
               <button className="settings-close" onClick={()=>setSettingsOpen(false)} title="关闭" aria-label="关闭">×</button>
             </div>
-            <div className="settings-body">
-              <div className="settings-section-label">外观</div>
-              <div className="settings-row">
-                <span className="settings-row-label">背景主题</span>
-                <div className="seg">
-                  {([["dark","深色"],["light","浅色"],["system","系统"]] as const).map(([v,l])=>(
-                    <button key={v} className={`seg-btn${theme===v?" seg-active":""}`} onClick={()=>changeTheme(v)}>{l}</button>
-                  ))}
-                </div>
-              </div>
-              <div className="settings-section-label">通用</div>
-              <div className="settings-row">
-                <span className="settings-row-label">剪贴板历史<span className="settings-row-sub">{clipboard.length} 条</span></span>
-                <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
-              </div>
-              <div className="settings-section-label">关于</div>
-              <div className="settings-about">
-                <div>Workbench <b>v0.1.0</b></div>
-                <div>呼出 / 隐藏 <kbd>Ctrl+Space</kbd> · 关闭 <kbd>Esc</kbd></div>
+            <div className="settings-layout">
+              <nav className="settings-nav">
+                {SETTINGS_TABS.map(t=>(
+                  <button key={t.id} className={`settings-nav-item${settingsTab===t.id?" settings-nav-active":""}`} onClick={()=>setSettingsTab(t.id)}>
+                    <span className="settings-nav-icon">{t.icon}</span>{t.label}
+                  </button>
+                ))}
+              </nav>
+              <div className="settings-panel">
+                {settingsTab==="general" && (<>
+                  <div className="settings-panel-title">常规</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">背景主题</span>
+                    <div className="seg">
+                      {([["dark","深色"],["light","浅色"],["system","系统"]] as const).map(([v,l])=>(
+                        <button key={v} className={`seg-btn${theme===v?" seg-active":""}`} onClick={()=>changeTheme(v)}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                </>)}
+                {settingsTab==="clipboard" && (<>
+                  <div className="settings-panel-title">剪贴板</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">剪贴板历史<span className="settings-row-sub">{clipboard.length} 条</span></span>
+                    <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
+                  </div>
+                  <p className="settings-hint">复制的文本、图片、文件会自动记录，最多保留 20 条。</p>
+                </>)}
+                {settingsTab==="hotkeys" && (<>
+                  <div className="settings-panel-title">快捷键</div>
+                  <div className="settings-row"><span className="settings-row-label">呼出 / 隐藏</span><kbd>Ctrl+Space</kbd></div>
+                  <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
+                  <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
+                  <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
+                  <p className="settings-hint">当前快捷键暂不可自定义，后续版本开放配置。</p>
+                </>)}
+                {settingsTab==="about" && (<>
+                  <div className="settings-panel-title">关于</div>
+                  <div className="settings-about">
+                    <div>Workbench <b>v0.1.0</b></div>
+                    <div>Windows 全屏「第二桌面」工具</div>
+                    <div>应用启动器 · 文件中转 · 剪贴板历史</div>
+                  </div>
+                </>)}
               </div>
             </div>
           </div>
