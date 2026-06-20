@@ -16,6 +16,7 @@
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
 - **进行中**：← 无
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
+- **新增（续24 实测通过 / 续25 待实测）**：消失动画统一为「快速淡出露桌面」——续24 剪贴板粘贴（纯前端）；续25 短按 toggle 关闭（改 Rust 热键路径，长按/自动隐藏/Esc 仍瞬关）
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板各条目继续扩项（常规加开机自启开关、快捷键做成可配置等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
 
@@ -246,7 +247,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **文档**：CLAUDE.md 全局热键节 + 死胡同节重写；DECISIONS §1/§2 改写并并入 spike 实测数据；临时 `SPIKE-keystate.md` 已删除
 - `cargo check` 零警告。show/hide 复用 §8 路径配方，未改焦点交还/粘贴流程
 
-### 2026-06-20 (续24：剪贴板粘贴消失动画统一为启动式快速淡出 — 待 GUI 实测)
+### 2026-06-20 (续25：短按 toggle 关闭也走快速淡出 — 改 Rust 热键路径，待 GUI 实测)
+- **需求**：用户确认淡出观感好，要求快捷键关闭也用同款。范围（用户选定）：**仅短按 toggle 关闭淡出**；长按 momentary 松开 / 自动隐藏(light dismiss) / Esc **保持瞬关**（不拖慢 peek 手感、不在已点的应用上赖 200ms）
+- **关键差异**：启动/粘贴关闭是前端点击驱动（JS 掌控时序）；快捷键关闭是 Rust 键态轮询驱动、直接 `window.hide()`，前端收到 `hotkey-hide` 时已隐藏——**必须改 Rust**，前端接不进去
+- **Rust 改法（`lib.rs start_hotkey_monitor`）**：新增 `dismiss_fade` 闭包——emit `hotkey-dismiss`(前端播淡出) + 后台线程延迟 `DISMISS_FADE_MS=200ms` 再 `win.hide()`+emit `hotkey-hide`。短按 toggle 关闭分支由 `hide()` 改调 `dismiss_fade()`；长按分支仍 `hide()`
+- **防重开竞态**：`static HIDE_GEN: AtomicU64`。`dismiss_fade` 排程时取 `gen_token`，到点仅当 `HIDE_GEN==gen_token && is_visible()` 才真 hide；`show` 闭包 bump `HIDE_GEN` 作废排程中的延迟 hide。避免「淡出途中又呼出、200ms 后被误关」。瞬关路径(长按/light dismiss)不 bump，靠 `is_visible()` 兜底
+- **前端（`App.tsx`）**：新增 `hotkey-dismiss` 监听→`setDismissing(true)`（复用续24 的 `dismissing` 状态/CSS）；`hotkey-show` 监听补 `setDismissing(false)`（重开取消淡出）；`unDismiss` 入 cleanup
+- **三处 200ms 须同步**：Rust `DISMISS_FADE_MS` / 前端 `LAUNCH_ANIM_MS` / CSS `.overlay-simple.dismissing`（已在 CLAUDE.md 铁律标注）
+- **验证**：`tsc` + `cargo check` 通过，clippy 无新增警告（8 个均预存）。⚠️ **热键路径属最高危区、我无法 GUI 实测**——需用户 `npm run tauri dev` 重点验：短按关闭淡出是否顺、淡出途中再按是否正常重开不被误关、长按 peek/自动隐藏/Esc 是否仍瞬关
+- CLAUDE.md 全局热键铁律已更新（关窗分两路 + HIDE_GEN 守卫 + 三处 200ms 同步）
+
+### 2026-06-20 (续24：剪贴板粘贴消失动画统一为启动式快速淡出 — 已实测通过)
 - **需求**：用户更喜欢应用启动那种「快速淡出露桌面」，要求剪贴板点击粘贴的消失动画全部替换为同款
 - **根因**：启动 = 先淡出 200ms 再 Rust hide；剪贴板粘贴命令一进来就 `window.hide()` 瞬隐（无淡出）→ 观感不一致
 - **改法（纯前端，不改粘贴语义）**：把「淡出」从启动专属抽成共享 `dismissing` 状态（CSS `.overlay-simple.launching`→`.dismissing`，启动与粘贴共用）。`copyAndPaste` 改为：先 `setDismissing(true)` 播 200ms 淡出 → 再 invoke 三类粘贴命令（命令内部 hide+交还焦点+Ctrl+V 流程**完全不变**）。启动 `launchApp` 同步加 `setDismissing(true)`
