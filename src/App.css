@@ -82,14 +82,19 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .center-panel{flex:1;display:flex;flex-direction:column;overflow-y:auto;padding:0 16px 16px;min-width:200px;}
 .drop-area{flex:1;min-height:80px;border-radius:var(--radius);transition:background 100ms;padding:4px;}
 .drag-active{background:rgba(0,120,212,0.08);border:1px dashed var(--accent);}
-.file-row{display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:6px;cursor:pointer;}
-.file-row:hover{background:var(--hover);}
-.file-emoji{font-size:16px;flex-shrink:0;}
-.file-title{font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.file-meta-sm{font-size:10px;color:var(--text3);flex-shrink:0;}
-.rm-btn{width:18px;height:18px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:3px;opacity:0;transition:all 60ms;display:flex;align-items:center;justify-content:center;font-size:12px;}
-.file-row:hover .rm-btn{opacity:1;}
-.rm-btn:hover{background:rgba(255,80,80,0.2);color:#ff6b6b;}
+/* ── 文件中转区：混合条目（文件/文本/图片）── */
+.stage-list{display:flex;flex-direction:column;gap:6px;}
+.stage-item{position:relative;display:flex;align-items:center;gap:8px;background:var(--fill-1);border-radius:6px;padding:7px 10px;cursor:pointer;transition:background 80ms;}
+.stage-item:hover{background:var(--fill-2);}
+.stage-emoji{font-size:18px;flex-shrink:0;width:24px;text-align:center;}
+.stage-thumb{width:32px;height:32px;object-fit:cover;border-radius:4px;flex-shrink:0;}
+.stage-title{font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2);}
+.stage-meta{font-size:10px;color:var(--text3);flex-shrink:0;}
+.stage-actions{display:flex;gap:2px;flex-shrink:0;}
+.stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
+.stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
+.stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
+.stage-open-btn:hover{background:var(--hover);color:var(--text);}
 
 /* 快捷入口芯片 */
 .shortcut-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 4px 8px;}
@@ -102,9 +107,9 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .clip-block{position:relative;background:var(--fill-1);border-radius:var(--radius);padding:10px 12px;cursor:pointer;transition:background 80ms;display:flex;flex-direction:column;gap:4px;}
 .clip-block:hover{background:var(--fill-2);}
 .clip-actions{position:absolute;bottom:6px;right:6px;display:flex;gap:2px;}
-.clip-copy-btn,.clip-del-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
-.clip-block:hover .clip-copy-btn,.clip-block:hover .clip-del-btn{opacity:1;}
-.clip-copy-btn:hover{background:rgba(96,165,250,0.2);color:var(--accent,#60a5fa);}
+.clip-copy-btn,.clip-del-btn,.clip-pin-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
+.clip-block:hover .clip-copy-btn,.clip-block:hover .clip-del-btn,.clip-block:hover .clip-pin-btn{opacity:1;}
+.clip-copy-btn:hover,.clip-pin-btn:hover{background:rgba(96,165,250,0.2);color:var(--accent,#60a5fa);}
 .clip-del-btn:hover{background:rgba(255,80,80,0.2);color:#ff6b6b;}
 .clip-copy-btn.copied{opacity:1;color:#4ade80;}  /* 复制成功 ✓：绿色、移开鼠标也保持可见 */
 .clip-preview{font-size:11px;color:var(--text2);line-height:1.4;word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
