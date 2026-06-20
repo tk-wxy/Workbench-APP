@@ -39,6 +39,14 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
   border:none;outline:none;margin:0;padding:0;}
 .overlay-visible{opacity:1;pointer-events:auto;}
 .overlay-hidden{opacity:0;pointer-events:none;}
+/* 启动放大暂留：覆盖层整体淡出露出真实桌面（仅动画期间有 transition，平时 show/hide 仍由 Rust 即时控制）。
+   .launching(双类)特异性高于 .overlay-visible，胜出。LAUNCH_ANIM_MS=200ms 须与 JS 常量一致。 */
+.overlay-simple.launching{opacity:0;pointer-events:none;transition:opacity 200ms ease-out;}
+/* 顶层克隆：position:fixed 按点击瞬间屏幕坐标定位，自播放大+淡出 */
+.launch-clone{position:fixed;z-index:100001;display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--fill-2);overflow:hidden;pointer-events:none;transform-origin:center center;animation:launch-pop 200ms ease-out forwards;}
+.launch-clone img{width:75%;height:75%;object-fit:contain;}
+.launch-clone span{font-size:20px;font-weight:600;color:var(--text2);}
+@keyframes launch-pop{from{transform:scale(1);opacity:1;}to{transform:scale(1.4);opacity:0;}}
 
 /* ── 顶栏 ── */
 .top-bar{display:flex;align-items:center;height:64px;padding:0 24px;gap:20px;border-bottom:1px solid var(--border);flex-shrink:0;}
