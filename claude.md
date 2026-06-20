@@ -62,6 +62,7 @@ npm run tauri build    # 打包
 ### 窗口尺寸
 - 用**工作区（work area）尺寸**而非物理全屏，保留任务栏。
 - 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
+- `set_shadow(false)` 后透明窗 `WRY_WEBVIEW` 子窗填满外框（含隐形边框），底边落在 `outer.bottom` 会越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 量 `GetWindowRect`、越界则等量缩 inner 高度贴齐工作区底（动态测量、无硬编码）。详见 DECISIONS §5 延伸。
 
 ### 💀 死胡同（已验证失败，别再试，别浪费时间）
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
@@ -81,6 +82,7 @@ npm run tauri build    # 打包
 | 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
 | 窗口底部细蓝缝 / 透明窗边异常 | `NCRENDERING_POLICY=DISABLED` 破坏透明边自画的；去阴影改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
+| WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后 WebView 填满外框、底边越过任务栏顶；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
 
 ---
 

@@ -445,7 +445,29 @@ fn make_fullscreen(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 用 Tauri 官方 set_shadow(false) 去阴影（走正规 DWM 路径），
     // 替代会破坏透明边、逼出底部蓝缝的 DWMWA_NCRENDERING_POLICY=DISABLED。
     let _ = window.set_shadow(false);
+
+    // set_shadow(false) 下 WebView 填满外框（含隐形边框），底边会越过任务栏顶。
+    // 测量实际外框，越界则等量缩减高度，使内容底边贴齐任务栏顶（不遮挡、不留缝）。
+    clamp_window_bottom(&window, rect.bottom);
+
     Ok(())
+}
+
+/// 把窗口底边夹到工作区底（任务栏顶）。content 现在填满外框，outer.bottom 越界即缩高。
+fn clamp_window_bottom(window: &tauri::WebviewWindow, work_bottom: i32) {
+    use windows::Win32::Foundation::{HWND, RECT};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+
+    let hwnd = match window.hwnd() { Ok(h) => HWND(h.0 as *mut _), Err(_) => return };
+    let mut wr = RECT::default();
+    unsafe { let _ = GetWindowRect(hwnd, &mut wr); }
+    let overlap = wr.bottom - work_bottom;
+    if overlap <= 0 { return; }
+    if let Ok(inner) = window.inner_size() {
+        let new_h = inner.height.saturating_sub(overlap as u32);
+        let _ = window.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: inner.width, height: new_h }));
+        println!("[fullscreen] bottom overlap {overlap}px → 缩减高度 {}→{}", inner.height, new_h);
+    }
 }
 
 // ── 托盘 ───────────────────────────────────────────────────

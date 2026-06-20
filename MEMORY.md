@@ -13,7 +13,7 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（主题/清空剪贴板/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）
 - **进行中**：← 无
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板可继续扩项（开机自启开关等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
@@ -155,6 +155,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
+- **新问题**：续14 用 `set_shadow(false)` 去阴影后，WebView 子窗（`WRY_WEBVIEW`）填满外框（含隐形边框），底边落在 `outer.bottom`，比工作区底（任务栏顶）低约 7px → 深色 overlay 盖住任务栏顶部一条。
+- **诊断（live app 写盘）**：`make_fullscreen` 末尾临时 `diag_geom` 把 work_area / outer(GetWindowRect) / WRY_WEBVIEW 屏幕矩形写 `%TEMP%\workbench_geom.txt`。实测 200% DPI：work_area bottom=1904（任务栏顶），修正后 outer & WRY_WEBVIEW bottom 均=1904，**精确贴齐**（无遮挡、无缝）。
+- **修复**：新增 `clamp_window_bottom(window, work_bottom)`——`set_shadow(false)` 后量 `GetWindowRect`，`overlap = wr.bottom - work_bottom > 0` 则等量缩减 inner 高度（`set_size`，保持顶边，从底部收）。无越界则不动。运行时动态测量，无硬编码。
+- **清理**：临时 `diag_geom` 已删（诊断完成）；保留 `clamp_window_bottom` 真修复 + 一条 `[fullscreen]` 日志（与既有 fullscreen 日志风格一致）。
+- 验证：clippy 无新增警告（剩余 8 条为 base64/sort_by_key/FFI 命名等历史 lint，本次未碰）；live app 诊断数据确认 bottom=1904 对齐。注：geometry 已由 live app 运行时验证，但"肉眼看是否严丝合缝"未由本会话再跑 GUI。
+- 文件：`src-tauri/src/lib.rs`（+`clamp_window_bottom`，`make_fullscreen` 末尾调用）；DECISIONS §5 延伸补记。
 
 ### 2026-06-20 (续18：应用排序加 last_used 时间衰减 — 近期常用)
 - **解决续16 遗留的纯 count 局限**（远古高频 app 永占顶）。模型：**频率为主 × 近期乘数**——`usageScore = count × 0.5^(距上次使用 / 半衰期)`，半衰期常量 `USAGE_HALFLIFE_S = 30 天`（要调近期敏感度改它）。用户在 频率为主/近期为主(EMA) 两模型 + 7/30/90 天里选了 频率为主 + 30 天。
