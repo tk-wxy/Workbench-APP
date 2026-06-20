@@ -154,7 +154,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **闪烁**：窗口约 15-20 次开关闪一次，图片 `<img>` 解码叠加 opacity 过渡时加重（独立问题，未根治）
 - **应用图标提取**：UWP 应用（如 Windows Terminal）提取失败，fallback 首字母
 - **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
-- **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。若要支持需 copy_image 同时落临时 PNG 文件 + 写 CF_HDROP（双格式上剪贴板），或检测目标——当前未做（续20-fix 澄清）
+- **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。**已决定保持位图**（用户 2026-06-20 确认，不做双格式/临时 PNG 方案，别当 TODO 去"修"）。若日后真要支持：copy_image 同时落临时 PNG + 写 CF_HDROP（双格式上剪贴板）
 - **多显示器**：当前仅适配主显示器工作区
 
 ---
