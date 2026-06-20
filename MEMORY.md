@@ -166,7 +166,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **解法：seq 水位**（新增 `SKIP_CLIP_UNTIL_SEQ: AtomicU32`）。copy_* 写后记当前 `GetClipboardSequenceNumber()` 为水位；监听加判断 `seq ≤ 水位 → 跳过`。按 seq 而非计数 → 与跳变次数/轮询时序无关，连续复制不残留、不吞后续真实复制。**additive**：现有计数机制 + 两条 paste 路径原样不动，只往监听加一条判断。
 - **Rust**（`lib.rs`）：①`SKIP_CLIP_UNTIL_SEQ` + `suppress_clip_until_now()`；②监听加水位 skip；③抽 `write_cf_hdrop(paths)` 共用助手，`set_clipboard_files` 改调它（计数 `store(2)` 时机不变）；④3 新命令 `copy_text/image/files_to_clipboard`（只写、不 hide、不查前台、无桌面分支、无 Ctrl+V，写后 `suppress_clip_until_now`）+ 注册。图片写 1024px 缩略图（继承现有限制）。
 - **前端**（`App.tsx`/`App.css`）：`copyToClipboard(item)` 按类型 invoke、不 hide；卡片右下角 hover 区改 `clip-actions` 容器放 复制+删除 两钮（都 stopPropagation，整卡 onClick 仍=自动粘贴）；`copiedTime` state 驱动复制钮 ~1s 变绿 ✓ 反馈。
-- **验证**：`cargo clippy` 8 条历史警告、零新增；`tsc --noEmit` 零错误。⚠️ **GUI 未真跑**（无头环境无法点击/驱动剪贴板）。需真跑验证：①点复制后别处 Ctrl+V 能粘出文本/图片/文件；②被复制项不跳顶/不重复；③复制后再真实复制别的东西，历史正常收录不被吞。
+- **验证**：`cargo clippy` 8 条历史警告、零新增；`tsc --noEmit` 零错误。✅ **GUI 已实测通过**（用户）：①点复制后别处 Ctrl+V 能粘出文本/图片/文件；②被复制项不跳顶/不重复；③复制后再真实复制别的东西，历史正常收录不被吞（seq 水位防回流 + 不吞后续，均符合预期）。
 - 文件：`src-tauri/src/lib.rs` / `src/App.tsx` / `src/App.css`。未碰焦点/热键/粘贴流程。
 
 ### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
