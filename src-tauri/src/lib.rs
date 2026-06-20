@@ -14,6 +14,10 @@ static SKIP_CLIP_EVENTS: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 /// seq ≤ 此值的变化，使自写内容不回流到历史面板（防循环）。按 seq 水位而非计数——与跳变次数/
 /// 轮询时序无关，连续复制不残留、不吞掉后续真实复制（区别于计数式 SKIP_CLIP_EVENTS）。
 static SKIP_CLIP_UNTIL_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// 串行化剪贴板访问：后台监听的「读」与 copy_* 的「写」共用此锁，避免两线程并发 OpenClipboard
+/// 互抢导致 SetClipboardData 报 os error 1418（线程没有打开的剪贴板）。paste 路径靠写前武装
+/// SKIP_CLIP_EVENTS 让监听跳过、不读，故不入此锁、行为不变。
+static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
@@ -129,6 +133,12 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 last_seq = seq;
                 continue;
             }
+            // 读剪贴板与 copy_* 的写入串行（CLIPBOARD_LOCK），防并发 OpenClipboard 撞 os error 1418
+            let clip_guard = CLIPBOARD_LOCK.lock().unwrap();
+            // 拿锁后重读 seq + 复核水位：copy_* 可能在我们等锁期间刚写完并抬高水位
+            // （那次变化是它的自写）→ 跳过，避免把自写 thumbnail 当新内容回流历史面板
+            let seq = unsafe { GetClipboardSequenceNumber() };
+            if seq <= SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst) { last_seq = seq; continue; }
             println!("[clipbg] seq changed → reading");
 
             // 快速复制时源程序可能短暂占用剪贴板，读取瞬时失败。本轮内快速重试几次；
@@ -151,6 +161,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 Err(()) => { println!("[clipbg] clipboard busy, retry next tick"); continue; } // 不推进 → 下轮重试
             };
             last_seq = seq; // 成功读到内容才推进
+            drop(clip_guard); // 读完即释放锁；下面 cache 处理 + emit 不碰剪贴板
 
             let mut cache = CLIP_CACHE.lock().unwrap();
 
@@ -631,6 +642,7 @@ fn suppress_clip_until_now() {
 
 #[tauri::command]
 fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防 1418
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
     cb.set_text(&text).map_err(|e| format!("写入: {}", e))?;
     suppress_clip_until_now();
@@ -639,12 +651,15 @@ fn copy_text_to_clipboard(text: String) -> Result<(), String> {
 
 #[tauri::command]
 fn copy_image_to_clipboard(base64: String) -> Result<(), String> {
-    // 历史项始终带 base64 缩略图（1024px）；解码为 RGBA 再写回（与 set_clipboard_image 同款，写的是缩略图非原图）
+    // 历史项始终带 base64 缩略图（1024px）；解码为 RGBA 写回为位图（CF_DIB）。
+    // 注：位图只能粘进"接受图片"的目标（输入框/Word/画图等）；资源管理器文件夹/桌面只收
+    // CF_HDROP 文件、不收位图粘贴，故往那里 Ctrl+V 无反应——Windows 固有限制，非 bug。
     let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
     let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
+    let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防并发 OpenClipboard 撞 1418
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
     cb.set_image(arboard::ImageData {
         width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()),
@@ -655,6 +670,7 @@ fn copy_image_to_clipboard(base64: String) -> Result<(), String> {
 
 #[tauri::command]
 fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防 1418
     write_cf_hdrop(&paths)?;
     suppress_clip_until_now();
     Ok(())
