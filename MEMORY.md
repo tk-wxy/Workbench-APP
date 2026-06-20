@@ -183,6 +183,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **铁律**：CLAUDE.md 剪贴板节 +「所有剪贴板读写必须走 CLIPBOARD_LOCK、锁粒度仅限临界区」+ 症状表「写剪贴板报 1418」行；DECISIONS §6 补根因 + 锁粒度 + 监听 retry-sleep 例外。
 - **验证**：`cargo clippy` 8 条历史警告、零新增、零 error；4 处锁 scope 逐个静态确认未跨 sleep/hide/焦点/Ctrl+V。⚠️ 1418 是 live app 后台线程时序竞态，**无头环境无法确定性复现**；本轮为**代码审查 + 编译 + 锁 scope 静态确认**，实际并发安全需 GUI 实测（连点多张图片卡片 copy + 背景同时有新复制触发监听）。
 - 文件：`src-tauri/src/lib.rs`（paste 3 命令 + set_image 桌面读补锁）/ `CLAUDE.md` / `DECISIONS.md`。未碰焦点/热键/粘贴 dance 流程。
+- **复核（续20-fix2 续）**：`set_clipboard_image` 桌面分支 get_image 读锁性质 = **A 类**——`arboard::Clipboard::new().get_image()` 走 Win32 `OpenClipboard` 读 live 系统剪贴板（base64 空=读当前图），与监听争同一句柄，加锁正确、保留（非读 CLIP_CACHE）。`cargo check` 零警告。
 
 ### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
 - **新问题**：续14 用 `set_shadow(false)` 去阴影后，WebView 子窗（`WRY_WEBVIEW`）填满外框（含隐形边框），底边落在 `outer.bottom`，比工作区底（任务栏顶）低约 7px → 深色 overlay 盖住任务栏顶部一条。
