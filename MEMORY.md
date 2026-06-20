@@ -176,6 +176,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **图片粘贴目标限制（非 bug，已澄清）**：copy_image 放的是**位图(CF_DIB)**——只能粘进"接受图片"的目标（输入框/聊天/Word/画图）。**资源管理器文件夹、桌面只收 CF_HDROP 文件、不收位图粘贴**，故往那里 Ctrl+V 无反应，是 Windows 固有行为。自动粘贴能往桌面落图是因为它知道目标=桌面、走 `SHFileOperation` 把图存成 PNG 文件；"只复制"不知目标，只能放最通用位图。若要"复制图后能粘进文件夹/桌面成文件"需另做（见 §八）。
 - 诊断日志已清。文件：`src-tauri/src/lib.rs`（+`CLIPBOARD_LOCK`，监听读加锁，copy_* 写加锁）。
 
+### 2026-06-20 (续20-fix2：核查并统一 CLIPBOARD_LOCK 覆盖面 — paste 路径补锁)
+- **背景**：续20-fix 只锁了 copy 路径；paste 三命令写剪贴板时同样在监听轮询下、1418 争用理论上存在，之前没崩只因写前 `hide()+sleep(150ms)` 错开时序——**运气非保证**。本轮先诊断后改。
+- **持锁覆盖表（改前）**：监听读 ✅、copy_text/image/files ✅；**未持锁** = `paste_clipboard`(set_text)、`set_clipboard_image`(set_image 写 + 桌面分支 get_image 读)、`set_clipboard_files`(write_cf_hdrop)。桌面分支 `desktop_copy_files`(SHFileOperation) 不碰剪贴板、N/A。
+- **改动**：给上述 4 处补 `CLIPBOARD_LOCK`，scope **仅罩 OpenClipboard…CloseClipboard 临界区**——经静态核对，无一跨 `sleep`/`hide`/焦点交还/`enigo` Ctrl+V（焦点交还+Ctrl+V 全在锁外）。`write_cf_hdrop` 共用 → 锁加**调用方**不进函数（防 copy 重入死锁）。桌面 SHFileOperation 不加锁。锁序无环（监听先放锁再取 CLIP_CACHE）。**改后全部剪贴板读写串行**，1418 在 copy+paste 两侧根治。
+- **铁律**：CLAUDE.md 剪贴板节 +「所有剪贴板读写必须走 CLIPBOARD_LOCK、锁粒度仅限临界区」+ 症状表「写剪贴板报 1418」行；DECISIONS §6 补根因 + 锁粒度 + 监听 retry-sleep 例外。
+- **验证**：`cargo clippy` 8 条历史警告、零新增、零 error；4 处锁 scope 逐个静态确认未跨 sleep/hide/焦点/Ctrl+V。⚠️ 1418 是 live app 后台线程时序竞态，**无头环境无法确定性复现**；本轮为**代码审查 + 编译 + 锁 scope 静态确认**，实际并发安全需 GUI 实测（连点多张图片卡片 copy + 背景同时有新复制触发监听）。
+- 文件：`src-tauri/src/lib.rs`（paste 3 命令 + set_image 桌面读补锁）/ `CLAUDE.md` / `DECISIONS.md`。未碰焦点/热键/粘贴 dance 流程。
+
 ### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
 - **新问题**：续14 用 `set_shadow(false)` 去阴影后，WebView 子窗（`WRY_WEBVIEW`）填满外框（含隐形边框），底边落在 `outer.bottom`，比工作区底（任务栏顶）低约 7px → 深色 overlay 盖住任务栏顶部一条。
 - **诊断（live app 写盘）**：`make_fullscreen` 末尾临时 `diag_geom` 把 work_area / outer(GetWindowRect) / WRY_WEBVIEW 屏幕矩形写 `%TEMP%\workbench_geom.txt`。实测 200% DPI：work_area bottom=1904（任务栏顶），修正后 outer & WRY_WEBVIEW bottom 均=1904，**精确贴齐**（无遮挡、无缝）。
