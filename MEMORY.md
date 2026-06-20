@@ -154,6 +154,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **闪烁**：窗口约 15-20 次开关闪一次，图片 `<img>` 解码叠加 opacity 过渡时加重（独立问题，未根治）
 - **应用图标提取**：UWP 应用（如 Windows Terminal）提取失败，fallback 首字母
 - **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
+- **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。若要支持需 copy_image 同时落临时 PNG 文件 + 写 CF_HDROP（双格式上剪贴板），或检测目标——当前未做（续20-fix 澄清）
 - **多显示器**：当前仅适配主显示器工作区
 
 ---
@@ -166,8 +167,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **解法：seq 水位**（新增 `SKIP_CLIP_UNTIL_SEQ: AtomicU32`）。copy_* 写后记当前 `GetClipboardSequenceNumber()` 为水位；监听加判断 `seq ≤ 水位 → 跳过`。按 seq 而非计数 → 与跳变次数/轮询时序无关，连续复制不残留、不吞后续真实复制。**additive**：现有计数机制 + 两条 paste 路径原样不动，只往监听加一条判断。
 - **Rust**（`lib.rs`）：①`SKIP_CLIP_UNTIL_SEQ` + `suppress_clip_until_now()`；②监听加水位 skip；③抽 `write_cf_hdrop(paths)` 共用助手，`set_clipboard_files` 改调它（计数 `store(2)` 时机不变）；④3 新命令 `copy_text/image/files_to_clipboard`（只写、不 hide、不查前台、无桌面分支、无 Ctrl+V，写后 `suppress_clip_until_now`）+ 注册。图片写 1024px 缩略图（继承现有限制）。
 - **前端**（`App.tsx`/`App.css`）：`copyToClipboard(item)` 按类型 invoke、不 hide；卡片右下角 hover 区改 `clip-actions` 容器放 复制+删除 两钮（都 stopPropagation，整卡 onClick 仍=自动粘贴）；`copiedTime` state 驱动复制钮 ~1s 变绿 ✓ 反馈。
-- **验证**：`cargo clippy` 8 条历史警告、零新增；`tsc --noEmit` 零错误。✅ **GUI 已实测通过**（用户）：①点复制后别处 Ctrl+V 能粘出文本/图片/文件；②被复制项不跳顶/不重复；③复制后再真实复制别的东西，历史正常收录不被吞（seq 水位防回流 + 不吞后续，均符合预期）。
+- **验证**：`cargo clippy` 8 条历史警告、零新增；`tsc --noEmit` 零错误。✅ 文本/文件/图片复制 + 防回流 + 不吞后续，GUI 实测通过。
 - 文件：`src-tauri/src/lib.rs` / `src/App.tsx` / `src/App.css`。未碰焦点/热键/粘贴流程。
+
+### 2026-06-20 (续20-fix：图片复制 1418 并发崩 + 剪贴板互斥锁；图片粘贴目标限制澄清)
+- **GUI 实测暴露真 bug**：截图「复制」失败（无 ✓、Ctrl+V 无内容）。诊断日志定位：`set_image 失败: SetClipboardData ... os error 1418（线程没有打开的剪贴板）`。**根因=并发**：`set_image` 内部先 `EmptyClipboard`（让 seq 变）→ 后台监听被自己这次写触发、抢先 `OpenClipboard` 去读 → copy 的 `SetClipboardData` 撞"剪贴板没打开"。图片必中（`set_image` 多步、窗口长），文本/文件写得快侥幸躲过。自动粘贴没事是因为它写前先 `SKIP_CLIP_EVENTS.store(2)` 让监听跳过不读。
+- **修复=剪贴板互斥锁** `CLIPBOARD_LOCK: Mutex<()>`：监听的「读」(`build_clip_entry`)与 copy_* 的「写」串行，谁都不在对方持锁时 `OpenClipboard`。监听**拿锁后重读 seq + 复核水位**（copy 可能在等锁期间刚写完抬高水位）→ 防把自写 thumbnail 当新内容回读。paste 路径不入锁（靠 `SKIP_CLIP_EVENTS` 武装让监听不读），行为不变。改后 `set_image OK`、图片能粘进输入框/Word/画图。
+- **图片粘贴目标限制（非 bug，已澄清）**：copy_image 放的是**位图(CF_DIB)**——只能粘进"接受图片"的目标（输入框/聊天/Word/画图）。**资源管理器文件夹、桌面只收 CF_HDROP 文件、不收位图粘贴**，故往那里 Ctrl+V 无反应，是 Windows 固有行为。自动粘贴能往桌面落图是因为它知道目标=桌面、走 `SHFileOperation` 把图存成 PNG 文件；"只复制"不知目标，只能放最通用位图。若要"复制图后能粘进文件夹/桌面成文件"需另做（见 §八）。
+- 诊断日志已清。文件：`src-tauri/src/lib.rs`（+`CLIPBOARD_LOCK`，监听读加锁，copy_* 写加锁）。
 
 ### 2026-06-20 (续19：set_shadow(false) 残留底部遮任务栏 — clamp 修正)
 - **新问题**：续14 用 `set_shadow(false)` 去阴影后，WebView 子窗（`WRY_WEBVIEW`）填满外框（含隐形边框），底边落在 `outer.bottom`，比工作区底（任务栏顶）低约 7px → 深色 overlay 盖住任务栏顶部一条。
