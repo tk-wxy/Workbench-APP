@@ -139,8 +139,9 @@ export default function App() {
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; }); // 复位启动/粘贴动画
+        const un1 = await listen("hotkey-show", () => { setVisible(true); setDismissing(false); }); // 重开取消可能在播的淡出
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; }); // 复位启动/粘贴/关闭动画
+        const unDismiss = await listen("hotkey-dismiss", () => setDismissing(true)); // 短按 toggle 关闭：Rust 触发覆盖层淡出，200ms 后由 Rust hide
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
           setClipboard(prev => {
@@ -152,7 +153,7 @@ export default function App() {
             return [item, ...filtered].slice(0, 20);
           });
         });
-        cleanup = [un1, un2, un3];
+        cleanup = [un1, un2, un3, unDismiss];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); };

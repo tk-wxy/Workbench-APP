@@ -45,7 +45,7 @@ npm run tauri build    # 打包
 - **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——那条路有 500-800ms 抖动（见【💀 死胡同】）。
 - `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
 - **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
-- 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
+- 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）。关窗分两路：**长按 momentary 松开 = 纯 `hide()+emit("hotkey-hide")` 即时关**（保 peek 手感，别加淡出）；**短按 toggle 关闭 = `dismiss_fade`**——emit `hotkey-dismiss` 让前端播 `DISMISS_FADE_MS`(200ms) 覆盖层淡出，后台线程延迟到点再 `hide()`（hide 仍归 Rust，不违反「可见性真相归 Rust」）。`dismiss_fade` 必须配 `HIDE_GEN` 代际守卫（show 时 bump 作废排程中的延迟 hide）防「淡出途中又呼出、200ms 后被误关」。**`DISMISS_FADE_MS`(Rust) / `LAUNCH_ANIM_MS`(前端) / CSS `.overlay-simple.dismissing` 三处 200ms 必须一致**。修饰键避坑见【💀 死胡同】。
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
 
 ### 剪贴板
