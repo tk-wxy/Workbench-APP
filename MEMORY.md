@@ -15,7 +15,7 @@
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
 - **进行中**：← 无
-- **新增（续23 已实现，待 GUI 实测）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
+- **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **下一步**：文件中转区独立于剪贴板文件历史；设置面板各条目继续扩项（常规加开机自启开关、快捷键做成可配置等）；长按阈值/采样率体感微调（`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS`）；搜索高亮"最优对齐"（当前贪心子序列，高亮非词首）
 - **阻塞 / 待决策**：← 无
 
@@ -246,8 +246,8 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **文档**：CLAUDE.md 全局热键节 + 死胡同节重写；DECISIONS §1/§2 改写并并入 spike 实测数据；临时 `SPIKE-keystate.md` 已删除
 - `cargo check` 零警告。show/hide 复用 §8 路径配方，未改焦点交还/粘贴流程
 
-### 2026-06-20 (续23：应用启动「放大暂留」动画 — 已实现，待 GUI 实测)
-- **已落地**：路线 B 克隆浮层 + 克制档 scale1.4/200ms。`tsc --noEmit` + `vite build` 均通过；⚠️ 放大/淡出/露桌面观感**未真跑 GUI**，需 `npm run tauri dev` 实测
+### 2026-06-20 (续23：应用启动「放大暂留」动画 — GUI 实测通过)
+- **已落地**：路线 B 克隆浮层 + 克制档 scale1.4/200ms。`tsc --noEmit` + `vite build` 通过；**用户 GUI 实测：效果符合预期，未发现 bug**
 - **实现位置**：`src/App.tsx`——`LAUNCH_ANIM_MS=200`/`LaunchAnim` 类型（组件外）；`launchAnim` state + `launchingRef`（防连点）；`launchApp(app, iconEl?)` 改写（量 rect→立即 invoke launch_app→setLaunchAnim→延迟 hide；reduced-motion 或无 iconEl 走即时 hide 兜底）；`hotkey-hide` 监听复位；点击/Enter 两处传图标元素；return 包 fragment、`#overlay` 兄弟渲染 `.launch-clone`。`src/App.css`——`.overlay-simple.launching{opacity:0;transition:200ms}` + `.launch-clone` + `@keyframes launch-pop`
 - ⚠️ **CSS 200ms 与 JS `LAUNCH_ANIM_MS` 两处需同步**（CSS 不能引 JS 常量）；改时长要同时改
 - **目标**：点击应用后，图标做短暂放大+淡出（Mac 启动台式），覆盖层整体淡出露桌面，暗示刚启动了什么
