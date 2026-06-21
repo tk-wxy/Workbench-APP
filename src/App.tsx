@@ -115,6 +115,15 @@ const SETTINGS_TABS = [
 ] as const;
 type SettingsTab = typeof SETTINGS_TABS[number]["id"];
 
+const SHORTCUTS = [
+  { l: "文件管理器", e: "🖥️", a: "explorer.exe"    },
+  { l: "下载",       e: "⬇️", a: "shell:Downloads" },
+  { l: "桌面",       e: "🖼️", a: "shell:Desktop"   },
+  { l: "终端",       e: "⬛", a: "wt"              },
+  { l: "计算器",     e: "🔢", a: "calc"            },
+  { l: "设置",       e: "⚙️", a: "ms-settings:"   },
+] as const;
+
 // 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
 // 时长可调；放大幅度在 CSS @keyframes launch-pop 里（克制档 scale 1.4）。
 const LAUNCH_ANIM_MS = 200;
@@ -403,6 +412,15 @@ export default function App() {
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
   }, []);
+
+  // 截屏：Rust 侧负责 hide + emit + 150ms 等待 + Win+Shift+S，前端无需额外 hideWorkbench。
+  const handleScreenshot = useCallback(async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("trigger_screenshot");
+    } catch {}
+  }, []);
+
   const fi = (ext:string)=>({pdf:"📄",doc:"📝",docx:"📝",xls:"📊",xlsx:"📊",ppt:"📽️",pptx:"📽️",jpg:"🖼️",png:"🖼️",gif:"🖼️",mp4:"🎬",mp3:"🎵",zip:"📦",rar:"📦",exe:"⚙️",txt:"📃"}[ext.toLowerCase()]??"📎");
 
   // ── 键盘 ──
@@ -481,7 +499,8 @@ export default function App() {
           </div>
           <div className="section-label" style={{marginTop:16}}>快捷入口</div>
           <div className="shortcut-row">
-            {[{l:"此电脑",e:"🖥️",a:"explorer.exe"},{l:"下载",e:"⬇️",a:"explorer.exe"},{l:"文档",e:"📂",a:"explorer.exe"},{l:"桌面",e:"🖼️",a:"explorer.exe"},{l:"控制面板",e:"⚙️",a:"control"},{l:"任务管理器",e:"📊",a:"taskmgr"},{l:"终端",e:"⬛",a:"wt"},{l:"计算器",e:"🔢",a:"calc"}].map(s=>(
+            <button className="shortcut-chip" onClick={handleScreenshot}><span>📸</span><span>截屏</span></button>
+            {SHORTCUTS.map(s=>(
               <button key={s.l} className="shortcut-chip" onClick={()=>openShortcut(s.a)}><span>{s.e}</span><span>{s.l}</span></button>
             ))}
           </div>

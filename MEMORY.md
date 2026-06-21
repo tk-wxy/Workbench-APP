@@ -14,13 +14,13 @@
 ## 0. 当前状态 / 下一步 〔快照〕
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
-- **进行中**：← 无
+- **进行中**：← 无（续29 完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
 - **新增（续26 实测通过）**：文件中转区升级为「混合条目」模型（文件/文本/图片），剪贴板卡片 📌 钉入 + 中转条目单击取走（写回剪贴板+粘贴）/复制/打开/删除。store 由 `file-list`(路径数组)→`stage-items`(异构条目)、带旧格式迁移。**GUI 实测**：钉入/取走粘贴/复制/重启读回（含图片缩略图）全通过；迁移因本机无遗留 `file-list` 未触发（兜底逻辑，非 bug）
 - **新增（续27 实测通过）**：原生拖入（drag-in）落地——`dragDropEnabled:false` + 自注册 IDropTarget（`dragdrop.rs`）接外部文件拖放，emit 路径 → 前端转 file StageItem 入中转。曾误判为死胡同（错误变量「先呼出再拖」+wry 占槽），spike 推翻、已实现。耐久性：setup 注册一次（「每次 show 重注册」实测破坏回调、已弃）。T1–T8 GUI 实测全过。**拖出 drag-out 未做**（需 DoDragDrop FFI，非死胡同、是未实现）
-- **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
+- **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -133,6 +133,8 @@ src-tauri/Cargo.toml
 | `copy_text_to_clipboard` | 只复制文本到当前剪贴板（不粘贴/不隐藏；seq 水位防回流历史）|
 | `copy_image_to_clipboard` | 只复制图片（缩略图）到当前剪贴板（同上）|
 | `copy_files_to_clipboard` | 只复制文件 CF_HDROP 到当前剪贴板（同上）|
+| `reveal_in_explorer` | 在资源管理器中高亮目标文件（/select,path）|
+| `trigger_screenshot` | hide overlay + emit hotkey-hide + 150ms + enigo Win+Shift+S |
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
@@ -166,6 +168,19 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-21 (快捷入口栏精简 + 截屏，续29)
+- **需求**：精简快捷入口（去除文档/控制面板/任务管理器，补设置/截屏），截屏接 Snipping Tool 区域截图模式。
+- **前端**（`src/App.tsx`）：
+  - 模块级 `SHORTCUTS` const（6 项：文件管理器/下载/桌面/终端/计算器/设置；`shell:Downloads`/`shell:Desktop`/`ms-settings:` 经 ShellExecuteW 可直接处理）
+  - `handleScreenshot` callback：直接 `invoke("trigger_screenshot")`，**不调 hideWorkbench()**（Rust 侧自行 hide + emit）
+  - shortcut-row JSX：截屏按钮（📸）在最前，其余 `SHORTCUTS.map`
+- **Rust**（`src-tauri/src/lib.rs`）：
+  - 新命令 `trigger_screenshot`：`window.hide()` + `emit("hotkey-hide")` → `sleep(150ms)` → enigo `Key::Meta+Shift+S`（Press/Release 各键）+ 注册进 `generate_handler!`
+  - light dismiss 安全：`hide()` 使 `is_visible()=false`，`start_focus_watch` 下次 50ms 轮询 `armed→false`，无重复 hide
+  - enigo 键值：`Key::Meta`/`Key::Shift`/`Key::S` 均在 enigo 0.2.1 `keycodes.rs` 有确认，映射 VK 码（非 Unicode 文本路径）
+- **验证**：`tsc --noEmit` 零错误；`cargo check` 零警告/错误。⚠️ GUI 实测（截屏流程/设置打开/下载+桌面路径）待用户验证。
+- **文件**：`src/App.tsx` / `src-tauri/src/lib.rs`
 
 ### 2026-06-21 (右键菜单扩展：剪贴板历史卡片，续28)
 - **功能**：`clip-block` 加 `onContextMenu`，调 `openClipCtxMenu(e, c)` 构造菜单。file 类型：打开所在目录 / 复制到剪贴板 / 钉到中转区 / 删除该条目；text/image：复制到剪贴板 / 钉到中转区 / 删除该条目。
