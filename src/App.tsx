@@ -381,6 +381,24 @@ export default function App() {
     openCtxMenu(e, items);
   }, [openCtxMenu, copyStageToClipboard, removeStage]);
 
+  // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
+  const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
+    const items: CtxMenuItem[] = [];
+    if (c.type === "file" && c.items?.[0]?.path) {
+      items.push({
+        label: "打开所在目录",
+        action: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("reveal_in_explorer", { path: c.items![0].path });
+        },
+      });
+    }
+    items.push({ label: "复制到剪贴板", action: () => copyToClipboard(c) });
+    items.push({ label: "📌 钉到中转区",  action: () => addToStage(c) });
+    items.push({ label: "删除该条目",    action: () => deleteClipItem(c.time) });
+    openCtxMenu(e, items);
+  }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem]);
+
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
@@ -472,7 +490,7 @@ export default function App() {
           <div className="section-label">剪贴板历史</div>
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
-              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
+              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
                 <div className="clip-actions">
                   <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title="钉到中转区"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-2-4V7a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v6z"/></svg></button>
                   <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?"已复制":"复制到剪贴板"}>

@@ -167,6 +167,13 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-21 (右键菜单扩展：剪贴板历史卡片，续28)
+- **功能**：`clip-block` 加 `onContextMenu`，调 `openClipCtxMenu(e, c)` 构造菜单。file 类型：打开所在目录 / 复制到剪贴板 / 钉到中转区 / 删除该条目；text/image：复制到剪贴板 / 钉到中转区 / 删除该条目。
+- **复用**：`openCtxMenu` 通用工具（边界/关闭/z-index）+ 现有出口函数（`copyToClipboard`/`addToStage`/`deleteClipItem`/`reveal_in_explorer`），零 Rust 改动，零新 CSS。
+- **路径防御**：`c.items?.[0]?.path` 可选链，仅 file 类型且 items 非空时才添加「打开所在目录」。
+- **验证**：`tsc --noEmit` 零错误。⚠️ 三类型菜单条目正确性 + GUI 观感需用户实测。
+- **文件**：`src/App.tsx`（+`openClipCtxMenu` callback + `clip-block` onContextMenu）
+
 ### 2026-06-21 (右键菜单：中转区文件条目 + 全局屏蔽系统菜单)
 - **功能**：中转区条目右键弹出自定义浮层菜单（`position:fixed`，高 z-index）。file 类型：打开所在目录 / 复制到剪贴板 / 删除该项目；text/image：复制到剪贴板 / 删除该项目。其他区域全局屏蔽系统右键菜单（`onContextMenu={e=>e.preventDefault()}` 挂 `#overlay`）。
 - **新 Rust 命令** `reveal_in_explorer(path)`：`cmd /c explorer.exe /select,"<path>"` — 在资源管理器中高亮选中目标文件。
