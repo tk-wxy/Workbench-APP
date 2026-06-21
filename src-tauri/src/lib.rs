@@ -531,7 +531,7 @@ fn hide_window(app: AppHandle) {
     }
 }
 
-// overlay hide + 150ms 等合成器刷新 + Win+Shift+S 触发 Snipping Tool 区域截图。
+// overlay hide + 80ms 等合成器刷新 + Win+Shift+S 触发 Snipping Tool 区域截图。
 // 不做 SetForegroundWindow：Win+Shift+S 是系统全局快捷键，无需指定目标窗口。
 // light dismiss 安全：hide() 使 is_visible()=false，start_focus_watch 下次轮询 armed→false，无重复 hide。
 #[tauri::command]
@@ -543,17 +543,17 @@ fn trigger_screenshot(app: AppHandle) -> Result<(), String> {
         let _ = window.hide();
         let _ = app.emit("hotkey-hide", ());
     }
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    std::thread::sleep(std::time::Duration::from_millis(80));
 
     let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
         .map_err(|e| format!("enigo 初始化失败: {}", e))?;
     let _ = enigo.key(enigo::Key::Meta, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(10));
     let _ = enigo.key(enigo::Key::Shift, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(10));
     let _ = enigo.key(enigo::Key::S, Press);
     let _ = enigo.key(enigo::Key::S, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::thread::sleep(std::time::Duration::from_millis(10));
     let _ = enigo.key(enigo::Key::Shift, Release);
     let _ = enigo.key(enigo::Key::Meta, Release);
 
