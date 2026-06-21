@@ -408,9 +408,10 @@ export default function App() {
     openCtxMenu(e, items);
   }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem]);
 
+  // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
-    import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
+    import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:target})).catch(()=>{});
   }, []);
 
   // 截屏：Rust 侧负责 hide + emit + 150ms 等待 + Win+Shift+S，前端无需额外 hideWorkbench。

@@ -1,9 +1,13 @@
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
 
+use std::os::windows::process::CommandExt;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// CREATE_NO_WINDOW：防止 cmd.exe 子进程在开发模式下弹出控制台窗口
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
@@ -361,6 +365,7 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
         let _g = CLIPBOARD_LOCK.lock().unwrap();
         write_cf_hdrop(&paths)?;
     }
+    suppress_clip_until_now(); // 锁后水位补检：与文本路径对齐，封住 SKIP_CLIP_EVENTS 的竞态死角
 
     let target = unsafe { GetForegroundWindow() };
     unsafe { let _ = SetForegroundWindow(target); }
@@ -564,6 +569,7 @@ fn trigger_screenshot(app: AppHandle) -> Result<(), String> {
 fn open_file(path: String) -> Result<(), String> {
     std::process::Command::new("cmd")
         .args(["/c", "start", "", &path])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("无法打开: {}", e))?;
     Ok(())
@@ -575,6 +581,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     let cmd = format!("explorer.exe /select,\"{}\"", path);
     std::process::Command::new("cmd")
         .args(["/c", &cmd])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("无法打开所在目录: {}", e))?;
     Ok(())
@@ -637,6 +644,7 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
             cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
                 .map_err(|e| format!("写入: {}", e))?;
         }
+        suppress_clip_until_now(); // 锁后水位补检：与文本路径对齐，封住 SKIP_CLIP_EVENTS 的竞态死角
         println!("[imgpaste] thumbnail {w}×{h} written back");
     }
 
@@ -665,6 +673,7 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
         let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("剪贴板打开失败: {}", e))?;
         clipboard.set_text(&text).map_err(|e| format!("剪贴板写入失败: {}", e))?;
     }
+    suppress_clip_until_now(); // 防自写内容回流历史面板（文本路径漏洞修复，对齐 set_clipboard_files/image）
 
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
     std::thread::sleep(std::time::Duration::from_millis(150));
