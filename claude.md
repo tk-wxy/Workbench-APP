@@ -50,7 +50,8 @@ npm run tauri build    # 打包
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
 
 ### 剪贴板
-> 下列可调数值（轮询 150ms / 缓存 20 条 / 缩略图 1024px / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `CLIP_CACHE_MAX` / `MAX_THUMB_DIM` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+> 下列可调数值（轮询 150ms / 缩略图 1024px / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `MAX_THUMB_DIM` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
+> 缓存条数：`CLIP_CACHE_MAX_DEFAULT=20`（默认），运行时由 `CLIP_CACHE_MAX_RUNTIME`（AtomicUsize）控制，可通过设置面板四档（10/20/50/100）调整，持久化到 store key `clip-cache-max`，`set_clip_cache_max` 命令更新。**不要直接改 `CLIP_CACHE_MAX_DEFAULT` 来调条数，改设置面板即可。**
 > ⚠️ `CLIP_POLL_MS` 别再调大：轮询式监听下，两次复制落在同一采样窗口会"塌缩"丢中间项（详见 DECISIONS §6）；要彻底根治需改事件驱动（`AddClipboardFormatListener`）。
 - 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(CLIP_POLL_MS)`。
 - 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。

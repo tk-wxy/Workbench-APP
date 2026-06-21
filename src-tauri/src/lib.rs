@@ -34,8 +34,11 @@ const CLIP_POLL_MS: u64 = 150;
 const CLIP_READ_RETRIES: u32 = 4;
 /// 每次读取重试的间隔
 const CLIP_READ_RETRY_MS: u64 = 60;
-/// 剪贴板历史缓存上限
-const CLIP_CACHE_MAX: usize = 20;
+/// 剪贴板历史缓存默认上限（设置面板可调，范围 10-100）
+const CLIP_CACHE_MAX_DEFAULT: usize = 20;
+/// 运行时上限：前端启动后通过 set_clip_cache_max 命令同步持久化值；改动立即生效
+static CLIP_CACHE_MAX_RUNTIME: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(CLIP_CACHE_MAX_DEFAULT);
 /// 图片缩略图最长边（超过则缩放，避免 IPC 传输数十 MB）
 const MAX_THUMB_DIM: u32 = 1024;
 /// 图片去重的 aHash 汉明距离阈值
@@ -196,7 +199,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 cache.retain(|e| e["content"] != entry["content"]);
             }
             cache.insert(0, entry.clone());
-            cache.truncate(CLIP_CACHE_MAX);
+            cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
             let snap = cache.clone();
             drop(cache); // 释放 CLIP_CACHE 锁，落盘 I/O 不持任何锁
             let _ = app_handle.emit("clipboard-update", entry);
@@ -227,7 +230,7 @@ fn load_clip_history() {
     if let Some(items) = v["items"].as_array() {
         let mut cache = CLIP_CACHE.lock().unwrap();
         for item in items { cache.push(item.clone()); }
-        cache.truncate(CLIP_CACHE_MAX);
+        cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
         eprintln!("[clip] loaded {} item(s) from history", cache.len());
     }
 }
@@ -275,6 +278,26 @@ fn clear_clipboard_history() {
         CLIP_CACHE.lock().unwrap().clear();
     } // CLIP_CACHE 锁在此释放
     save_clip_history(vec![]);
+}
+
+/// 前端调用：返回当前运行时缓存上限
+#[tauri::command]
+fn get_clip_cache_max() -> usize {
+    CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed)
+}
+
+/// 前端调用：设置剪贴板历史缓存上限（10-100，超出自动 clamp）。
+/// 立即截断现有缓存并落盘。仅取 CLIP_CACHE 锁，不进 CLIPBOARD_LOCK（无 Win32 剪贴板操作）。
+#[tauri::command]
+fn set_clip_cache_max(n: usize) {
+    let n = n.clamp(10, 100);
+    CLIP_CACHE_MAX_RUNTIME.store(n, Ordering::Relaxed);
+    let snap = {
+        let mut cache = CLIP_CACHE.lock().unwrap();
+        cache.truncate(n);
+        cache.clone()
+    }; // CLIP_CACHE 锁在此释放，落盘 I/O 不持任何锁
+    save_clip_history(snap);
 }
 
 /// 获取窗口类名
@@ -948,7 +971,8 @@ pub fn run() {
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, paste_clipboard,
             set_clipboard_image, get_clipboard_history, set_clipboard_files,
             delete_clipboard_item, clear_clipboard_history,
-            copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard
+            copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard,
+            get_clip_cache_max, set_clip_cache_max
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))

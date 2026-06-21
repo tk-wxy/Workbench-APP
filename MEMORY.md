@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）
-- **进行中**：← 无（剪贴板持久化✓完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）
+- **进行中**：← 无（剪贴板历史条数可配置✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -168,6 +168,22 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-21 (剪贴板历史条数可配置——设置面板四档 + 持久化)
+- **功能**：Settings → 剪贴板 → 「历史保存条数」新增 segmented control（10/20/50/100），选中立即生效并重启保留。
+- **Rust**（`src-tauri/src/lib.rs`）：
+  - `CLIP_CACHE_MAX` 常量改名为 `CLIP_CACHE_MAX_DEFAULT=20`，新增 `CLIP_CACHE_MAX_RUNTIME: AtomicUsize`（初始值同默认）。
+  - `start_clipboard_monitor` 与 `load_clip_history` 中的 `truncate` 改为读 `CLIP_CACHE_MAX_RUNTIME.load(Relaxed)`。
+  - 新增 `get_clip_cache_max() -> usize`：返回当前运行时上限。
+  - 新增 `set_clip_cache_max(n: usize)`：clamp(10,100) → 更新 AtomicUsize → 截断 CLIP_CACHE（仅持 CLIP_CACHE 锁）→ 出锁后 `save_clip_history`（锁规则不变）。
+- **前端**（`src/App.tsx`）：
+  - 新增 `clipCacheMax` state（默认 20）+ `clipCacheMaxRef`（供 clipboard-update 闭包读最新值）。
+  - Store 初始化读 `clip-cache-max`，有值则 invoke `set_clip_cache_max` 同步 Rust 侧。
+  - `clipboard-update` listener 的 `slice(0,20)` 改为 `slice(0,clipCacheMaxRef.current)`。
+  - 新增 `changeClipCacheMax(n)` callback：更新 state → 持久化 → invoke Rust → 重拉历史同步前端。
+  - 设置面板 clipboard tab：「剪贴板历史」行上方加「历史保存条数」seg 控件（复用 `.seg/.seg-btn/.seg-active` 样式）；hint 文字 "20 条" 改为动态 `{clipCacheMax} 条`。
+- **验证**：`cargo check` 零新增警告；`tsc --noEmit` 零错误。**GUI 实测通过（用户确认）**：T1 面板显示当前值 ✓、T2 切换到10立即截断 ✓、T3 重启设置保留 ✓、T4 新复制超限时最旧被淘汰 ✓。
+- **文件**：`src-tauri/src/lib.rs`（+2 命令 +1 静态变量 +常量改名 +2 处 truncate 替换 +命令注册）/ `src/App.tsx`（+state/ref +store 初始化读取 +clipboard-update slice +changeClipCacheMax +设置面板 UI）/ `CLAUDE.md` 剪贴板节更新 / `MEMORY.md`。
 
 ### 2026-06-21 (剪贴板历史持久化，Rust 侧落盘 clip_history.json)
 - **功能**：`CLIP_CACHE` 进程退出不再清空；重启后历史完整读回（含图片 base64 缩略图和文件路径条目）。
