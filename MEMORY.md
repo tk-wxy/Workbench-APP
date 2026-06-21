@@ -169,6 +169,23 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-21 (bug 修复：粘贴后剪贴板卡片跳顶——三类型全修)
+- **根因**：监听线程的「锁后补检」只验 `SKIP_CLIP_UNTIL_SEQ` 水位，不验 `SKIP_CLIP_EVENTS` 计数。`set_clipboard_image`/`set_clipboard_files` 用的是写前计数（`store(2)`），存在竞态：监听线程已以 SKIP=0 通过锁前检查 → 粘贴命令赢得锁竞争写入新 seq → 监听取锁后补检只测水位（未更新）→ 读到自写内容 → 卡片置顶。
+- **修复**（共 3 行，3 处各 +1 行 `suppress_clip_until_now();`）：
+  - `paste_clipboard`：写后加（已在前轮修复）
+  - `set_clipboard_files`：非桌面 `write_cf_hdrop` 锁块后加
+  - `set_clipboard_image`：非桌面 `cb.set_image` 锁块后加
+  三路径全部与水位机制对齐；桌面分支（SHFileOperation）不碰系统剪贴板，不加。
+- **验证**：`cargo check` 零新增警告。⚠️ GUI 实测（截图/文件连续粘贴、列表顺序是否稳定）待用户验证。
+- **文件**：`src-tauri/src/lib.rs`（3 处 +1 行）。未碰锁粒度/焦点/热键/粘贴流程。
+
+### 2026-06-21 (快捷入口 bug 修复：终端无响应 + 慢启动根因)
+- **问题**：① 点击「终端」（wt）无任何反应；② `shell:Downloads`/`shell:Desktop`/`ms-settings:` 打开偏慢。
+- **根因**：`openShortcut` 调用 `launch_app`（`ShellExecuteW`），而 ShellExecuteW 不搜索 `%LOCALAPPDATA%\Microsoft\WindowsApps`，找不到 `wt.exe`，报错被 `.catch(()=>{})` 吞掉；shell:/ms-settings: 路径经 ShellExecuteW 有 COM 初始化开销。
+- **修复**：`openShortcut` 改调 `open_file`（`cmd /c start "" <target>`）——cmd.exe 自带 WindowsApps PATH，支持 wt/shell:/ms-settings:/calc 全部目标；顺带给 `open_file`/`reveal_in_explorer` 加 `CREATE_NO_WINDOW` 防开发模式 cmd 窗闪烁。
+- **验证**：`cargo check` 零警告、`tsc --noEmit` 零错误。**GUI 实测通过（用户确认）**：终端/下载/桌面/设置均正常打开。
+- **文件**：`src-tauri/src/lib.rs`（+`CommandExt` import / `CREATE_NO_WINDOW` 常量 / `open_file`+`reveal_in_explorer` 加 `.creation_flags`）/ `src/App.tsx`（`openShortcut` 改调 `open_file`）
+
 ### 2026-06-21 (快捷入口栏精简 + 截屏，续29)
 - **需求**：精简快捷入口（去除文档/控制面板/任务管理器，补设置/截屏），截屏接 Snipping Tool 区域截图模式。
 - **前端**（`src/App.tsx`）：
