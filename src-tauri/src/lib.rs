@@ -23,6 +23,8 @@ static SKIP_CLIP_UNTIL_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 /// 互抢导致 SetClipboardData 报 os error 1418（线程没有打开的剪贴板）。paste 路径靠写前武装
 /// SKIP_CLIP_EVENTS 让监听跳过、不读，故不入此锁、行为不变。
 static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+/// 剪贴板历史落盘路径（setup 阶段写入一次，之后只读）。未初始化时 load/save 静默 no-op。
+static CLIP_HISTORY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
@@ -195,9 +197,58 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             }
             cache.insert(0, entry.clone());
             cache.truncate(CLIP_CACHE_MAX);
+            let snap = cache.clone();
+            drop(cache); // 释放 CLIP_CACHE 锁，落盘 I/O 不持任何锁
             let _ = app_handle.emit("clipboard-update", entry);
+            save_clip_history(snap);
         }
     });
+}
+
+/// 启动时从磁盘读取历史填充 CLIP_CACHE。必须在 start_clipboard_monitor 之前调用。
+/// 文件不存在 → 无历史，静默跳过。解析失败 → 备份损坏文件，以空历史启动。
+fn load_clip_history() {
+    let Some(path) = CLIP_HISTORY_PATH.get() else { return; };
+    let data = match std::fs::read_to_string(path) {
+        Ok(d) => d,
+        Err(_) => return, // 文件不存在或不可读：无历史，正常启动
+    };
+    let parsed: serde_json::Result<serde_json::Value> = serde_json::from_str(&data);
+    let v = match parsed {
+        Ok(v) if v["version"].as_u64() == Some(1) => v,
+        _ => {
+            // 解析失败或 version 未知：备份损坏文件，空历史启动
+            let backup = path.with_extension(format!("json.corrupt.{}", now_ms()));
+            let _ = std::fs::rename(path, &backup);
+            eprintln!("[clip] history corrupted → backed up to {:?}", backup);
+            return;
+        }
+    };
+    if let Some(items) = v["items"].as_array() {
+        let mut cache = CLIP_CACHE.lock().unwrap();
+        for item in items { cache.push(item.clone()); }
+        cache.truncate(CLIP_CACHE_MAX);
+        eprintln!("[clip] loaded {} item(s) from history", cache.len());
+    }
+}
+
+/// 把历史快照原子写到磁盘（tmp → rename）。接受快照入参，自身不持任何锁。
+/// 调用方必须保证 CLIP_CACHE 锁与 CLIPBOARD_LOCK 均已释放后再调用（防重入死锁）。
+/// 任何磁盘错误只 eprintln，不传播、不 panic，持久化降级但 app 正常运行。
+fn save_clip_history(snapshot: Vec<serde_json::Value>) {
+    let Some(path) = CLIP_HISTORY_PATH.get() else { return; };
+    let data = match serde_json::to_string(&serde_json::json!({"version":1,"items":snapshot})) {
+        Ok(d) => d,
+        Err(e) => { eprintln!("[clip] serialize error: {e}"); return; }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &data) {
+        eprintln!("[clip] write tmp error: {e}"); return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        eprintln!("[clip] rename error: {e}"); return;
+    }
+    eprintln!("[clip] saved {} item(s) → {:?}", snapshot.len(), path);
 }
 
 /// 前端调用：直接返回缓存数据（毫秒级）
@@ -209,13 +260,21 @@ fn get_clipboard_history() -> Vec<serde_json::Value> {
 /// 前端调用：按 time 字段删除缓存中的指定条目
 #[tauri::command]
 fn delete_clipboard_item(time: i64) {
-    CLIP_CACHE.lock().unwrap().retain(|e| e["time"].as_i64().unwrap_or(0) != time);
+    let snap = {
+        let mut cache = CLIP_CACHE.lock().unwrap();
+        cache.retain(|e| e["time"].as_i64().unwrap_or(0) != time);
+        cache.clone()
+    }; // CLIP_CACHE 锁在此释放
+    save_clip_history(snap);
 }
 
 /// 前端调用：清空全部剪贴板历史缓存
 #[tauri::command]
 fn clear_clipboard_history() {
-    CLIP_CACHE.lock().unwrap().clear();
+    {
+        CLIP_CACHE.lock().unwrap().clear();
+    } // CLIP_CACHE 锁在此释放
+    save_clip_history(vec![]);
 }
 
 /// 获取窗口类名
@@ -907,6 +966,12 @@ pub fn run() {
             start_hotkey_monitor(app.handle().clone());
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
+            // 历史路径初始化（load 必须先于 start_clipboard_monitor）
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                let _ = std::fs::create_dir_all(&data_dir);
+                let _ = CLIP_HISTORY_PATH.set(data_dir.join("clip_history.json"));
+            }
+            load_clip_history();
             start_clipboard_monitor(app.handle().clone());
             dragdrop::register_drag_drop(app); // 中转区原生拖入
 

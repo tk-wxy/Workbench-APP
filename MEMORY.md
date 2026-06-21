@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）
-- **进行中**：← 无（续29 完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）
+- **进行中**：← 无（剪贴板持久化✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -168,6 +168,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-21 (剪贴板历史持久化，Rust 侧落盘 clip_history.json)
+- **功能**：`CLIP_CACHE` 进程退出不再清空；重启后历史完整读回（含图片 base64 缩略图和文件路径条目）。
+- **核心实现**（`src-tauri/src/lib.rs`）：
+  - `static CLIP_HISTORY_PATH: OnceLock<PathBuf>`：setup 阶段写入一次，load/save 只读，降级时静默 no-op。
+  - `load_clip_history()`：setup 中、`start_clipboard_monitor` 之前调用；解析失败则备份 `.corrupt.<ts>` + 空历史启动，不 panic。
+  - `save_clip_history(snapshot: Vec<Value>)`：接快照入参，自身不持任何锁；原子写（tmp → rename）；磁盘错误 `eprintln!` 不传播。
+  - 三处调用点：① monitor 线程 `cache.truncate` 后 `clone+drop(cache)` 出锁再 save；② `delete_clipboard_item` 出锁后 save；③ `clear_clipboard_history` 出锁后 save 空快照。
+- **锁规则（硬约束）**：落盘 I/O 绝不进 `CLIPBOARD_LOCK`；save 调用点必须在 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 双双释放后（防重入死锁）。已写入 CLAUDE.md 铁律。
+- **验证**：`cargo check` 零新增警告；`cargo clippy` 8 条基线不变。⚠️ **GUI 实测待用户验证**：复制文本/图片/文件各几条 → 重启 app → 历史完整读回；删除某条/清空后重启是否同步。
+- **文件**：`src-tauri/src/lib.rs`（+2 函数 +1 静态变量 +3 处 save 调用点 +setup 路径初始化）；`DECISIONS.md` §6 延伸；`CLAUDE.md` 剪贴板节补持久化铁律；`MEMORY.md` §0 更新。前端零改动。
 
 ### 2026-06-21 (bug 修复：粘贴后剪贴板卡片跳顶——三类型全修)
 - **根因**：监听线程的「锁后补检」只验 `SKIP_CLIP_UNTIL_SEQ` 水位，不验 `SKIP_CLIP_EVENTS` 计数。`set_clipboard_image`/`set_clipboard_files` 用的是写前计数（`store(2)`），存在竞态：监听线程已以 SKIP=0 通过锁前检查 → 粘贴命令赢得锁竞争写入新 seq → 监听取锁后补检只测水位（未更新）→ 读到自写内容 → 卡片置顶。
