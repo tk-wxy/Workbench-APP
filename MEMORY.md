@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-20
+> **最后更新**：2026-06-21
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -161,11 +161,24 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
 - **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。**已决定保持位图**（用户 2026-06-20 确认，不做双格式/临时 PNG 方案，别当 TODO 去"修"）。若日后真要支持：copy_image 同时落临时 PNG + 写 CF_HDROP（双格式上剪贴板）
 - **多显示器**：当前仅适配主显示器工作区
-- **🐛 中转区与快捷入口视觉重合（待修，2026-06-21 记录，未改代码）**：`center-panel` 内「文件中转区(drop-area, flex:1)」+「快捷入口(shortcut-row)」纵向排布；中转条目变多时 drop-area 内容溢出、与下方快捷入口按钮视觉重合/挤压。根因＝drop-area 用 flex:1 撑高但内容无独立滚动容器、未与 shortcut-row 隔离。候选修法：drop-area 内套可滚动列表（`overflow-y:auto` + 限高），或给两区明确分隔/各自滚动。**用户指示先记录不改。**
+- ~~中转区与快捷入口视觉重合~~：**已修（2026-06-21）**。`center-panel` 改 `overflow:hidden`（固定高度分配），`drop-area` 加 `overflow-y:auto`（内部独立滚动），快捷入口始终可见。
 
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-21 (右键菜单：中转区文件条目 + 全局屏蔽系统菜单)
+- **功能**：中转区条目右键弹出自定义浮层菜单（`position:fixed`，高 z-index）。file 类型：打开所在目录 / 复制到剪贴板 / 删除该项目；text/image：复制到剪贴板 / 删除该项目。其他区域全局屏蔽系统右键菜单（`onContextMenu={e=>e.preventDefault()}` 挂 `#overlay`）。
+- **新 Rust 命令** `reveal_in_explorer(path)`：`cmd /c explorer.exe /select,"<path>"` — 在资源管理器中高亮选中目标文件。
+- **前端扩展点**：`openCtxMenu(e, items)` 通用助手（边界检测防出屏）；各区域可独立构造 `items` 调用它实现右键菜单。
+- **Esc 优先级**：context menu 开时 Esc 先关菜单（`ctxMenuRef` 同步当前 state，供 keydown 闭包无需入 deps）；菜单外 mousedown 自动关闭。
+- **验证**：`tsc --noEmit` 零错误；`cargo check` 零警告/错误。⚠️ 视觉效果需 `npm run tauri dev` 实测（中转区文件条目右键 + 打开所在目录 + 复制 + 删除）。
+- **文件**：`src-tauri/src/lib.rs`（+`reveal_in_explorer` 命令+注册）/ `src/App.tsx`（CtxMenu 类型+state+ref+useEffect+openCtxMenu+openStageCtxMenu+JSX）/ `src/App.css`（`.ctx-menu` + `.ctx-menu-item` 样式）
+
+### 2026-06-21 (UI bug 修复：中转区条目溢出覆盖快捷入口)
+- **根因**：`center-panel` 有 `overflow-y:auto`（可滚动容器），`drop-area` 有 `flex:1` 但无 `overflow` 约束；`stage-list` 内容超出 `drop-area` 分配高度时视觉溢出到下方 `shortcut-row`，产生重合/遮挡。
+- **修复**（`src/App.css` 两行）：`center-panel` 改 `overflow:hidden`（固定高度，不整栏滚）；`drop-area` 加 `overflow-y:auto`（内容超出时内部独立滚动，快捷入口始终可见）。
+- **验证**：纯 CSS 改动，零 JS 变动，`tsc --noEmit` 无需重跑（无 TS 变动）。⚠️ 视觉效果需 `npm run tauri dev` 实测（多条目中转区 + 快捷入口可见性）。
 
 ### 2026-06-21 (续27：原生拖入 drag-in 落地——先误判死胡同、spike 推翻、再实现，GUI 实测通过)
 - **弯路（已纠正，留教训）**：先用「先呼出再拖」（错误变量）+ 临时 on-screen 探针测，得「红色禁止+零事件」→ 误判全屏覆盖层收不到 OLE 拖放、登记为死胡同、删了 `handleDrop`、写了 §14「废弃」。根因没查清就下了硬限制结论。

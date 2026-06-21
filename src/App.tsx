@@ -102,6 +102,10 @@ function HighlightText({ text, ranges }: { text: string; ranges: [number, number
   return <>{parts}</>;
 }
 
+// 自定义右键菜单（浮层）
+type CtxMenuItem = { label: string; action: () => void; disabled?: boolean };
+type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
+
 // 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
 const SETTINGS_TABS = [
   { id: "general",   icon: "⚙",  label: "常规" },
@@ -136,11 +140,23 @@ export default function App() {
   const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
+  const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
+  const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const storeRef = useRef<any>(null); storeRef.current = store;
+
+  // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
+  useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
+  // 点外任意处关闭右键菜单（mousedown 先于 click，不影响 click 回调）
+  useEffect(() => {
+    if (!ctxMenu) return;
+    const close = () => setCtxMenu(null);
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [ctxMenu]);
 
   // ── 时钟 ──
   useEffect(() => { const u=()=>setTime(new Date().toLocaleTimeString("zh-CN",{hour:"2-digit",minute:"2-digit"})); u(); const t=setInterval(u,1000); return ()=>clearInterval(t); }, []);
@@ -299,6 +315,7 @@ export default function App() {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
   }, []);
+  const clearStage = useCallback(async () => { await saveStage([]); }, [saveStage]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
     if (launchingRef.current) return; // 与启动共用锁：动画进行中忽略
     // 实际粘贴：hide+交还焦点+Ctrl+V 全在 Rust 命令内（流程不变），此处仅负责调用
@@ -336,6 +353,34 @@ export default function App() {
       setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
     } catch {}
   }, []);
+
+  // 通用：在鼠标位置弹出自定义右键菜单（边界检测防出屏）
+  const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[]) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const MENU_W = 176, MENU_H = items.length * 36 + 8;
+    const x = Math.min(e.clientX, window.innerWidth - MENU_W - 8);
+    const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8);
+    setCtxMenu({ x, y, items });
+  }, []);
+
+  // 中转区条目右键菜单（文件：打开所在目录；通用：复制到剪贴板、删除该项目）
+  const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
+    const items: CtxMenuItem[] = [];
+    if (s.type === "file" && s.items?.[0]?.path) {
+      items.push({
+        label: "打开所在目录",
+        action: async () => {
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("reveal_in_explorer", { path: s.items![0].path });
+        },
+      });
+    }
+    items.push({ label: "复制到剪贴板", action: () => copyStageToClipboard(s) });
+    items.push({ label: "删除该项目",   action: () => removeStage(s.id) });
+    openCtxMenu(e, items);
+  }, [openCtxMenu, copyStageToClipboard, removeStage]);
+
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("launch_app",{path:target})).catch(()=>{});
@@ -347,7 +392,7 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(settingsOpen)return; // 设置打开时屏蔽应用导航/启动按键
       if(e.key==="ArrowLeft"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
       if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
@@ -362,7 +407,7 @@ export default function App() {
 
   return (
    <>
-    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}`}>
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}`} onContextMenu={e=>e.preventDefault()}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
@@ -398,7 +443,7 @@ export default function App() {
             {stage.length? <div className="stage-list">{stage.map(s=>{
               const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
               return (
-              <div key={s.id} className="stage-item" onClick={()=>copyAndPaste(s)} title={s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）"}>
+              <div key={s.id} className="stage-item" onClick={()=>copyAndPaste(s)} onContextMenu={e=>openStageCtxMenu(e,s)} title={s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）"}>
                 {s.type==="image"
                   ? <img className="stage-thumb" src={s.content} alt=""/>
                   : <span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
@@ -483,6 +528,11 @@ export default function App() {
                     <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
                   </div>
                   <p className="settings-hint">复制的文本、图片、文件会自动记录，最多保留 20 条。</p>
+                  <div className="settings-row">
+                    <span className="settings-row-label">文件中转区<span className="settings-row-sub">{stage.length} 条</span></span>
+                    <button className="settings-action" onClick={clearStage} disabled={!stage.length}>清空</button>
+                  </div>
+                  <p className="settings-hint">手动钉入或拖入的文件、文本、图片条目。</p>
                 </>)}
                 {settingsTab==="hotkeys" && (<>
                   <div className="settings-panel-title">快捷键</div>
@@ -515,6 +565,17 @@ export default function App() {
     {launchAnim && (
       <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
         {launchAnim.icon ? <img src={launchAnim.icon} alt=""/> : <span>{launchAnim.name[0]}</span>}
+      </div>
+    )}
+    {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
+    {ctxMenu && (
+      <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
+        {ctxMenu.items.map((item,i)=>(
+          <button key={i} className="ctx-menu-item" disabled={item.disabled}
+            onClick={()=>{item.action();setCtxMenu(null);}}>
+            {item.label}
+          </button>
+        ))}
       </div>
     )}
    </>
