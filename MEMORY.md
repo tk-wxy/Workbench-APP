@@ -177,7 +177,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
   - `save_clip_history(snapshot: Vec<Value>)`：接快照入参，自身不持任何锁；原子写（tmp → rename）；磁盘错误 `eprintln!` 不传播。
   - 三处调用点：① monitor 线程 `cache.truncate` 后 `clone+drop(cache)` 出锁再 save；② `delete_clipboard_item` 出锁后 save；③ `clear_clipboard_history` 出锁后 save 空快照。
 - **锁规则（硬约束）**：落盘 I/O 绝不进 `CLIPBOARD_LOCK`；save 调用点必须在 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 双双释放后（防重入死锁）。已写入 CLAUDE.md 铁律。
-- **验证**：`cargo check` 零新增警告；`cargo clippy` 8 条基线不变。⚠️ **GUI 实测待用户验证**：复制文本/图片/文件各几条 → 重启 app → 历史完整读回；删除某条/清空后重启是否同步。
+- **验证**：`cargo check` 零新增警告；`cargo clippy` 8 条基线不变。**GUI 实测通过（用户确认）**：重启后历史完整读回，行为符合预期，无新 bug。
 - **文件**：`src-tauri/src/lib.rs`（+2 函数 +1 静态变量 +3 处 save 调用点 +setup 路径初始化）；`DECISIONS.md` §6 延伸；`CLAUDE.md` 剪贴板节补持久化铁律；`MEMORY.md` §0 更新。前端零改动。
 
 ### 2026-06-21 (bug 修复：粘贴后剪贴板卡片跳顶——三类型全修)
