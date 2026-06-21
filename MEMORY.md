@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-21
+> **最后更新**：2026-06-22
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -20,6 +20,7 @@
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
 - **新增（续26 实测通过）**：文件中转区升级为「混合条目」模型（文件/文本/图片），剪贴板卡片 📌 钉入 + 中转条目单击取走（写回剪贴板+粘贴）/复制/打开/删除。store 由 `file-list`(路径数组)→`stage-items`(异构条目)、带旧格式迁移。**GUI 实测**：钉入/取走粘贴/复制/重启读回（含图片缩略图）全通过；迁移因本机无遗留 `file-list` 未触发（兜底逻辑，非 bug）
 - **新增（续27 实测通过）**：原生拖入（drag-in）落地——`dragDropEnabled:false` + 自注册 IDropTarget（`dragdrop.rs`）接外部文件拖放，emit 路径 → 前端转 file StageItem 入中转。曾误判为死胡同（错误变量「先呼出再拖」+wry 占槽），spike 推翻、已实现。耐久性：setup 注册一次（「每次 show 重注册」实测破坏回调、已弃）。T1–T8 GUI 实测全过。**拖出 drag-out 未做**（需 DoDragDrop FFI，非死胡同、是未实现）
+- **新增（续30 GUI 实测通过，纯前端）**：剪贴板卡片**长按拖拽到中转区**——Pointer Events 方案 A（移动超 `DRAG_THRESHOLD_PX=8` 才激活，短按仍走 onClick 粘贴不拦截）。激活后跟手克隆 `.clip-drag-ghost`（渲染为 #overlay 兄弟节点，避开 backdrop-filter 的 fixed 包含块陷阱）+ 中转区 `.drop-area.drag-over` 高亮；落点命中→`addToStage`（不粘贴），命中外→取消。`suppressClickRef` 抑制激活后随之而来的 onClick 误粘贴；`#overlay.dragging{user-select:none}` 防长按泛蓝。📌 按钮/右键菜单/复制删除按钮全保留（PointerDown 检测 `.clip-actions` 内则跳过）。零 Rust 改动。**T9 tsc 零错误已验；T1–T8 为 GUI 交互、本环境无法驱动，未实测**
 - **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
@@ -168,6 +169,18 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-22 (剪贴板卡片长按拖拽到中转区，续30，纯前端)
+- **功能**：剪贴板历史卡片新增「长按拖拽到中转区」交互，与原有「点击粘贴 / 右键菜单 / 📌 钉入」并存不冲突；顺带修长按文字泛蓝。
+- **零 Rust 改动**，仅 `src/App.tsx` + `src/App.css`。
+- **方案**：Pointer Events 方案 A（阈值激活）。
+  - 常量 `DRAG_THRESHOLD_PX=8`（移动超此距离才激活拖拽）。
+  - state `dragState`（item/origin/current/active）+ `dragStateRef`（move/up 闭包读最新）+ `dropAreaRef`（命中检测）+ `suppressClickRef`（激活后抑制随之而来的 onClick 误粘贴）。
+  - 三 handler：`handleClipPointerDown`（仅左键、`.clip-actions` 内跳过、setPointerCapture）/ `handleClipPointerMove`（超阈值激活并加 `#overlay.dragging`、跟手 + `.drag-over` 高亮）/ `handleClipPointerUp`（激活且命中 drop-area → `addToStage`，不粘贴；未激活 → 放手交回 onClick 粘贴；cancel 复用此函数）。
+  - 跟手克隆 `.clip-drag-ghost` 渲染为 **#overlay 兄弟节点**（避开 backdrop-filter 成为 fixed 包含块的定位陷阱，同 `launch-clone`）。
+  - CSS：`#overlay.dragging{user-select:none;cursor:grabbing}` 防泛蓝；`.drop-area.drag-over` 虚线高亮；`.clip-drag-ghost`/`.clip-ghost-img` 克隆样式。
+  - classList 手动 toggle 不被 React 覆盖：`#overlay`/`.drop-area` 的 className prop 在拖拽期间不变 → React 不重写 DOM.className。
+- **验证**：`tsc --noEmit` 零错误（T9✓）。T1–T8 GUI 交互链路（短按粘贴/长按无副作用/超阈值激活拖拽/拖入入中转/拖外取消/无泛蓝/按钮不误触/📌右键保留）**已人工实测通过**。
 
 ### 2026-06-21 (剪贴板历史条数可配置——设置面板四档 + 持久化)
 - **功能**：Settings → 剪贴板 → 「历史保存条数」新增 segmented control（10/20/50/100），选中立即生效并重启保留。

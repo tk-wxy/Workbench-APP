@@ -13,6 +13,7 @@ interface StageItem { id: number; type: "text" | "image" | "file"; content?: str
 // copyAndPaste/复制 只读这三个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; };
 const STAGE_MAX = 20; // 中转区上限
+const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 
 function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
 function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return "刚刚"; if (s<3600) return `${Math.floor(s/60)}分钟前`; return `${Math.floor(s/3600)}小时前`; }
@@ -158,6 +159,12 @@ export default function App() {
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const storeRef = useRef<any>(null); storeRef.current = store;
+  // 剪贴板卡片长按拖拽到中转区（纯前端，Pointer Events，移动超阈值才激活）
+  const [dragState, setDragState] = useState<{ item: ClipItem; originX: number; originY: number; currentX: number; currentY: number; active: boolean } | null>(null);
+  const dragStateRef = useRef(dragState); // 供 pointermove/up 闭包读最新值（setState 异步）
+  useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
+  const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
+  const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -309,6 +316,40 @@ export default function App() {
     if (exists) return;
     saveStage([clipToStage(c), ...stage].slice(0,STAGE_MAX));
   }, [stage,saveStage]);
+  // 拖拽：按下记录起点（不立刻激活，等移动超阈值），但跳过 .clip-actions 内的按钮区，且仅左键
+  const handleClipPointerDown = useCallback((e: React.PointerEvent, c: ClipItem) => {
+    if (e.button !== 0) return;
+    if ((e.target as Element).closest(".clip-actions")) return; // 复制/删除/📌 按钮区不参与拖拽
+    suppressClickRef.current = false; // 每次新交互复位，避免上次拖拽残留误抑制本次点击
+    setDragState({ item: c, originX: e.clientX, originY: e.clientY, currentX: e.clientX, currentY: e.clientY, active: false });
+    e.currentTarget.setPointerCapture(e.pointerId); // 捕获指针，移动出卡片也持续收到 move/up
+  }, []);
+  // 拖拽：移动超阈值激活；激活后跟手并按命中与否高亮中转区
+  const handleClipPointerMove = useCallback((e: React.PointerEvent) => {
+    const ds = dragStateRef.current;
+    if (!ds) return;
+    if (!ds.active) {
+      if (Math.hypot(e.clientX - ds.originX, e.clientY - ds.originY) < DRAG_THRESHOLD_PX) return;
+      document.getElementById("overlay")?.classList.add("dragging"); // 防泛蓝 + grabbing 光标
+      setDragState({ ...ds, active: true, currentX: e.clientX, currentY: e.clientY });
+      return;
+    }
+    const rect = dropAreaRef.current?.getBoundingClientRect();
+    const over = !!rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    dropAreaRef.current?.classList.toggle("drag-over", over);
+    setDragState({ ...ds, currentX: e.clientX, currentY: e.clientY });
+  }, []);
+  // 拖拽结束：仅在激活且落点命中中转区时入中转（不粘贴）；未激活则放手让 onClick 正常粘贴
+  const handleClipPointerUp = useCallback((e: React.PointerEvent) => {
+    const ds = dragStateRef.current;
+    document.getElementById("overlay")?.classList.remove("dragging");
+    dropAreaRef.current?.classList.remove("drag-over");
+    setDragState(null);
+    if (!ds?.active) return; // 短按 / cancel：不拦截，交给原有 onClick 粘贴
+    suppressClickRef.current = true; // 抑制紧随的 onClick（落点处可能触发粘贴）
+    const rect = dropAreaRef.current?.getBoundingClientRect();
+    if (rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) addToStage(ds.item);
+  }, [addToStage]);
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
@@ -489,7 +530,7 @@ export default function App() {
         </section>
         <section className="center-panel">
           <div className="section-label">文件中转区</div>
-          <div className="drop-area">
+          <div className="drop-area" ref={dropAreaRef}>
             {stage.length? <div className="stage-list">{stage.map(s=>{
               const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
               return (
@@ -523,7 +564,10 @@ export default function App() {
           <div className="section-label">剪贴板历史</div>
           <div className="clip-list">
             {clipboard.length? clipboard.map((c,i)=>(
-              <div key={i} className="clip-block" onClick={()=>copyAndPaste(c)} onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
+              <div key={i} className="clip-block"
+                onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
+                onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp} onPointerCancel={handleClipPointerUp}
+                onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?"单击左键粘贴":c.type==="file"?"单击左键粘贴文件":"单击左键复制"}>
                 <div className="clip-actions">
                   <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title="钉到中转区"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-2-4V7a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v6z"/></svg></button>
                   <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?"已复制":"复制到剪贴板"}>
@@ -635,6 +679,16 @@ export default function App() {
             {item.label}
           </button>
         ))}
+      </div>
+    )}
+    {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测 */}
+    {dragState?.active && (
+      <div className="clip-drag-ghost" style={{position:"fixed",left:dragState.currentX+12,top:dragState.currentY+12,pointerEvents:"none",zIndex:100002}}>
+        {dragState.item.type==="image"
+          ? <img src={dragState.item.content} className="clip-ghost-img" alt=""/>
+          : dragState.item.type==="file"
+          ? <span>📄 {dragState.item.items?.[0]?.name ?? "文件"}</span>
+          : <span>{String(dragState.item.content ?? "").slice(0,40)}</span>}
       </div>
     )}
    </>

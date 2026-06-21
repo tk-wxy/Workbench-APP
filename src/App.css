@@ -128,6 +128,15 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .file-clip-info{font-size:11px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .clip-time{font-size:9px;color:var(--text3);align-self:flex-start;}
 
+/* ── 剪贴板卡片长按拖拽到中转区 ── */
+/* 拖拽期间：禁文字选中（防泛蓝）+ 抓取光标 */
+#overlay.dragging{user-select:none;-webkit-user-select:none;cursor:grabbing;}
+/* 中转区接收高亮 */
+.drop-area.drag-over{border:2px dashed var(--accent,#60a5fa);background:rgba(96,165,250,0.06);transition:background 0.1s;}
+/* 跟手克隆 */
+.clip-drag-ghost{background:var(--fill-2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;max-width:180px;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.5);font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;}
+
 /* ── 底栏 ── */
 .bottom-bar{display:flex;align-items:center;justify-content:space-between;height:40px;padding:0 20px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);flex-shrink:0;}
 .bot-left,.bot-center,.bot-right{display:flex;align-items:center;gap:8px;}
