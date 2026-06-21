@@ -541,6 +541,17 @@ fn open_file(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reveal_in_explorer(path: String) -> Result<(), String> {
+    // explorer /select,"<path>" 在资源管理器中选中并高亮该文件
+    let cmd = format!("explorer.exe /select,\"{}\"", path);
+    std::process::Command::new("cmd")
+        .args(["/c", &cmd])
+        .spawn()
+        .map_err(|e| format!("无法打开所在目录: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
@@ -837,7 +848,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info,
-            hide_window, open_file, paste_clipboard,
+            hide_window, open_file, reveal_in_explorer, paste_clipboard,
             set_clipboard_image, get_clipboard_history, set_clipboard_files,
             delete_clipboard_item, clear_clipboard_history,
             copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard
