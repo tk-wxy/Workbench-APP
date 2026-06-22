@@ -4,6 +4,8 @@
 
 ## 功能演示
 xx
+## 界面截图
+<img width="1024" height="606" alt="image" src="https://github.com/user-attachments/assets/df9c49d0-fa5f-4e3d-9f88-a34c850e45a3" />
 
 ## 下载使用
 xx
