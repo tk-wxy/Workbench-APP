@@ -132,6 +132,26 @@ const LAUNCH_ANIM_MS = 200;
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 interface LaunchAnim { icon: string | null; name: string; rect: { top: number; left: number; width: number; height: number }; }
 
+function getFileIcon(item: ClipItem): string {
+  const items = item.items ?? [];
+  if (items.length > 1) return "📦";
+  const first = items[0];
+  if (!first) return "📎";
+  const ext = (first.ext || first.path.split(".").pop() || "").toLowerCase();
+  if (["png","jpg","jpeg","gif","webp","bmp","svg","ico"].includes(ext) || first.isImage) return "🖼️";
+  if (["mp4","mkv","avi","mov","wmv"].includes(ext)) return "🎬";
+  if (["mp3","wav","flac","ogg","aac","m4a"].includes(ext)) return "🎵";
+  if (["zip","rar","7z","tar","gz","bz2","xz"].includes(ext)) return "🗜️";
+  if (ext === "pdf") return "📄";
+  if (["doc","docx","odt"].includes(ext)) return "📝";
+  if (["xls","xlsx","csv"].includes(ext)) return "📊";
+  if (["ppt","pptx"].includes(ext)) return "📊";
+  if (["js","ts","jsx","tsx","py","rs","go","cpp","c","h","java","cs","html","css","json","yaml","yml","xml","toml"].includes(ext)) return "💻";
+  if (["exe","msi","bat","cmd","ps1","sh"].includes(ext)) return "⚙️";
+  if (["txt","md","log","ini","cfg","conf"].includes(ext)) return "📃";
+  return "📎";
+}
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -579,7 +599,7 @@ export default function App() {
                 </div>
                 {c.type==="image"? <img className="clip-image" src={c.content} alt=""/>
                 : c.type==="file"? <div className="file-clip-preview">
-                    <span className="file-clip-icon">{c.items?.[0]?.isImage?"🖼️":"📁"}</span>
+                    <span className="clip-file-icon">{getFileIcon(c)}</span>
                     <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : `${c.count}个文件`}</span>
                   </div>
                 : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
