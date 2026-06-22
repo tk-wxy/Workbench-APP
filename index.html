@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Workbench App</title>
+    <!--
+      内联样式——在 JS/CSS 加载前立即生效，
+      消除 webview 首次渲染时的白屏闪烁
+    -->
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        /* 深色背景：即使透明窗口 CSS 尚未加载，也不会有白色闪过 */
+        background: #12121a;
+        color-scheme: dark;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
