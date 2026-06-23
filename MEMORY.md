@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-22（续31）
+> **最后更新**：2026-06-23（续33）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）
-- **进行中**：← 无（剪贴板历史条数可配置✓完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）
+- **进行中**：← 无（历史图原图✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -22,6 +22,7 @@
 - **新增（续27 实测通过）**：原生拖入（drag-in）落地——`dragDropEnabled:false` + 自注册 IDropTarget（`dragdrop.rs`）接外部文件拖放，emit 路径 → 前端转 file StageItem 入中转。曾误判为死胡同（错误变量「先呼出再拖」+wry 占槽），spike 推翻、已实现。耐久性：setup 注册一次（「每次 show 重注册」实测破坏回调、已弃）。T1–T8 GUI 实测全过。**拖出 drag-out 未做**（需 DoDragDrop FFI，非死胡同、是未实现）
 - **新增（续30 GUI 实测通过，纯前端）**：剪贴板卡片**长按拖拽到中转区**——Pointer Events 方案 A（移动超 `DRAG_THRESHOLD_PX=8` 才激活，短按仍走 onClick 粘贴不拦截）。激活后跟手克隆 `.clip-drag-ghost`（渲染为 #overlay 兄弟节点，避开 backdrop-filter 的 fixed 包含块陷阱）+ 中转区 `.drop-area.drag-over` 高亮；落点命中→`addToStage`（不粘贴），命中外→取消。`suppressClickRef` 抑制激活后随之而来的 onClick 误粘贴；`#overlay.dragging{user-select:none}` 防长按泛蓝。📌 按钮/右键菜单/复制删除按钮全保留（PointerDown 检测 `.clip-actions` 内则跳过）。零 Rust 改动。**T9 tsc 零错误已验；T1–T8 为 GUI 交互、本环境无法驱动，未实测**
 - **新增（续31 GUI 实测通过，纯前端）**：剪贴板卡片 file 类型**按扩展名显示语义图标**——组件外纯函数 `getFileIcon(item: ClipItem)`，多文件→📦，依扩展名映射图片/视频/音频/压缩包/PDF/Office/代码/可执行/文本，兜底→📎。JSX 中 `file-clip-icon` 改为 `clip-file-icon`，调用 `getFileIcon`。CSS 新增 `.clip-file-icon`（1.25rem）。text/image 类型及卡片其余逻辑不变
+- **新增（续32 GUI 实测通过，纯前端）**：**开机自启**——设置 → 常规 tab 新增「开机自启」开/关 seg 控件。`tauri-plugin-autostart`（已内置）通过 `plugin:autostart|enable/disable/is_enabled` 命令写/读 Windows 注册表开机启动项。启动时自动读取当前状态填充 UI；切换即时生效。零 Rust 改动
 - **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
@@ -122,7 +123,7 @@ src-tauri/Cargo.toml
 |------|------|
 | `get_clipboard_history` | 获取后台缓存的剪贴板历史 |
 | `paste_clipboard` | 写入文本到剪贴板 + 焦点交还 + Ctrl+V |
-| `set_clipboard_image` | 图片粘贴：历史图写回剪贴板 + 焦点交还 + Ctrl+V |
+| `set_clipboard_image` | 图片粘贴：历史图写回剪贴板 + 焦点交还 + Ctrl+V（`orig_path` 优先读原图文件，失败降级缩略图）|
 | `set_clipboard_files` | 文件粘贴：CF_HDROP + 焦点交还 + Ctrl+V（桌面走 SHFileOperation）|
 | `hide_window` | 前端主动隐藏窗口（纯 hide + emit hotkey-hide）|
 | `open_file` | 用默认程序打开文件/文件夹 |
@@ -133,7 +134,9 @@ src-tauri/Cargo.toml
 | `delete_clipboard_item` | 从后台缓存删除指定剪贴板条目（按 time）|
 | `clear_clipboard_history` | 清空后台 CLIP_CACHE 全部条目（设置面板"清空"）|
 | `copy_text_to_clipboard` | 只复制文本到当前剪贴板（不粘贴/不隐藏；seq 水位防回流历史）|
-| `copy_image_to_clipboard` | 只复制图片（缩略图）到当前剪贴板（同上）|
+| `copy_image_to_clipboard` | 只复制图片到当前剪贴板（`orig_path` 优先读原图文件，失败降级缩略图；不粘贴/不隐藏）|
+| `open_clip_image_dir` | 用 Explorer 打开 `clip_images/` 原图缓存目录 |
+| `clear_clip_image_cache` | 删除 `clip_images/` 内全部文件（不删目录；降级/自愈由 paste fallback + load strip 兜底）|
 | `copy_files_to_clipboard` | 只复制文件 CF_HDROP 到当前剪贴板（同上）|
 | `reveal_in_explorer` | 在资源管理器中高亮目标文件（/select,path）|
 | `trigger_screenshot` | hide overlay + emit hotkey-hide + 150ms + enigo Win+Shift+S |
@@ -162,14 +165,32 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 - **闪烁**：窗口约 15-20 次开关闪一次，图片 `<img>` 解码叠加 opacity 过渡时加重（独立问题，未根治）
 - **应用图标提取**：UWP 应用（如 Windows Terminal）提取失败，fallback 首字母
-- **剪贴板图片**：历史图片粘贴的是缩略图(1024px)非原图（`set_clipboard_image` 从系统剪贴板重读原图，当前图有效，历史图只有缩略图）
-- **「只复制」图片粘不进文件夹/桌面**：copy_image 放位图(CF_DIB)，只粘进图片类目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件。**已决定保持位图**（用户 2026-06-20 确认，不做双格式/临时 PNG 方案，别当 TODO 去"修"）。若日后真要支持：copy_image 同时落临时 PNG + 写 CF_HDROP（双格式上剪贴板）
+- **「只复制」按钮图片粘不进文件夹/桌面**：`copy_image_to_clipboard`（卡片右下角「只复制」）放的是位图(CF_DIB)，用户自行 Ctrl+V 只能粘进接受图片的目标（输入框/Word/画图）；文件夹/桌面只收 CF_HDROP 文件格式。注意区别：点整张卡片触发的**自动粘贴**（`set_clipboard_image`）有桌面检测分支，走 SHFileOperation 落地为文件，桌面/文件夹正常可用。**已决定「只复制」保持 CF_DIB**（用户 2026-06-20 确认，不做双格式/临时 PNG 方案，别当 TODO 去"修"）。若日后真要支持：copy_image 同时落临时 PNG + 写 CF_HDROP（双格式上剪贴板）
 - **多显示器**：当前仅适配主显示器工作区
 - ~~中转区与快捷入口视觉重合~~：**已修（2026-06-21）**。`center-panel` 改 `overflow:hidden`（固定高度分配），`drop-area` 加 `overflow-y:auto`（内部独立滚动），快捷入口始终可见。
 
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-23 (历史剪贴板位图粘贴改为原图——落盘 Simple 方案，续33)
+- **功能**：历史图粘贴/复制从 1024px 缩略图升级为原图（写时落盘 → 读时优先原图文件 → 失败降级缩略图）。
+- **Rust**（`src-tauri/src/lib.rs`）：
+  - 新增常量 `MAX_ORIG_DIM=4096`（超出则等比缩放再存）、静态 `CLIP_IMAGE_DIR: OnceLock<PathBuf>`。
+  - 新函数 `save_clip_image_to_disk(img, w, h, time)`：detached thread 调用，不持任何锁；原子写 `.png.tmp → .png`。
+  - `start_clipboard_monitor` 图片分支重构：`CLIPBOARD_LOCK` 只罩 `get_image()`，`drop(guard)` 后做 thumb/ahash/b64；大图（`w > MAX_THUMB_DIM || h > MAX_THUMB_DIM`）保留 `full_img`（`resize_exact` 取 `&self` 不消耗原值）；aHash dedup 判新后才 `spawn(save_clip_image_to_disk)`（防孤儿文件）；小图跳过落盘（thumbnail 即原图）。
+  - `set_clipboard_image` + `copy_image_to_clipboard` 新增 `orig_path: Option<String>` 参数；文件读在锁外，`CLIPBOARD_LOCK` 只罩 `set_image` 临界区；读失败降级 base64 缩略图。
+  - `load_clip_history`：加载时检查 `orig_path` 文件是否存在，不存在则去掉该字段（自愈）。
+  - 新命令 `open_clip_image_dir`（`cmd /c start "" <dir>`）、`clear_clip_image_cache`（删 dir 内全部文件）。
+  - setup 初始化 `clip_images/` 目录 + `CLIP_IMAGE_DIR` 写入。
+- **前端**（`src/App.tsx`）：
+  - `ClipItem` / `Pasteable` 加 `orig_path?: string`。
+  - `clipboard-update` 监听 + 两处 `get_clipboard_history` 映射均传播 `orig_path`。
+  - `copyAndPaste` 的 `set_clipboard_image` + `writeItemToClipboard` 的 `copy_image_to_clipboard` 均传 `origPath: item.orig_path ?? null`。
+  - 设置面板剪贴板 tab：新增「图片原图缓存」row + 「打开文件夹」/「清空缓存」按钮 + hint 文字。
+- **锁纪律静态核查（三条铁律全通过）**：① PNG 编码/文件 I/O 全在锁外；② 仅 dedup 判新后写盘；③ CLIPBOARD_LOCK 只罩 get_image/set_image 临界区。
+- **验证**：`cargo check` 零警告、`tsc --noEmit` 零错误。**GUI 实测通过（用户确认）**：截图→历史卡粘贴全尺寸 ✓；小图（≤1024px 双边，约 ≤1MB）不产生缓存文件（设计如此，base64 即原图，质量无损）✓；清空缓存→降级缩略图 ✓。
+- **文件**：`src-tauri/src/lib.rs`（+2 常量 +1 静态 +2 函数 +2 命令 +monitor 重构 +set/copy_image 改签名 +load_clip_history strip +setup init +handler 注册）/ `src/App.tsx`（类型 +orig_path 传播 +invoke 参数 +设置面板 UI +imgCacheCleared ✓ 反馈）/ `src/App.css`（+`.settings-action.copied` 绿色反馈样式）/ `DECISIONS.md` §6 延伸 / `MEMORY.md`。
 
 ### 2026-06-22 (剪贴板卡片长按拖拽到中转区，续30，纯前端)
 - **功能**：剪贴板历史卡片新增「长按拖拽到中转区」交互，与原有「点击粘贴 / 右键菜单 / 📌 钉入」并存不冲突；顺带修长按文字泛蓝。

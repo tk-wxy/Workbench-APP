@@ -25,6 +25,8 @@ static SKIP_CLIP_UNTIL_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 /// 剪贴板历史落盘路径（setup 阶段写入一次，之后只读）。未初始化时 load/save 静默 no-op。
 static CLIP_HISTORY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// 原图落盘目录（setup 阶段初始化）。未初始化时 save_clip_image_to_disk 静默跳过。
+static CLIP_IMAGE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
@@ -41,6 +43,8 @@ static CLIP_CACHE_MAX_RUNTIME: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(CLIP_CACHE_MAX_DEFAULT);
 /// 图片缩略图最长边（超过则缩放，避免 IPC 传输数十 MB）
 const MAX_THUMB_DIM: u32 = 1024;
+/// 原图落盘上限（最长边超过此值时等比缩放后再存）；开发机截图 ≤ 3200px 不触发
+const MAX_ORIG_DIM: u32 = 4096;
 /// 图片去重的 aHash 汉明距离阈值
 const AHASH_MAX_HAMMING: u32 = 5;
 /// 图片去重的尺寸近似阈值（px）
@@ -121,7 +125,10 @@ fn build_clip_entry() -> Result<Option<serde_json::Value>, ()> {
     Ok(None)
 }
 
-/// 后台线程：每 CLIP_POLL_MS 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端
+/// 后台线程：每 CLIP_POLL_MS 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端。
+/// 图片分支：仅 get_image 在 CLIPBOARD_LOCK 内（最小临界区），thumb/ahash/编码在锁外；
+///   大图（> MAX_THUMB_DIM）判新后 detached spawn 写原图，不阻塞监听循环（防加宽采样塌缩窗口）。
+/// 文件/文本分支：沿用原有逻辑，仍在锁内重试。
 fn start_clipboard_monitor(app_handle: AppHandle) {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     std::thread::spawn(move || {
@@ -145,65 +152,150 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             }
             // 读剪贴板与 copy_* 的写入串行（CLIPBOARD_LOCK），防并发 OpenClipboard 撞 os error 1418
             let clip_guard = CLIPBOARD_LOCK.lock().unwrap();
-            // 拿锁后重读 seq + 复核水位：copy_* 可能在我们等锁期间刚写完并抬高水位
-            // （那次变化是它的自写）→ 跳过，避免把自写 thumbnail 当新内容回流历史面板
+            // 拿锁后重读 seq + 复核水位
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq <= SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst) { last_seq = seq; continue; }
             println!("[clipbg] seq changed → reading");
 
-            // 快速复制时源程序可能短暂占用剪贴板，读取瞬时失败。本轮内快速重试几次；
-            // 仍失败则【不推进 last_seq】，留到下个轮询周期重试——避免"复制过快→读取失败
-            // →seq 已消费→该条目永久不显示"。
-            let mut built: Result<Option<serde_json::Value>, ()> = Err(());
-            for attempt in 0..CLIP_READ_RETRIES {
-                match build_clip_entry() {
-                    Ok(opt) => { built = Ok(opt); break; }
-                    Err(()) => {
-                        if attempt + 1 < CLIP_READ_RETRIES {
-                            std::thread::sleep(std::time::Duration::from_millis(CLIP_READ_RETRY_MS));
+            // ── 图片分支：仅 get_image 在锁内，thumb/ahash/编码在锁外 ──────────────
+            if has_clipboard_image() {
+                // 锁内重试读取（源程序可能短暂占用剪贴板）
+                let mut img_opt: Option<(image::DynamicImage, u32, u32)> = None;
+                for attempt in 0..CLIP_READ_RETRIES {
+                    let r = (|| -> Result<(image::DynamicImage, u32, u32), ()> {
+                        let mut cb = arboard::Clipboard::new().map_err(|_| ())?;
+                        let img_data = cb.get_image().map_err(|_| ())?;
+                        let w = img_data.width as u32;
+                        let h = img_data.height as u32;
+                        let rgba = image::RgbaImage::from_raw(w, h, img_data.bytes.into_owned())
+                            .ok_or(())?;
+                        Ok((image::DynamicImage::ImageRgba8(rgba), w, h))
+                    })();
+                    match r {
+                        Ok(v) => { img_opt = Some(v); break; }
+                        Err(()) => {
+                            if attempt + 1 < CLIP_READ_RETRIES {
+                                std::thread::sleep(std::time::Duration::from_millis(CLIP_READ_RETRY_MS));
+                            }
                         }
                     }
                 }
-            }
-            let entry = match built {
-                Ok(Some(e)) => e,
-                Ok(None) => { last_seq = seq; continue; }       // 可访问但无内容：推进，避免重复尝试
-                Err(()) => { println!("[clipbg] clipboard busy, retry next tick"); continue; } // 不推进 → 下轮重试
-            };
-            last_seq = seq; // 成功读到内容才推进
-            drop(clip_guard); // 读完即释放锁；下面 cache 处理 + emit 不碰剪贴板
+                drop(clip_guard); // 读完立即释放；后续 thumb/ahash/编码 CPU 密集但不碰剪贴板句柄
 
-            let mut cache = CLIP_CACHE.lock().unwrap();
+                let (full_img, w, h) = match img_opt {
+                    Some(v) => v,
+                    None => { println!("[clipbg] clipboard busy, retry next tick"); continue; }
+                };
+                last_seq = seq; // 成功读到才推进
 
-            // 图片去重：aHash 汉明距离(≤5) + 尺寸近似(±2px)
-            if entry["type"] == "image" {
-                let ew = entry["w"].as_u64().unwrap_or(0) as i64;
-                let eh = entry["h"].as_u64().unwrap_or(0) as i64;
-                let ah = entry["ahash"].as_u64().unwrap_or(0);
-                let dup = cache.iter().any(|e| {
-                    if e["type"] != "image" { return false; }
-                    let cw = e["w"].as_u64().unwrap_or(0) as i64;
-                    let ch = e["h"].as_u64().unwrap_or(0) as i64;
-                    let ca = e["ahash"].as_u64().unwrap_or(0);
-                    let dim_ok = (cw - ew).abs() <= AHASH_MAX_DIM_DELTA && (ch - eh).abs() <= AHASH_MAX_DIM_DELTA;
-                    dim_ok && (ah ^ ca).count_ones() <= AHASH_MAX_HAMMING
+                // thumb + ahash 计算（锁外）
+                // resize_exact 取 &self，不消耗 full_img → 大图保留 full_img 供后续落盘
+                let is_large = w > MAX_THUMB_DIM || h > MAX_THUMB_DIM;
+                let (thumb, large_img_opt) = if is_large {
+                    let r = MAX_THUMB_DIM as f64 / w.max(h) as f64;
+                    let t = full_img.resize_exact(
+                        (w as f64 * r) as u32, (h as f64 * r) as u32,
+                        image::imageops::FilterType::Triangle,
+                    );
+                    (t, Some(full_img)) // 保留原图，供 dedup 确认「判新」后写盘
+                } else {
+                    (full_img, None) // 小图：thumb == orig，content 本身即无损原图，不另落盘
+                };
+
+                let mut png = std::io::Cursor::new(Vec::new());
+                if thumb.write_to(&mut png, image::ImageFormat::Png).is_err() { continue; }
+                let b64 = base64_encode(&png.into_inner());
+                let ah = compute_ahash(&thumb);
+                let time = now_ms();
+
+                // 预置 orig_path 路径字符串（仅大图；零 I/O，dedup 判新后才真正写文件）
+                let orig_path: Option<String> = if is_large {
+                    CLIP_IMAGE_DIR.get()
+                        .map(|d| d.join(format!("{time}.png")).to_string_lossy().into_owned())
+                } else {
+                    None
+                };
+
+                let mut entry = serde_json::json!({
+                    "type": "image",
+                    "content": format!("data:image/png;base64,{b64}"),
+                    "time": time, "w": w, "h": h, "ahash": ah
                 });
-                if dup {
-                    println!("[clipbg] image skipped (dup)");
+                if let Some(ref p) = orig_path {
+                    entry["orig_path"] = serde_json::json!(p);
+                }
+                println!("[clipbg] image {w}×{h} cached, large={is_large}");
+
+                // CLIP_CACHE 锁：aHash 去重 + 插入（dedup 结果决定是否写原图文件）
+                let (is_new, snap) = {
+                    let mut cache = CLIP_CACHE.lock().unwrap();
+                    let ew = w as i64; let eh = h as i64;
+                    let dup = cache.iter().any(|e| {
+                        if e["type"] != "image" { return false; }
+                        let cw = e["w"].as_u64().unwrap_or(0) as i64;
+                        let ch = e["h"].as_u64().unwrap_or(0) as i64;
+                        let ca = e["ahash"].as_u64().unwrap_or(0);
+                        (cw - ew).abs() <= AHASH_MAX_DIM_DELTA
+                            && (ch - eh).abs() <= AHASH_MAX_DIM_DELTA
+                            && (ah ^ ca).count_ones() <= AHASH_MAX_HAMMING
+                    });
+                    if dup {
+                        println!("[clipbg] image skipped (dup)");
+                        (false, vec![])
+                    } else {
+                        cache.retain(|e| e["content"] != entry["content"]);
+                        cache.insert(0, entry.clone());
+                        cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
+                        (true, cache.clone())
+                    }
+                }; // CLIP_CACHE 锁释放
+
+                if !is_new {
+                    // 被 aHash 判重：large_img_opt drop → 零孤儿文件
                     continue;
                 }
-            }
 
-            // 去重只在同类型内：文本/图片按 content，文件类型不去重
-            if entry["type"] == "text" || entry["type"] == "image" {
-                cache.retain(|e| e["content"] != entry["content"]);
+                // 全部锁已释放：大图 detached 写盘（不阻塞本循环，防加宽采样塌缩窗口）
+                if let Some(orig_img) = large_img_opt {
+                    let t = time;
+                    std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, t));
+                }
+                let _ = app_handle.emit("clipboard-update", entry);
+                save_clip_history(snap);
+
+            } else {
+                // ── 文件 / 文本分支：沿用原有逻辑（锁内重试 + 判空）─────────────────
+                let mut built: Result<Option<serde_json::Value>, ()> = Err(());
+                for attempt in 0..CLIP_READ_RETRIES {
+                    match build_clip_entry() {
+                        Ok(opt) => { built = Ok(opt); break; }
+                        Err(()) => {
+                            if attempt + 1 < CLIP_READ_RETRIES {
+                                std::thread::sleep(std::time::Duration::from_millis(CLIP_READ_RETRY_MS));
+                            }
+                        }
+                    }
+                }
+                let entry = match built {
+                    Ok(Some(e)) => e,
+                    Ok(None) => { last_seq = seq; drop(clip_guard); continue; }
+                    Err(()) => { println!("[clipbg] clipboard busy, retry next tick"); continue; }
+                };
+                last_seq = seq;
+                drop(clip_guard);
+
+                let mut cache = CLIP_CACHE.lock().unwrap();
+                // 去重只在同类型内：文本按 content；文件不去重
+                if entry["type"] == "text" {
+                    cache.retain(|e| e["content"] != entry["content"]);
+                }
+                cache.insert(0, entry.clone());
+                cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
+                let snap = cache.clone();
+                drop(cache);
+                let _ = app_handle.emit("clipboard-update", entry);
+                save_clip_history(snap);
             }
-            cache.insert(0, entry.clone());
-            cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
-            let snap = cache.clone();
-            drop(cache); // 释放 CLIP_CACHE 锁，落盘 I/O 不持任何锁
-            let _ = app_handle.emit("clipboard-update", entry);
-            save_clip_history(snap);
         }
     });
 }
@@ -229,7 +321,17 @@ fn load_clip_history() {
     };
     if let Some(items) = v["items"].as_array() {
         let mut cache = CLIP_CACHE.lock().unwrap();
-        for item in items { cache.push(item.clone()); }
+        for item in items {
+            let mut item = item.clone();
+            // orig_path 文件不存在时去掉该字段（降级为缩略图，重启自愈）
+            if let Some(path) = item["orig_path"].as_str() {
+                if !std::path::Path::new(path).exists() {
+                    item.as_object_mut().map(|m| m.remove("orig_path"));
+                    eprintln!("[clip] orig_path 不存在，降级为缩略图");
+                }
+            }
+            cache.push(item);
+        }
         cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
         eprintln!("[clip] loaded {} item(s) from history", cache.len());
     }
@@ -252,6 +354,35 @@ fn save_clip_history(snapshot: Vec<serde_json::Value>) {
         eprintln!("[clip] rename error: {e}"); return;
     }
     eprintln!("[clip] saved {} item(s) → {:?}", snapshot.len(), path);
+}
+
+/// 把原图 PNG 写到 clip_images/{time}.png（原子写 tmp→rename）。
+/// 在 detached 线程内调用，不持任何锁。>MAX_ORIG_DIM 时等比缩放后存。失败仅 eprintln。
+fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) {
+    let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
+    let path = dir.join(format!("{time}.png"));
+    let save_img = if w > MAX_ORIG_DIM || h > MAX_ORIG_DIM {
+        let r = MAX_ORIG_DIM as f64 / w.max(h) as f64;
+        img.resize_exact(
+            (w as f64 * r) as u32, (h as f64 * r) as u32,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
+    let tmp = path.with_extension("png.tmp");
+    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+    if save_img.write_to(&mut cursor, image::ImageFormat::Png).is_err() {
+        eprintln!("[clip_img] PNG 编码失败 time={time}"); return;
+    }
+    if std::fs::write(&tmp, cursor.into_inner()).is_err() {
+        eprintln!("[clip_img] 写临时文件失败 time={time}"); return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("[clip_img] rename 失败 time={time}: {e}");
+    } else {
+        eprintln!("[clip_img] 原图已落盘 {time}.png ({w}×{h})");
+    }
 }
 
 /// 前端调用：直接返回缓存数据（毫秒级）
@@ -670,7 +801,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
+fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
@@ -683,10 +814,17 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     println!("[imgpaste] foreground class=\"{class1}\"");
 
     if class1 == "WorkerW" || class1 == "Progman" {
-        // 桌面：PNG 写临时文件 → SHFileOperation 落地
+        // 桌面：PNG 落地。优先用原图文件（已是 PNG，无需重编码）
         let png_bytes: Vec<u8> = if !base64.is_empty() {
-            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
-            base64_decode(b64).ok_or("base64 解码失败")?
+            // 历史图：先尝试 orig_path 文件，失败降级 base64 缩略图
+            let from_orig = orig_path.as_deref().and_then(|p| std::fs::read(p).ok());
+            match from_orig {
+                Some(b) => b,
+                None => {
+                    let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+                    base64_decode(b64).ok_or("base64 解码失败")?
+                }
+            }
         } else {
             // 当前图：从 arboard 读取 RGBA 再编码为 PNG（读也走锁，与监听串行；仅罩读取临界区）
             let img_data = {
@@ -714,20 +852,31 @@ fn set_clipboard_image(app: AppHandle, base64: String) -> Result<(), String> {
     // 非桌面：历史图写回剪贴板，再 Ctrl+V
     if !base64.is_empty() {
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
-        let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
-        let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
-        let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
-        let rgba = img.to_rgba8();
-        let (w, h) = rgba.dimensions();
+        // 锁外读文件（文件 I/O 绝不进 CLIPBOARD_LOCK）
+        let rgba_from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+            .map(|img| { let r = img.to_rgba8(); let (w,h) = r.dimensions(); (w,h,r.into_raw()) });
+        let (w, h, raw) = if let Some(data) = rgba_from_orig {
+            println!("[imgpaste] 使用原图 {}×{}", data.0, data.1);
+            data
+        } else {
+            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+            let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+            let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            println!("[imgpaste] 降级缩略图 {w}×{h}");
+            (w, h, rgba.into_raw())
+        };
         {
             // 仅罩写入临界区；下面焦点交还/Ctrl+V 在锁外
             let _g = CLIPBOARD_LOCK.lock().unwrap();
             let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
-            cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()) })
+            cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(raw) })
                 .map_err(|e| format!("写入: {}", e))?;
         }
-        suppress_clip_until_now(); // 锁后水位补检：与文本路径对齐，封住 SKIP_CLIP_EVENTS 的竞态死角
-        println!("[imgpaste] thumbnail {w}×{h} written back");
+        suppress_clip_until_now();
     }
 
     let target = unsafe { GetForegroundWindow() };
@@ -798,19 +947,31 @@ fn copy_text_to_clipboard(text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn copy_image_to_clipboard(base64: String) -> Result<(), String> {
-    // 历史项始终带 base64 缩略图（1024px）；解码为 RGBA 写回为位图（CF_DIB）。
-    // 注：位图只能粘进"接受图片"的目标（输入框/Word/画图等）；资源管理器文件夹/桌面只收
-    // CF_HDROP 文件、不收位图粘贴，故往那里 Ctrl+V 无反应——Windows 固有限制，非 bug。
-    let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
-    let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
-    let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
-    let rgba = img.to_rgba8();
-    let (w, h) = rgba.dimensions();
+fn copy_image_to_clipboard(base64: String, orig_path: Option<String>) -> Result<(), String> {
+    // 优先从原图文件读取（全分辨率）；失败降级 1024px 缩略图。
+    // 结果写为位图（CF_DIB）：只能粘进图片类目标（输入框/Word/画图）；
+    // 文件夹/桌面只收 CF_HDROP，故往那里 Ctrl+V 无反应——Windows 固有限制，非 bug。
+    // 文件 I/O 在锁外（CLIPBOARD_LOCK 只罩 set_image 临界区）。
+    let (w, h, raw) = {
+        let from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+            .map(|img| { let r = img.to_rgba8(); let (w,h) = r.dimensions(); (w,h,r.into_raw()) });
+        if let Some(data) = from_orig {
+            data
+        } else {
+            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+            let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+            let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            (w, h, rgba.into_raw())
+        }
+    };
     let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防并发 OpenClipboard 撞 1418
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
     cb.set_image(arboard::ImageData {
-        width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(rgba.into_raw()),
+        width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(raw),
     }).map_err(|e| format!("写入: {}", e))?;
     suppress_clip_until_now();
     Ok(())
@@ -821,6 +982,33 @@ fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
     let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防 1418
     write_cf_hdrop(&paths)?;
     suppress_clip_until_now();
+    Ok(())
+}
+
+/// 用系统文件管理器打开原图缓存目录（clip_images/）
+#[tauri::command]
+fn open_clip_image_dir() -> Result<(), String> {
+    let dir = CLIP_IMAGE_DIR.get()
+        .ok_or_else(|| "图片缓存目录未初始化".to_string())?;
+    let path = dir.to_string_lossy().into_owned();
+    std::process::Command::new("cmd")
+        .args(["/c", "start", "", &path])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|e| format!("无法打开目录: {}", e))?;
+    Ok(())
+}
+
+/// 删除 clip_images/ 内全部文件（不删目录本身）。
+/// 当前会话 entry 的 orig_path 变悬空 → paste 自动降级缩略图；重启后 load_clip_history 去掉该字段（自愈）。
+#[tauri::command]
+fn clear_clip_image_cache() -> Result<(), String> {
+    let Some(dir) = CLIP_IMAGE_DIR.get() else { return Ok(()); };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     Ok(())
 }
 
@@ -972,7 +1160,8 @@ pub fn run() {
             set_clipboard_image, get_clipboard_history, set_clipboard_files,
             delete_clipboard_item, clear_clipboard_history,
             copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard,
-            get_clip_cache_max, set_clip_cache_max
+            get_clip_cache_max, set_clip_cache_max,
+            open_clip_image_dir, clear_clip_image_cache
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -990,10 +1179,13 @@ pub fn run() {
             start_hotkey_monitor(app.handle().clone());
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
-            // 历史路径初始化（load 必须先于 start_clipboard_monitor）
+            // 历史路径与原图目录初始化（load 必须先于 start_clipboard_monitor）
             if let Ok(data_dir) = app.path().app_data_dir() {
                 let _ = std::fs::create_dir_all(&data_dir);
                 let _ = CLIP_HISTORY_PATH.set(data_dir.join("clip_history.json"));
+                let images_dir = data_dir.join("clip_images");
+                let _ = std::fs::create_dir_all(&images_dir);
+                let _ = CLIP_IMAGE_DIR.set(images_dir);
             }
             load_clip_history();
             start_clipboard_monitor(app.handle().clone());
