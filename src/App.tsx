@@ -6,12 +6,12 @@ interface AppInfo { name: string; path: string; icon: string | null; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; }
-interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; }
+interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
 interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; }
-// copyAndPaste/复制 只读这三个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
-type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; };
+// copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
+type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX = 20; // 中转区上限
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 
@@ -43,7 +43,7 @@ async function writeItemToClipboard(item: Pasteable) {
   const { invoke } = await import("@tauri-apps/api/core");
   if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
   else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
-  else await invoke("copy_image_to_clipboard", { base64: item.content });
+  else await invoke("copy_image_to_clipboard", { base64: item.content, origPath: item.orig_path ?? null });
 }
 
 // ── 模糊搜索：子序列打分器（统一解决模糊 + 缩写）──
@@ -168,10 +168,12 @@ export default function App() {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的剪贴板项 time，用于按钮 ✓ 反馈
   const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
+  const [imgCacheCleared, setImgCacheCleared] = useState(false); // 设置面板「清空缓存」✓ 反馈
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
+  const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
   const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
   const clipCacheMaxRef = useRef(20); clipCacheMaxRef.current = clipCacheMax; // 供 clipboard-update 闭包读最新值
   const searchRef = useRef<HTMLInputElement>(null);
@@ -210,6 +212,9 @@ export default function App() {
   // ── Store ──
   useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } } catch{} })(); }, []);
 
+  // ── 开机自启：启动时读取当前状态 ──
+  useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
+
   const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
@@ -222,7 +227,7 @@ export default function App() {
         const un1 = await listen("hotkey-show", () => setVisible(true));
         const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; }); // 复位启动/粘贴动画
         const un3 = await listen("clipboard-update", (event: any) => {
-          const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count };
+          const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
             const filtered = prev.filter(x => {
               if (item.type === "file" && x.type === "file") return x.items?.[0]?.path !== item.items?.[0]?.path;
@@ -264,9 +269,9 @@ export default function App() {
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number}[]>("get_clipboard_history");
+        const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
         if (history.length) {
-          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count })));
+          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
         }
       } catch {}
     })();
@@ -383,6 +388,9 @@ export default function App() {
     setTheme(t);
     if(store){ await store.set("theme",t); await store.save(); }
   }, [store]);
+  const changeAutostart = useCallback(async (enable: boolean) => {
+    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke(enable?"plugin:autostart|enable":"plugin:autostart|disable"); setAutostartEnabled(enable); } catch{}
+  }, []);
   const clearClipboard = useCallback(async () => {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
@@ -395,8 +403,8 @@ export default function App() {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("set_clip_cache_max", { n });
       // Rust 已截断缓存，重新拉取最新历史同步前端 state
-      const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number}[]>("get_clipboard_history");
-      setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count })));
+      const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
+      setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
     } catch {}
   }, [store]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
@@ -406,7 +414,7 @@ export default function App() {
       const {invoke}=await import("@tauri-apps/api/core");
       if (item.type === "text") { try { await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
       else if (item.type === "file" && item.items) { try { await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); } }
-      else { try { await invoke("set_clipboard_image",{base64:item.content}); } catch{ await hideWorkbench(); } }
+      else { try { await invoke("set_clipboard_image",{base64:item.content,origPath:item.orig_path??null}); } catch{ await hideWorkbench(); } }
     };
     // 无障碍：跳过淡出，沿用即时粘贴
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -635,6 +643,13 @@ export default function App() {
                       ))}
                     </div>
                   </div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">开机自启</span>
+                    <div className="seg">
+                      <button className={`seg-btn${autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(true)}>开启</button>
+                      <button className={`seg-btn${!autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(false)}>关闭</button>
+                    </div>
+                  </div>
                 </>)}
                 {settingsTab==="clipboard" && (<>
                   <div className="settings-panel-title">剪贴板</div>
@@ -651,6 +666,14 @@ export default function App() {
                     <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
                   </div>
                   <p className="settings-hint">复制的文本、图片、文件会自动记录，最多保留 {clipCacheMax} 条。</p>
+                  <div className="settings-row">
+                    <span className="settings-row-label">图片原图缓存</span>
+                    <div style={{display:"flex",gap:4}}>
+                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>打开文件夹</button>
+                      <button className={`settings-action${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?"✓ 已清空":"清空缓存"}</button>
+                    </div>
+                  </div>
+                  <p className="settings-hint">历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。</p>
                   <div className="settings-row">
                     <span className="settings-row-label">文件中转区<span className="settings-row-sub">{stage.length} 条</span></span>
                     <button className="settings-action" onClick={clearStage} disabled={!stage.length}>清空</button>

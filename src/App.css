@@ -173,4 +173,5 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-action{padding:5px 16px;border:1px solid var(--border);background:var(--fill-1);color:var(--text2);font-size:12px;font-family:var(--font);cursor:pointer;border-radius:6px;transition:all 80ms;}
 .settings-action:hover:not(:disabled){background:rgba(255,80,80,0.15);color:#ff6b6b;border-color:rgba(255,80,80,0.30);}
 .settings-action:disabled{opacity:0.4;cursor:default;}
+.settings-action.copied,.settings-action.copied:hover{color:#4ade80;border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08);}
 .settings-about{font-size:12px;color:var(--text2);line-height:1.9;padding:4px 0;}
