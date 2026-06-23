@@ -61,6 +61,7 @@ npm run tauri build    # 打包
 - 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（用计数器非布尔——arboard 的 get+set 可能触发 2 次 seq 变化），后台 `swap` 递减跳过。`CLIPBOARD_LOCK` 与 `SKIP_CLIP_EVENTS`/seq 水位是两层正交防护：前者防**并发抢句柄(1418)**，后者防**自写回流历史面板**。
 - 写文件用 `CF_HDROP` raw FFI（`SetClipboardData` / `DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径）。别用 `[0u8;16]` 清零，会导致 fWide=FALSE 解析失败。
 - 去重**只在同类型内进行**（跨类型去重会误删）：文件按 `items[0].path`，文本/图片按 `content`，不同类型永久保留。
+- **批量 file 走合并 CF_HDROP、混合不可批量上剪贴板**：多个 file 条目可 `flatMap items` 合并成一个 CF_HDROP 一次写入；但文本/图片/混合无法合并成单一 payload。前端批量取走/复制仅对「全选 file」启用（`allFiles` 判断），混合/文本/图片选中时置灰。此限制源于 CF_HDROP §7 架构，任何新增批量剪贴板功能必须过此关（详见 DECISIONS §6 延伸）。
 - **历史持久化落盘 I/O 绝不进 `CLIPBOARD_LOCK`**（磁盘 IO 与 Win32 剪贴板锁正交，混用无必要且拉长持锁时间）。`save_clip_history` 接**快照入参**、自身不持任何锁——调用方必须先释放 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 再调（防重入死锁；与 `write_cf_hdrop` 锁加调用方同理）。固定模式：`{ 锁 CLIP_CACHE → mutate → let snap = cache.clone(); }` 出锁 → `save_clip_history(snap)`。
 
 ### 窗口尺寸

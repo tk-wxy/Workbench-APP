@@ -85,6 +85,7 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-list{display:flex;flex-direction:column;gap:6px;}
 .stage-item{position:relative;display:flex;align-items:center;gap:8px;background:var(--fill-1);border-radius:6px;padding:7px 10px;cursor:pointer;transition:background 80ms;}
 .stage-item:hover{background:var(--fill-2);}
+.stage-item.selected{background:rgba(0,120,212,0.16);box-shadow:inset 0 0 0 1px var(--accent);}
 .stage-emoji{font-size:18px;flex-shrink:0;width:24px;text-align:center;}
 .stage-thumb{width:32px;height:32px;object-fit:cover;border-radius:4px;flex-shrink:0;}
 .stage-title{font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2);}
@@ -137,6 +138,17 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 /* 跟手克隆 */
 .clip-drag-ghost{background:var(--fill-2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;max-width:180px;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.5);font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;}
+
+/* ── 中转区标题行 + 多选工具栏 ── */
+.stage-section-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 6px;flex-shrink:0;gap:8px;}
+.stage-section-header .section-label{padding:0;flex-shrink:0;}
+.stage-multi-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+.stage-sel-count{font-size:11px;color:var(--text2);white-space:nowrap;padding:0 4px;}
+.stage-batch-btn{padding:3px 10px;border:1px solid var(--border);background:var(--fill-1);color:var(--text2);font-size:11px;font-family:var(--font);cursor:pointer;border-radius:5px;transition:all 80ms;white-space:nowrap;}
+.stage-batch-btn:hover:not(:disabled){background:var(--hover);color:var(--text);}
+.stage-batch-btn:disabled{opacity:.4;cursor:default;}
+.stage-batch-btn.copied{color:#4ade80;border-color:rgba(74,222,128,0.35);}
+.stage-batch-cancel{color:var(--text3);}
 
 /* ── 底栏 ── */
 .bottom-bar{display:flex;align-items:center;justify-content:space-between;height:40px;padding:0 20px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);flex-shrink:0;}

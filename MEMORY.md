@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-23（续33）
+> **最后更新**：2026-06-23（续34）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）
-- **进行中**：← 无（历史图原图✓完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）
+- **进行中**：← 无（中转区多选✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -172,6 +172,28 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-23 (中转区多选 UX 重设计，续34b，纯前端，零 Rust 改动)
+- **修复/重设计（基于用户实测反馈）**：
+  - Shift 区间选改为「多选模式内 Shift 才区间选」，同时 `e.preventDefault()` 防浏览器文字蓝色选中。
+  - 废弃 Ctrl/Shift 修饰键隐式触发多选。改为显式「多选」按钮进入模式（`stageMultiselect` state）：进入后点击=选中/取消；退出后点击=取走（原行为）。
+  - 批量操作条从 drop-area 内移到标题行右侧（与「文件中转区」标签同行），不占列表空间。
+  - 右键菜单：多选模式且有选中项时显示批量操作（取走/复制/删除/取消选择）；否则仍显示单项操作。
+- **新增 state / ref**（`App.tsx`）：`stageMultiselect`（模式开关）、`stageMultiselectRef`（供 Esc 闭包读最新）。
+- **Esc 优先级**：ctxMenu → (stageSel 非空 OR 多选模式) 退出多选 → settingsOpen → hide。
+- **验证**：`tsc --noEmit` 零错误。GUI T1–T9 需 `npm run tauri dev` 实测。
+- **文件**：`src/App.tsx`（+state/ref +handleStageClick 重写 +openStageCtxMenu 重写 +Escape 更新 +hotkey-hide 更新 +JSX 标题行重构）/ `src/App.css`（批量条改标题行样式）。
+
+### 2026-06-23 (中转区多选 + 批量操作，续34，纯前端，零 Rust 改动)
+- **功能**：中转区（文件中转）新增 Ctrl/Shift 多选 + 批量取走/复制/删除操作条。
+- **零 Rust 改动**，仅 `src/App.tsx` + `src/App.css`。
+- **新增 state / ref**（`App.tsx`）：`stageSel: Set<number>`（选中 id）、`batchCopied: boolean`（复制 ✓ 反馈）、`stageSelRef`（供 Esc 闭包读最新，仿 ctxMenuRef 模式）、`stageAnchorRef`（shift 区间锚点）。
+- **handleStageClick**：Ctrl/Meta → 切换单项；Shift → 以 `stageAnchorRef` 为锚 slice 区间；plain → `copyAndPaste`（原行为不变）。阶段 map 改 `(s,idx)` 传 index。
+- **批量操作条**（`.stage-batch-bar`）：stageSel 非空时 sticky 顶部浮出。左侧「已选 N 项」，右侧：取走全部（disabled 非全 file）/ 复制全部（同上，~1s ✓ 反馈）/ 删除全部 / 取消。批量 file 走 `combined()` = `flatMap(items)` 合并成单 CF_HDROP；混合/文本/图片置灰。
+- **Esc 优先级**：ctxMenu > stageSel 清空 > settingsOpen > hide（插入 stageSelRef 检查）。关窗（hotkey-hide）同步清空选择和 anchor。
+- **已知限制**：批量取走/复制的同质-file 天花板——系统剪贴板单 payload，多文件可合并 CF_HDROP，文本/图片/混合无法合并，详见 DECISIONS §6 延伸 / CLAUDE.md 剪贴板节。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。T1–T9 GUI 测试清单需用户 `npm run tauri dev` 实测。
+- **文件**：`src/App.tsx`（+4 state/ref +handleStageClick +Escape 插入 +hotkey-hide 复位 +JSX 批量条 +map idx +stage-item selected）/ `src/App.css`（+`.stage-item.selected` +`.stage-batch-*` 6条）/ `DECISIONS.md` §6 延伸 / `CLAUDE.md` 剪贴板节 / `MEMORY.md`。
 
 ### 2026-06-23 (历史剪贴板位图粘贴改为原图——落盘 Simple 方案，续33)
 - **功能**：历史图粘贴/复制从 1024px 缩略图升级为原图（写时落盘 → 读时优先原图文件 → 失败降级缩略图）。

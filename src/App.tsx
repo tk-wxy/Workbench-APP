@@ -181,6 +181,12 @@ export default function App() {
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const storeRef = useRef<any>(null); storeRef.current = store;
+  const [stageSel, setStageSel] = useState<Set<number>>(new Set<number>()); // 中转区多选（选中的 StageItem.id）
+  const [stageMultiselect, setStageMultiselect] = useState(false); // 多选模式开关（显式进入，非按住修饰键）
+  const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
+  const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
+  const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
+  const stageAnchorRef = useRef<number|null>(null); // shift 区间选择锚点 index
   // 剪贴板卡片长按拖拽到中转区（纯前端，Pointer Events，移动超阈值才激活）
   const [dragState, setDragState] = useState<{ item: ClipItem; originX: number; originY: number; currentX: number; currentY: number; active: boolean } | null>(null);
   const dragStateRef = useRef(dragState); // 供 pointermove/up 闭包读最新值（setState 异步）
@@ -225,7 +231,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; }); // 复位启动/粘贴动画
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; }); // 复位
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -445,6 +451,37 @@ export default function App() {
     } catch {}
   }, []);
 
+  // 中转区单击 handler
+  // Ctrl/Meta+click：隐式进入多选模式 + 切换单项
+  // Shift+click：隐式进入多选模式；首次=设锚点（选这一项为起始）；再次=扩展区间到此
+  // plain（多选模式）：切换单项 + 更新锚点
+  // plain（非多选模式）：取走粘贴（原行为）
+  const handleStageClick = useCallback((e: React.MouseEvent, s: StageItem, idx: number) => {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      if (!stageMultiselect) setStageMultiselect(true);
+      setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
+      stageAnchorRef.current = idx;
+      return;
+    }
+    if (e.shiftKey) {
+      e.preventDefault();
+      if (!stageMultiselect) setStageMultiselect(true);
+      const a = stageAnchorRef.current;
+      if (a == null) {
+        stageAnchorRef.current = idx; // 首次：设此项为区间起始锚点
+        setStageSel(new Set([s.id]));
+      } else {
+        const lo = Math.min(a, idx), hi = Math.max(a, idx);
+        setStageSel(new Set(stage.slice(lo, hi + 1).map(x => x.id)));
+      }
+      return;
+    }
+    if (!stageMultiselect) { copyAndPaste(s); return; }
+    setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
+    stageAnchorRef.current = idx;
+  }, [stageMultiselect, stage, copyAndPaste]);
+
   // 通用：在鼠标位置弹出自定义右键菜单（边界检测防出屏）
   const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[]) => {
     e.preventDefault();
@@ -455,8 +492,23 @@ export default function App() {
     setCtxMenu({ x, y, items });
   }, []);
 
-  // 中转区条目右键菜单（文件：打开所在目录；通用：复制到剪贴板、删除该项目）
+  // 中转区条目右键菜单：多选模式且有选中项→批量操作；否则→单项操作
   const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
+    if (stageMultiselect && stageSel.size > 0) {
+      const sel = stage.filter(x => stageSel.has(x.id));
+      const allFiles = sel.length > 0 && sel.every(x => x.type === "file");
+      const combined = (): Pasteable => ({ type: "file", items: sel.flatMap(x => x.items ?? []) });
+      openCtxMenu(e, [
+        { label: `取走全部（${sel.length} 项）`, disabled: !allFiles,
+          action: () => { copyAndPaste(combined()); setStageSel(new Set()); setStageMultiselect(false); } },
+        { label: `复制全部（${sel.length} 项）`, disabled: !allFiles,
+          action: async () => { await writeItemToClipboard(combined()); setBatchCopied(true); setTimeout(() => setBatchCopied(false), 1000); } },
+        { label: `删除全部（${sel.length} 项）`,
+          action: () => { saveStage(stage.filter(x => !stageSel.has(x.id))); setStageSel(new Set()); } },
+        { label: "取消选择", action: () => setStageSel(new Set()) },
+      ]);
+      return;
+    }
     const items: CtxMenuItem[] = [];
     if (s.type === "file" && s.items?.[0]?.path) {
       items.push({
@@ -470,7 +522,7 @@ export default function App() {
     items.push({ label: "复制到剪贴板", action: () => copyStageToClipboard(s) });
     items.push({ label: "删除该项目",   action: () => removeStage(s.id) });
     openCtxMenu(e, items);
-  }, [openCtxMenu, copyStageToClipboard, removeStage]);
+  }, [stageMultiselect, stageSel, stage, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage]);
 
   // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
   const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
@@ -511,7 +563,7 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(settingsOpen)return; // 设置打开时屏蔽应用导航/启动按键
       if(e.key==="ArrowLeft"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
       if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
@@ -557,12 +609,32 @@ export default function App() {
           </div>
         </section>
         <section className="center-panel">
-          <div className="section-label">文件中转区</div>
+          <div className="stage-section-header">
+            <span className="section-label">文件中转区</span>
+            {stageMultiselect ? (
+              <div className="stage-multi-toolbar">
+                {stageSel.size > 0 && <span className="stage-sel-count">已选 {stageSel.size}</span>}
+                <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?"取走并粘贴到上个窗口":"仅文件可批量取走"}
+                  onClick={()=>{const sel=stage.filter(x=>stageSel.has(x.id));copyAndPaste({type:"file",items:sel.flatMap(x=>x.items??[])});setStageSel(new Set());setStageMultiselect(false);}}>取走</button>
+                <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?"复制到剪贴板":"仅文件可批量复制"}
+                  onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>复制</button>
+                <button className="stage-batch-btn" disabled={stageSel.size===0}
+                  onClick={()=>{saveStage(stage.filter(x=>!stageSel.has(x.id)));setStageSel(new Set());}}>删除</button>
+                <button className="stage-batch-btn stage-batch-cancel"
+                  onClick={()=>{setStageSel(new Set());setStageMultiselect(false);stageAnchorRef.current=null;}}>完成</button>
+              </div>
+            ) : (
+              <button className="stage-batch-btn" disabled={!stage.length}
+                onClick={()=>setStageMultiselect(true)} title="进入多选模式">多选</button>
+            )}
+          </div>
           <div className="drop-area" ref={dropAreaRef}>
-            {stage.length? <div className="stage-list">{stage.map(s=>{
+            {stage.length? <div className="stage-list">{stage.map((s,idx)=>{
               const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
               return (
-              <div key={s.id} className="stage-item" onClick={()=>copyAndPaste(s)} onContextMenu={e=>openStageCtxMenu(e,s)} title={s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）"}>
+              <div key={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
                 {s.type==="image"
                   ? <img className="stage-thumb" src={s.content} alt=""/>
                   : <span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
