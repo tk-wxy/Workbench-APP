@@ -217,3 +217,5 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-result-icon span{font-size:15px;}
 .enh-result-label{flex:1;min-width:0;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;}
+.enh-divider{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 12px 4px;}
+.enh-index-hint{width:min(640px,80%);font-size:11px;color:var(--text3);padding:6px 12px;font-style:italic;}
