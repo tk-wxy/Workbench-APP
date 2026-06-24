@@ -553,14 +553,16 @@ export default function App() {
         setStageSel(new Set([s.id]));
       } else {
         const lo = Math.min(a, idx), hi = Math.max(a, idx);
-        setStageSel(new Set(stage.slice(lo, hi + 1).map(x => x.id)));
+        // idx/anchor 均为「当前显示列表」(filteredStage) 的索引，故区间切片也走 filteredStage——
+        // 否则 search 过滤态下用全量 stage 索引切片会选错（遗漏锚点起始项）。无 search 时 filteredStage===stage，行为不变。
+        setStageSel(new Set(filteredStage.slice(lo, hi + 1).map(x => x.id)));
       }
       return;
     }
     if (!stageMultiselect) { copyAndPaste(s); return; }
     setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
     stageAnchorRef.current = idx;
-  }, [stageMultiselect, stage, copyAndPaste]);
+  }, [stageMultiselect, filteredStage, copyAndPaste]);
 
   // 通用：在鼠标位置弹出自定义右键菜单（边界检测防出屏）
   const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[]) => {
