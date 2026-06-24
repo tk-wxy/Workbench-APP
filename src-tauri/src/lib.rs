@@ -1,5 +1,6 @@
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
+mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
 
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::Ordering;
@@ -1161,7 +1162,8 @@ pub fn run() {
             delete_clipboard_item, clear_clipboard_history,
             copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard,
             get_clip_cache_max, set_clip_cache_max,
-            open_clip_image_dir, clear_clip_image_cache
+            open_clip_image_dir, clear_clip_image_cache,
+            filesearch::search_files, filesearch::get_index_status
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -1190,6 +1192,7 @@ pub fn run() {
             load_clip_history();
             start_clipboard_monitor(app.handle().clone());
             dragdrop::register_drag_drop(app); // 中转区原生拖入
+            filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
 
             let toggle_item = MenuItemBuilder::with_id("toggle", "显示窗口").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
