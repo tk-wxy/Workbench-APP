@@ -350,3 +350,14 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 **拖出（drag-out）未做**：从 WebView 拖文件出去到 Explorer 需原生 `DoDragDrop`/`IDataObject` 拖放源 FFI（WebView2 不原生支持），比拖入更难；且优先级低（「单击取走→Ctrl+V」已覆盖取走）。暂不做，非死胡同、是未实现。
 
 **死胡同登记**：CLAUDE.md【💀 死胡同】已补一条。后续若仍想要「主动加文件/文件夹」，走原生文件选择器（`tauri-plugin-dialog`，未装），不要回头试拖拽。
+
+---
+
+## 15. 增强搜索（Ctrl+K）：同 overlay 内的「视图层」，不是新窗口（2026-06-24）
+
+**取舍**：增强搜索做成**同一个全屏 overlay 内的一个视图层**（`.enh-layer`，靠 `.enh-open` class 切显隐），而非 Tauri 新窗口。
+
+- **为什么不开新窗口**：本项目窗口/焦点/热键是最高危区（见 CLAUDE.md 铁律）——`transparent:true`/`focus:false`/键态轮询/light dismiss/set_focus dance 全是为「单一全屏 overlay」精心调过的。再开一个窗口要重走一遍焦点交还与可见性真相同步，性价比极低且极易引连锁 bug。把它当 overlay 内的一层，**完全复用现成 show/hide 机制**，零 Rust 改动。
+- **激活只走 launch/open，绕开粘贴高危区**：结果激活=应用 `launchApp`（开了即 hide，复用放大动画）或中转 file `open_file`（fire-and-forget）。**绝不触碰**「写回剪贴板 → 焦点交还 → Ctrl+V」那条链路，也不取 `CLIPBOARD_LOCK`。整个功能待在高危区之外，因此能纯前端落地。
+- **结果范围（Tier 1）**：应用 + 中转区 `type==="file"` 条目。剪贴板条目、文件系统实时搜索留 Tier 2（需新数据源/可能 Rust 改动）。
+- **键盘门控**：全局 onKey 在 `enhOpen` 时由第 4 段 `↑↓/Enter` 接管并 `return`，屏蔽下面的 launcher 方向键，避免两套导航串扰；Esc 优先级链插入 enhOpen（先退视图层、再退主页面）。

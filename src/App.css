@@ -187,3 +187,22 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-action:disabled{opacity:0.4;cursor:default;}
 .settings-action.copied,.settings-action.copied:hover{color:#4ade80;border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08);}
 .settings-about{font-size:12px;color:var(--text2);line-height:1.9;padding:4px 0;}
+
+/* ── 增强搜索层（Ctrl+K）：同 overlay 内的视图层，靠 .enh-open class 丝滑淡入上浮 ── */
+.enh-layer{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;
+  padding-top:14vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  opacity:0;transform:translateY(10px) scale(0.985);pointer-events:none;transition:opacity 160ms ease,transform 160ms ease;}
+.enh-layer.enh-open{opacity:1;transform:none;pointer-events:auto;}
+.enh-search-box{display:flex;align-items:center;gap:10px;width:min(640px,80%);background:var(--hover);
+  border:1px solid var(--border);border-radius:12px;padding:14px 18px;}
+.enh-search-input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:18px;font-family:var(--font);}
+.enh-search-input::placeholder{color:var(--text3);}
+.enh-hint{font-size:11px;color:var(--text3);flex-shrink:0;}
+.enh-results{width:min(640px,80%);margin-top:12px;flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
+.enh-result{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;}
+.enh-result:hover,.enh-result.selected{background:var(--hover);}
+.enh-result-icon{width:32px;height:32px;border-radius:7px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
+.enh-result-icon img{width:24px;height:24px;object-fit:contain;}
+.enh-result-icon span{font-size:15px;}
+.enh-result-label{flex:1;min-width:0;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;}

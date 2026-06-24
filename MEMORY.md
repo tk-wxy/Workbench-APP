@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-23（续34）
+> **最后更新**：2026-06-24（续35）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）
-- **进行中**：← 无（中转区多选✓完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）
+- **进行中**：← 无（增强搜索 Tier 1✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -23,7 +23,8 @@
 - **新增（续30 GUI 实测通过，纯前端）**：剪贴板卡片**长按拖拽到中转区**——Pointer Events 方案 A（移动超 `DRAG_THRESHOLD_PX=8` 才激活，短按仍走 onClick 粘贴不拦截）。激活后跟手克隆 `.clip-drag-ghost`（渲染为 #overlay 兄弟节点，避开 backdrop-filter 的 fixed 包含块陷阱）+ 中转区 `.drop-area.drag-over` 高亮；落点命中→`addToStage`（不粘贴），命中外→取消。`suppressClickRef` 抑制激活后随之而来的 onClick 误粘贴；`#overlay.dragging{user-select:none}` 防长按泛蓝。📌 按钮/右键菜单/复制删除按钮全保留（PointerDown 检测 `.clip-actions` 内则跳过）。零 Rust 改动。**T9 tsc 零错误已验；T1–T8 为 GUI 交互、本环境无法驱动，未实测**
 - **新增（续31 GUI 实测通过，纯前端）**：剪贴板卡片 file 类型**按扩展名显示语义图标**——组件外纯函数 `getFileIcon(item: ClipItem)`，多文件→📦，依扩展名映射图片/视频/音频/压缩包/PDF/Office/代码/可执行/文本，兜底→📎。JSX 中 `file-clip-icon` 改为 `clip-file-icon`，调用 `getFileIcon`。CSS 新增 `.clip-file-icon`（1.25rem）。text/image 类型及卡片其余逻辑不变
 - **新增（续32 GUI 实测通过，纯前端）**：**开机自启**——设置 → 常规 tab 新增「开机自启」开/关 seg 控件。`tauri-plugin-autostart`（已内置）通过 `plugin:autostart|enable/disable/is_enabled` 命令写/读 Windows 注册表开机启动项。启动时自动读取当前状态填充 UI；切换即时生效。零 Rust 改动
-- **下一步**：拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
+- **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**
+- **下一步**：增强搜索 Tier 2 待做（剪贴板条目纳入 + 文件系统实时搜索）；拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -172,6 +173,18 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-24 (增强搜索独立全屏页 Ctrl+K，续35，纯前端，零 Rust 改动)
+- **功能**：Ctrl+K 呼出同一 overlay 内的全屏「增强搜索」视图层（**非新窗口**），搜应用 + 中转区 file 条目，↑↓ 选择、Enter 激活。Esc 退回主页面（不关窗），再 Esc 才关窗。
+- **零 Rust 改动**，仅 `src/App.tsx` + `src/App.css`。
+- **新增类型/state**（`App.tsx`）：`EnhResult`（app / stage 联合）；`enhOpen`/`enhQuery`/`enhSelIdx` state + `enhInputRef` + `enhOpenRef`（供 Esc 闭包读最新）。
+- **结果计算** `enhResults`（useMemo）：空查询=`sortedApps.slice(0,30)` 兜底；有查询=`apps` + `stage.filter(file)` 各跑 `fuzzyScore`、合并按 score 降序（app 同分按 `usageScore`）、slice(50)。
+- **激活** `activateEnh`：app→`launchApp`（复用放大动画+淡出+hide）；stage file→`hideWorkbench` + `open_file`（fire-and-forget）。**全程不碰粘贴/焦点交还/CLIPBOARD_LOCK 高危区**。
+- **键盘**（全局 onKey）：Esc 链插入 enhOpen（ctxMenu→**enhOpen**→stageSel→settings→关窗）；新增 Ctrl+K toggle；`if(enhOpen){↑↓/Enter 接管;return}` 屏蔽 launcher 导航（字母键不拦截）。deps 增 `enhOpen/enhResults/enhSelIdx/activateEnh`。`hotkey-hide` 复位 enh 三 state。
+- **JSX**：`.enh-layer` 始终挂载、靠 `.enh-open` class 切显隐（沿用 overlay-visible/hidden 模式避免卸载闪烁），放 `</main>` 后、settings 模态前。复用 `HighlightText`/`fi()`。
+- **CSS**（`App.css`）：`.enh-*` 一组，复用现有 token（--bg/--hover/--border/--text/--text3/--fill-2/--accent/--font），160ms 淡入上浮，不改任何现有类。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T11 GUI 清单需用户 `npm run tauri dev` 实测**（Ctrl+K 进入/丝滑切换/自动聚焦/↑↓Enter/中转 badge/高亮/空查询兜底/Esc 两级退出/复位/light dismiss 不串扰）。
+- **文件**：`src/App.tsx` / `src/App.css` / `DECISIONS.md`（§窗口补设计取舍）/ `MEMORY.md`。
 
 ### 2026-06-23 (中转区多选 UX 重设计，续34b，纯前端，零 Rust 改动)
 - **修复/重设计（基于用户实测反馈）**：
