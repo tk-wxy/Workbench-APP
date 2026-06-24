@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 
 // ── 类型 ──
@@ -198,7 +198,8 @@ function matchItem(query: string, name: string, keywords: string[]): boolean {
 // ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
 type EnhResult =
   | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
-  | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] };
+  | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
+  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
 
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
@@ -250,6 +251,9 @@ export default function App() {
   const [enhSelIdx, setEnhSelIdx] = useState(0);
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
+  // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询
+  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean }[]>([]);
+  const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -294,7 +298,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhQuery(""); setEnhSelIdx(0); setPickerOpen(false); setPickerQuery(""); }); // 复位
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); }); // 复位
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -360,7 +364,9 @@ export default function App() {
           // 拖入后回焦点，让 Esc 可用
           try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().setFocus(); } catch {}
         });
-        cleanup = [un1, un2, un3, un4];
+        // 文件索引就绪（S4b）：后台线程每次建/重建完成 emit 条目数，>0 视为就绪
+        const un5 = await listen("file-index-ready", (e: any) => setIndexReady((e.payload ?? 0) > 0));
+        cleanup = [un1, un2, un3, un4, un5];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); };
@@ -420,8 +426,9 @@ export default function App() {
       .map(({ app, ranges }) => ({ app, ranges }));
   }, [search, sortedApps, appUsage]);
 
-  // ── 增强搜索结果（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
-  const enhResults = useMemo<EnhResult[]>(() => {
+  // ── 增强搜索 Tier 1（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
+  // 有查询时上限 10（D5）；空查询兜底仍给 30 常用应用（此时无文件结果，总数 ≤30 不超）。
+  const enhTier1 = useMemo<EnhResult[]>(() => {
     const q = enhQuery.trim();
     const nowS = Math.floor(Date.now() / 1000);
     if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
@@ -429,9 +436,36 @@ export default function App() {
     const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = s.name || s.items?.[0]?.name || "文件"; const r = fuzzyScore(q, nm); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
     return [...appHits, ...stageHits]
       .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
-      .slice(0, 50)
+      .slice(0, 10)
       .map(({ score, ...rest }) => rest as EnhResult);
   }, [enhQuery, apps, stage, sortedApps, appUsage]);
+
+  // ── 文件查询：150ms 防抖（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
+  useEffect(() => {
+    if (!enhOpen) return;
+    const q = enhQuery.trim();
+    if (!q) { setFsResults([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: 20 });
+        setFsResults(r);
+      } catch { setFsResults([]); }
+    }, 150);
+    return () => clearTimeout(t);
+  }, [enhQuery, enhOpen]);
+
+  // 增强搜索打开时主动查一次索引状态（事件 file-index-ready 之外的兜底，防错过 emit）
+  useEffect(() => {
+    if (!enhOpen) return;
+    (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number }>("get_index_status"); setIndexReady(s.ready); } catch {} })();
+  }, [enhOpen]);
+
+  // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件 ≤20）在后；索引连续供 ↑↓/Enter 跨组导航 ──
+  const enhResults = useMemo<EnhResult[]>(() => {
+    const tier2: EnhResult[] = fsResults.slice(0, 20).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
+    return [...enhTier1, ...tier2];
+  }, [enhTier1, fsResults]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
@@ -482,6 +516,7 @@ export default function App() {
   // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
   const activateEnh = useCallback((r: EnhResult, iconEl?: HTMLElement | null) => {
     if (r.kind === "app") { launchApp(r.app, iconEl ?? null); }
+    else if (r.kind === "fs") { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.path })).catch(() => {}); }
     else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
   }, [launchApp]);
   // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
@@ -889,20 +924,30 @@ export default function App() {
             value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
           <span className="enh-hint"><kbd>Esc</kbd> 返回</span>
         </div>
+        {/* 索引未就绪提示：不阻塞 Tier 1（应用/中转）结果显示 */}
+        {!indexReady && enhQuery.trim() ? <div className="enh-index-hint">文件索引建立中…</div> : null}
         <div className="enh-results">
           {enhResults.length ? enhResults.map((r,i)=>{
-            const key = r.kind==="app" ? "app:"+r.app.path : "stage:"+r.item.id;
+            const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : "fs:"+r.path;
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
-                                        : <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>;
+                       : r.kind==="stage" ? <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>
+                                          : <span>{r.isDir?"📁":fi(r.ext)}</span>;
             const label = r.kind==="app" ? r.app.name : r.name;
+            const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
+            const badge = r.kind==="app" ? "应用" : r.kind==="stage" ? "中转" : "文件";
+            // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
+            const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">文件</div> : null;
             return (
-              <div key={key} className={`enh-result${i===enhSelIdx?" selected":""}`}
-                onMouseEnter={()=>setEnhSelIdx(i)}
-                onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
-                <div className="enh-result-icon">{icon}</div>
-                <span className="enh-result-label"><HighlightText text={label} ranges={r.ranges}/></span>
-                <span className="enh-result-badge">{r.kind==="app"?"应用":"中转"}</span>
-              </div>
+              <Fragment key={key}>
+                {divider}
+                <div className={`enh-result${i===enhSelIdx?" selected":""}`}
+                  onMouseEnter={()=>setEnhSelIdx(i)}
+                  onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
+                  <div className="enh-result-icon">{icon}</div>
+                  <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                  <span className="enh-result-badge">{badge}</span>
+                </div>
+              </Fragment>
             );
           }) : <p className="empty-hint">{enhQuery.trim()?"无匹配":"输入以搜索"}</p>}
         </div>

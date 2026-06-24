@@ -398,5 +398,5 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 - **锁完全独立于剪贴板**：`FILE_INDEX` 是全新独立 `Mutex<Vec<IndexEntry>>`，与 `CLIPBOARD_LOCK` / `CLIP_CACHE` 无任何交集，无锁序问题。
 - **遍历边界**：白名单目录 `Desktop/Downloads/Documents/Pictures/Projects`（不存在则跳过）；`max_depth(8)` 防极深树；`should_skip_dir` 剪枝 `node_modules/.git/target/$recycle.bin/appdata/__pycache__` 及隐藏目录整子树；隐藏文件跳过；硬顶 `MAX_INDEX_ENTRIES=200_000`；`REBUILD_INTERVAL_SECS=30min` 周期重建。
 - **打分**：`name_lower` 预存小写避免查询时重复 `to_lowercase`；子串命中 + 越靠前 + 名越短 + 前缀加分，`sort_by` 降序后 `take(limit.min(50))`。简化版（非子序列模糊），与前端 `fuzzyScore` 思路一致但更轻——后台索引量大，子串足够且快。
-- **本步（S4a）零前端**：前端接入（Ctrl+K 调 `search_files` 展示文件结果 + 「索引建立中…」状态）是 S4b。
+- **前端分组渲染（S4b，续41）**：Ctrl+K 增强搜索结果分两组——Tier 1（应用/中转，有查询时 ≤10）在前，一条 `.enh-divider`「文件」分隔线，Tier 2（`search_files` 文件结果 ≤20）在后，合并列表 ≤30。文件查询 **150ms 防抖**（每次 `search_files` 是 Rust 命令往返，避免逐键 invoke）。索引未就绪（`!indexReady`）且有查询时显示「文件索引建立中…」一行小字，**不阻塞 Tier 1 显示**（应用/中转照常出）。`indexReady` 双来源：监听 `file-index-ready` 事件 + 打开时主动 `get_index_status` 兜底（防错过 emit）。↑↓/Enter 跨 Tier1+Tier2 整个列表连续导航（分隔线只是视觉、不占 result 索引——用 `Fragment` 把 divider 与结果项并列渲染）。文件结果激活走 `open_file`（不碰粘贴/焦点交还/`CLIPBOARD_LOCK`）。
 - **验证**：临时单测（`build_index` + `search_files` 对临时目录树）实测——遍历 5 条目 390µs、跳过 node_modules 子树与隐藏文件正确、查询 `report` 7.4µs 返回且短名前缀优先排序正确、limit/空查询守卫正确；验证后已删临时单测，保留正式日志 `[fileindex] ready: N entries (elapsed)`。GUI 层（Ctrl+K 看到文件结果）属 S4b 未验。
