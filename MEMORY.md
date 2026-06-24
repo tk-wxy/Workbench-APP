@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-24（续35）
+> **最后更新**：2026-06-24（续39：.lnk 拖入启动器提取图标 + 干净名称）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -14,7 +14,10 @@
 ## 0. 当前状态 / 下一步 〔快照〕
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索三区联动**（输入即同时过滤应用/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）
-- **进行中**：← 无（顶栏三区联动过滤✓完成）
+- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）
+- **新增（续39）**：**.lnk 拖入启动器**——`inLauncher` 分支内对 `.lnk` 路径调用新命令 `resolve_lnk`（`apps.rs`）：复用 `extract_icon_base64` 提取图标（`SHGetFileInfoW` 自动解析 .lnk），去掉后缀取干净名称，存为 `kind:"app"` 条目。左键走 `launchApp → ShellExecuteW(.lnk)`，与扫描加入的 app 条目完全一致。非 .lnk 走原有 `get_file_info` 路径，行为不变。**cargo check + tsc 零错误已验；T1–T6 GUI 待实测**
+- **新增（续38）**：**启动器 S3b**——外部文件拖入按松手坐标判定落点：启动器区（.app-grid）→入 `LauncherItem`（file/folder 持久化），中转区/区域外兜底→入 StageItem（原有行为）。落地区域 200ms drop-flash 闪烁确认。Rust 仅扩展 Drop emit payload 加 `{x,y}` 物理像素；前端 `÷ devicePixelRatio` 换算 CSS px 后与 `getBoundingClientRect()` 比对判区。**tsc 零错误、cargo check 零错误已验；T1–T8 GUI 实测通过（2026-06-24）**
+- **新增（续37，纯前端，零 Rust 改动）**：**启动器重设计 S3a**——左侧面板从「自动扫描全量平铺(filteredApps)」改为「手动策展的持久化收藏托盘」。新增独立类型 `LauncherItem`（kind=app/file/folder，与 `StageItem` 不可合并：左键动作由区决定——启动器=打开/启动，中转=取走粘贴）。持久化 store key `launcher-items`（`LAUNCHER_MAX=60`）。app picker 模态（复用 settings-modal + enh-result 样式，搜索去重连续添加，Esc 关闭）。右键条目「从启动器移除」/file·folder「打开所在目录」。**自动扫描链 `scan_start_menu/apps/sortedApps/filteredApps` 全保留**喂增强(Ctrl+K)/普通搜索，面板不再渲染。⚠️ 副作用：顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担）；普通页方向键失去可见目标（保留不删，Enter 加 `search 非空` 守卫防误启动）。`.app-panel` 600→360px、`.app-grid` 6→4 列、中转区相应变宽。**tsc 零错误已验；T1–T10 GUI 待 `npm run tauri dev` 实测**
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -24,7 +27,7 @@
 - **新增（续31 GUI 实测通过，纯前端）**：剪贴板卡片 file 类型**按扩展名显示语义图标**——组件外纯函数 `getFileIcon(item: ClipItem)`，多文件→📦，依扩展名映射图片/视频/音频/压缩包/PDF/Office/代码/可执行/文本，兜底→📎。JSX 中 `file-clip-icon` 改为 `clip-file-icon`，调用 `getFileIcon`。CSS 新增 `.clip-file-icon`（1.25rem）。text/image 类型及卡片其余逻辑不变
 - **新增（续32 GUI 实测通过，纯前端）**：**开机自启**——设置 → 常规 tab 新增「开机自启」开/关 seg 控件。`tauri-plugin-autostart`（已内置）通过 `plugin:autostart|enable/disable/is_enabled` 命令写/读 Windows 注册表开机启动项。启动时自动读取当前状态填充 UI；切换即时生效。零 Rust 改动
 - **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**
-- **下一步**：增强搜索 Tier 2 待做（剪贴板条目纳入 + 文件系统实时搜索）；拖入✓已完成；**拖出（drag-out）待做**（需 `DoDragDrop`/`IDataObject` 拖放源 FFI，更难，优先级低——「单击取走」已覆盖）。截屏快捷入口✓已完成（GUI 待实测）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；长按阈值/采样率体感微调；T9 渲染进程重建后拖入失效（已知罕见限制）
+- **下一步**：启动器键盘导航；file/folder 收藏的非拖入入口（如选择对话框）。增强搜索 Tier 2（剪贴板条目纳入 + 文件系统实时搜索）。**拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -173,6 +176,45 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-24 (.lnk 拖入启动器：resolve_lnk 提取图标+干净名称存 kind:"app"，续39)
+- **功能**：外部拖入 `.lnk` 快捷方式到启动器区时，不再存为 `kind:"file"` 而是调用新命令 `resolve_lnk`，提取图标 + 去掉后缀名称，存为 `kind:"app"` 条目；左键走 `launchApp → ShellExecuteW(.lnk)` 正常启动，与 picker 加入的 app 完全一致。非 .lnk（普通文件/文件夹）走原有 `get_file_info` 路径不变。
+- **Rust 新增**（`apps.rs` 末尾，约 20 行）：`LnkInfo { name, path, icon }` struct + `#[tauri::command] pub fn resolve_lnk(path)`：取文件名去 `.lnk` 后缀（大小写不敏感）；调用已有 `extract_icon_base64(&path)`（`SHGetFileInfoW` 自动解析 .lnk 目标图标，无新依赖）。`lib.rs` 在 `generate_handler!` 追加 `apps::resolve_lnk`。
+- **前端**（`App.tsx`，仅改 `inLauncher` 分支内部）：在路径 `p` 判断 `.lnk` 后缀，走 `invoke("resolve_lnk")` 或 `invoke("get_file_info")` 两条 if-else 分支；去重改为检查原始路径 `x.path === p`（`invoke` 前即检，避免无效请求）。
+- **CSS 零改动**：`kind:"app"` 复用现有 `app-tile-icon img` 渲染路径，icon 为 null 时自动走首字母兜底（已有逻辑）。
+- **不碰**：`extract_icon_base64` 函数体、`dragdrop.rs` 注册、`openLauncherItem`、picker、持久化加载、S3b 落点判定逻辑。
+- **验证**：`cargo check` 零错误✓；`tsc --noEmit` 零错误✓。**T1–T6 GUI 待 `npm run tauri dev` 实测**（.lnk 图标/名称/启动/持久化/去重；非 .lnk 行为不变；icon=null 首字母兜底）。
+- **文件**：`src-tauri/src/apps.rs`（+LnkInfo struct +resolve_lnk 命令）/ `src-tauri/src/lib.rs`（+注册）/ `src/App.tsx`（inLauncher 分支改 .lnk 判断）/ `DECISIONS.md` §16 / `MEMORY.md`。
+
+### 2026-06-24 (启动器 S3b：外部文件拖入落点双区判定 + drop-flash 确认动画，续38)
+- **功能**：原生拖入（IDropTarget）升级为双区落点判定——松手位置在启动器 `.app-grid` 内→入 `LauncherItem`（file/folder，持久化 store key `launcher-items`），否则→入 StageItem 中转（原有行为兜底，含落在任何区域外）。落地区域 200ms drop-flash 闪烁视觉确认。
+- **Rust 改动**（`src-tauri/src/dragdrop.rs`，约 10 行）：
+  - 新增 `FilesDroppedPayload { paths: Vec<String>, x: i32, y: i32 }` struct（`#[derive(serde::Serialize, Clone)]`）。
+  - `Drop` 方法 `_pt` → `pt`，emit payload 从 `paths` 改为 `FilesDroppedPayload { paths, x: pt.x, y: pt.y }`。
+  - `pt`（`POINTL`）是 Windows **屏幕物理像素**坐标；前端需 `÷ window.devicePixelRatio` 转 CSS px。
+  - 注册逻辑/OleInitialize/EnumChildWindows **绝对不动**（DECISIONS §14 铁律）。
+- **前端改动**（`src/App.tsx`）：
+  - 新增 `launcherDropRef`（`useRef<HTMLDivElement|null>(null)`），挂到 `.app-grid` div 的 `ref`。
+  - `files-dropped` 监听：payload 从 `string[]` 改为 `{paths,x,y}`；`cssX/cssY = x/y ÷ devicePixelRatio`；`getBoundingClientRect()` 判落点是否在 launcherDropRef 内；`inLauncher` 分支→累加 `LauncherItem`，else 分支→原有 StageItem 逻辑（完整保留）。两分支末尾均保留 `setFocus` 调用。
+  - `drop-flash` class 在落地区域 classList 上 add/remove（200ms setTimeout 移除），**不通过 React state**（避免 render）。
+- **CSS**（`src/App.css`）：`.drop-area.drop-flash, .app-grid.drop-flash { animation: drop-flash 200ms ease-out; }` + `@keyframes drop-flash`（0% 蓝色 → 100% transparent）。
+- **DPI 换算**：200% DPI 下 `devicePixelRatio=2`，物理像素 ÷ 2 = CSS px，与 `getBoundingClientRect()` 量纲一致。
+- **DragOver 实时高亮**（代价分析）：需 Rust 每次 DragOver 持续 emit → IPC 高频 → 代价过高，未实现；用落地 drop-flash 确认代替（见 DECISIONS §14 追加）。
+- **验证**：`tsc --noEmit` 零错误✓；`cargo check` 零错误✓（先漏 `Clone` derive，已加）。**T1–T8 GUI 全过（2026-06-24 用户实测）**。
+- **文件**：`src-tauri/src/dragdrop.rs` / `src/App.tsx` / `src/App.css` / `DECISIONS.md`（§14 追加） / `MEMORY.md`。
+
+### 2026-06-24 (启动器重设计 S3a：自动扫描全量 → 持久化收藏托盘，续37，纯前端，零 Rust 改动)
+- **功能**：左侧启动器面板由「自动扫描全量平铺(`filteredApps`)」改为「手动策展的持久化收藏托盘」。条目左键打开/启动、右键移除；末尾恒显「＋ 添加」卡片开 app picker。
+- **零 Rust 改动**，仅 `src/App.tsx` + `src/App.css`。
+- **新数据类型**（独立于 `StageItem`，**不可合并**——左键动作契约不同：启动器=打开/启动，中转=取走粘贴）：`LauncherItem{id,kind:"app"|"file"|"folder",name,icon?,path,ext?}`；`LAUNCHER_MAX=60`、`launcherId()`。
+- **state/持久化**：`launcher` state + `launcherRef`（S3b 拖入落点用，先备好）；store key `launcher-items`（Store useEffect 内 stage 之后加载）；`saveLauncher` 仿 `saveStage`。
+- **操作函数**：`openLauncherItem`（app→`launchApp` 复用放大动画+hide；file/folder→`open_file`）、`addAppToLauncher`（按 path 去重）、`removeLauncherItem`、`openLauncherCtxMenu`（file/folder 加「打开所在目录」+「从启动器移除」）。
+- **app picker 模态**：`pickerOpen`/`pickerQuery` state + ref；`pickerResults` useMemo（排除已加入 app，空=常用前 50、有查询=`fuzzyScore` 排序）；JSX 复用 `settings-modal`/`enh-result` 样式，搜索 autoFocus、点击添加不关闭（连续添加）、已加入因 filter 自然消失。Esc 链插入 `pickerOpen`（ctxMenu→enhOpen→**pickerOpen**→stageSel→settings→关窗）。
+- **扫描链全保留**：`scan_start_menu/apps/sortedApps/filteredApps` 不动，喂 Ctrl+K 增强搜索 + 普通搜索数据链；面板不再渲染 `filteredApps`。
+- **⚠️ 设计副作用**（已知、有意）：① 顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担，`filteredStage`/`filteredClip` 中转·剪贴板过滤照常）；② 普通页方向键失去可见目标，保留 handler 不删，Enter 加 `search.trim()` 守卫防空查询误启动隐藏 `filteredApps[0]`；launcher 键盘导航待后续。
+- **布局**：`.app-panel` 600→360px、`.app-grid` `repeat(6→4,1fr)`，中转区(flex:1)相应变宽；新增 `.launcher-add`/`.picker-*` 样式（复用 token，零改现有类）。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 待 `npm run tauri dev` 实测**（picker 添加/去重/连续添加/Esc、app 条目启动动画、右键移除、重启持久化、Ctrl+K 与普通搜索不受影响、空 search Enter 不误启动、布局协调）。**file/folder 条目暂无添加入口**（picker 只加 app）→ 其右键「打开所在目录」需 S3b 拖入后或手动构造数据验证，如实标注。
+- **文件**：`src/App.tsx` / `src/App.css` / `DECISIONS.md` / `CLAUDE.md` / `MEMORY.md`。
 
 ### 2026-06-24 (顶栏普通搜索 → 三区联动过滤，续36，纯前端，零 Rust 改动)
 - **功能**：顶栏普通搜索框输入时**同时过滤应用 / 中转 / 剪贴板三区**（应用区原本已联动，本步补齐中转 + 剪贴板）。与 Ctrl+K 增强搜索（enhQuery）**完全独立**，两套 query 互不影响。
