@@ -181,7 +181,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **新增 useMemo**：`filteredStage`（按 `search` 过滤 stage）、`filteredClip`（过滤 clipboard）；空查询=全量。JSX 仅把 `.map` 数据源从 `stage`/`clipboard` 换成 `filteredStage`/`filteredClip`，每项渲染/key/handler 全不变。空态：有 search 且空→「无匹配」，无 search→保持原提示。
 - **placeholder** 改「搜索应用、中转、剪贴板…」。
 - **不破坏**：三区点击/右键/拖拽/中转多选(基于 id)/剪贴板 handler(基于对象+time) 不受过滤影响。
-- **已知小限制**：中转区 Shift 区间选 + **同时有 search 过滤** 时，`handleStageClick` 的 shift 分支用 `stage.slice(全量索引)` 而过滤后 idx 为 filteredStage 索引 → 此罕见组合下区间选可能选错。过滤态下单选/Ctrl 多选/取走/复制/删除均正常。优先级低（多选通常不在过滤态进行），未改 handler（遵循"过滤只换数据源"边界）。
+- **bug 修复（用户实测反馈，续36b）**：中转区 Shift 区间选 + **同时有 search 过滤** 时会遗漏锚点起始项——根因 `handleStageClick` shift 分支用 `stage.slice(全量索引)`，而 idx/anchor 均为 `filteredStage` 索引。改为 `filteredStage.slice(...)`（deps `stage`→`filteredStage`）。无 search 时 `filteredStage===stage`，原行为不变。
 - **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 待 `npm run tauri dev` 实测**（各区名称过滤/类型词"图片""txt""pdf"命中/清空恢复/独立空态/过滤态交互不破坏/Ctrl+K 不清 search）。
 - **文件**：`src/App.tsx` / `DECISIONS.md`（§15 补两套搜索分工）/ `MEMORY.md`。
 
