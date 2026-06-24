@@ -13,8 +13,8 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）
-- **进行中**：← 无（增强搜索 Tier 1✓完成）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索三区联动**（输入即同时过滤应用/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）
+- **进行中**：← 无（顶栏三区联动过滤✓完成）
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -173,6 +173,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-24 (顶栏普通搜索 → 三区联动过滤，续36，纯前端，零 Rust 改动)
+- **功能**：顶栏普通搜索框输入时**同时过滤应用 / 中转 / 剪贴板三区**（应用区原本已联动，本步补齐中转 + 剪贴板）。与 Ctrl+K 增强搜索（enhQuery）**完全独立**，两套 query 互不影响。
+- **零 Rust 改动**，仅 `src/App.tsx`（CSS 零改动）。
+- **新增模块级纯函数**（放 `getFileIcon` 后）：`typeKeywords({type,ext,isImage})` 给条目算"类型词"（图片/视频/音频/压缩/pdf/文档/表格/代码/程序/文本…）；`matchItem(query,name,keywords)` 名称内容子序列模糊优先、叠加类型词子串命中，任一命中即保留。
+- **新增 useMemo**：`filteredStage`（按 `search` 过滤 stage）、`filteredClip`（过滤 clipboard）；空查询=全量。JSX 仅把 `.map` 数据源从 `stage`/`clipboard` 换成 `filteredStage`/`filteredClip`，每项渲染/key/handler 全不变。空态：有 search 且空→「无匹配」，无 search→保持原提示。
+- **placeholder** 改「搜索应用、中转、剪贴板…」。
+- **不破坏**：三区点击/右键/拖拽/中转多选(基于 id)/剪贴板 handler(基于对象+time) 不受过滤影响。
+- **已知小限制**：中转区 Shift 区间选 + **同时有 search 过滤** 时，`handleStageClick` 的 shift 分支用 `stage.slice(全量索引)` 而过滤后 idx 为 filteredStage 索引 → 此罕见组合下区间选可能选错。过滤态下单选/Ctrl 多选/取走/复制/删除均正常。优先级低（多选通常不在过滤态进行），未改 handler（遵循"过滤只换数据源"边界）。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 待 `npm run tauri dev` 实测**（各区名称过滤/类型词"图片""txt""pdf"命中/清空恢复/独立空态/过滤态交互不破坏/Ctrl+K 不清 search）。
+- **文件**：`src/App.tsx` / `DECISIONS.md`（§15 补两套搜索分工）/ `MEMORY.md`。
 
 ### 2026-06-24 (增强搜索独立全屏页 Ctrl+K，续35，纯前端，零 Rust 改动)
 - **功能**：Ctrl+K 呼出同一 overlay 内的全屏「增强搜索」视图层（**非新窗口**），搜应用 + 中转区 file 条目，↑↓ 选择、Enter 激活。Esc 退回主页面（不关窗），再 Esc 才关窗。
