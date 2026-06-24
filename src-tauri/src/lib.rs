@@ -1151,6 +1151,20 @@ fn start_focus_watch(app: AppHandle) {
     });
 }
 
+// 应用扫描后台预建（同 filesearch 文件索引架构）：setup 阶段 spawn，短延迟后调用现有
+// scan_start_menu（含 APP_CACHE 缓存 + COM init 在本线程自包含），扫完一次性 emit 给前端。
+// 目的：把几百次 SHGetFileInfoW 提图标的耗时挪到呼出之前，消除「首次 visible 时同步扫描」的卡顿。
+// 前端兜底：若 emit 错过/未到，window 首次 visible 时 apps 仍空则 invoke scan_start_menu（命中缓存、近乎瞬时）。
+fn start_apps_worker(app: AppHandle) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1)); // 应用扫描比文件索引轻，1s 即可
+        let started = std::time::Instant::now();
+        let apps = apps::scan_start_menu(); // 复用现有逻辑 + 缓存，后台线程执行
+        println!("[apps] background scan: {} apps in {:?}", apps.len(), started.elapsed());
+        let _ = app.emit("apps-ready", apps);
+    });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1193,6 +1207,7 @@ pub fn run() {
             start_clipboard_monitor(app.handle().clone());
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
+            start_apps_worker(app.handle().clone()); // 应用扫描后台预建：消除首次呼出卡顿（emit apps-ready）
 
             let toggle_item = MenuItemBuilder::with_id("toggle", "显示窗口").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
