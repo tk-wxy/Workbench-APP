@@ -152,6 +152,36 @@ function getFileIcon(item: ClipItem): string {
   return "📎";
 }
 
+// 给条目算"类型词"，让"图片/文本/txt/pdf"等查询能命中对应类型条目（与名称/内容搜索并存）
+function typeKeywords(opts: { type: "text" | "image" | "file"; ext?: string; isImage?: boolean }): string[] {
+  const { type, ext, isImage } = opts;
+  if (type === "text") return ["文本", "text", "txt"];
+  if (type === "image") return ["图片", "image", "img", "png", "jpg"];
+  // file：按扩展名归类
+  const e = (ext || "").toLowerCase();
+  const kw = ["文件", "file"];
+  if (isImage || ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico"].includes(e)) kw.push("图片", "image", e);
+  else if (["mp4", "mkv", "avi", "mov", "wmv"].includes(e)) kw.push("视频", "video", e);
+  else if (["mp3", "wav", "flac", "ogg", "aac", "m4a"].includes(e)) kw.push("音频", "audio", e);
+  else if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].includes(e)) kw.push("压缩", "archive", e);
+  else if (e === "pdf") kw.push("pdf", "文档");
+  else if (["doc", "docx", "odt"].includes(e)) kw.push("文档", "word", e);
+  else if (["xls", "xlsx", "csv"].includes(e)) kw.push("表格", "excel", e);
+  else if (["ppt", "pptx"].includes(e)) kw.push("幻灯片", "ppt", e);
+  else if (["js", "ts", "jsx", "tsx", "py", "rs", "go", "cpp", "c", "h", "java", "cs", "html", "css", "json", "yaml", "yml", "xml", "toml"].includes(e)) kw.push("代码", "code", e);
+  else if (["exe", "msi", "bat", "cmd", "ps1", "sh"].includes(e)) kw.push("程序", "exe", e);
+  else if (["txt", "md", "log", "ini", "cfg", "conf"].includes(e)) kw.push("文本", "txt", e);
+  else if (e) kw.push(e);
+  return kw;
+}
+// 通用命中判断：名称/内容优先（子序列模糊），叠加类型词（子串即可）。任一命中即保留。
+function matchItem(query: string, name: string, keywords: string[]): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  if (fuzzyScore(q, name).score > 0) return true;        // 名称/内容（子序列模糊）
+  return keywords.some(k => k.toLowerCase().includes(q)); // 类型词（子串即可，"图片""txt"好命中）
+}
+
 // ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
 type EnhResult =
   | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
@@ -346,6 +376,26 @@ export default function App() {
       .slice(0, 50)
       .map(({ score, ...rest }) => rest as EnhResult);
   }, [enhQuery, apps, stage, sortedApps, appUsage]);
+
+  // ── 顶栏普通搜索：三区联动过滤（与 Ctrl+K 增强搜索的 enhQuery 完全独立）──
+  // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
+  const filteredStage = useMemo(() => {
+    const q = search.trim();
+    if (!q) return stage;
+    return stage.filter(s => {
+      const name = s.type === "text" ? (s.content || "") : s.type === "image" ? "图片" : (s.name || s.items?.[0]?.name || "文件");
+      return matchItem(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
+    });
+  }, [stage, search]);
+  // 剪贴板历史：同上
+  const filteredClip = useMemo(() => {
+    const q = search.trim();
+    if (!q) return clipboard;
+    return clipboard.filter(c => {
+      const name = c.type === "text" ? (c.content || "") : c.type === "image" ? "图片" : (c.items?.[0]?.name || "文件");
+      return matchItem(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
+    });
+  }, [clipboard, search]);
 
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
@@ -622,7 +672,7 @@ export default function App() {
         <div className="top-center">
           <div className="global-search">
             <svg className="search-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input ref={searchRef} className="search-field" placeholder="搜索应用、文件..." value={search} onChange={e=>{setSearch(e.target.value);setSelectedIdx(0);}} spellCheck={false} />
+            <input ref={searchRef} className="search-field" placeholder="搜索应用、中转、剪贴板…" value={search} onChange={e=>{setSearch(e.target.value);setSelectedIdx(0);}} spellCheck={false} />
           </div>
         </div>
         <div className="top-right">
@@ -668,7 +718,7 @@ export default function App() {
             )}
           </div>
           <div className="drop-area" ref={dropAreaRef}>
-            {stage.length? <div className="stage-list">{stage.map((s,idx)=>{
+            {filteredStage.length? <div className="stage-list">{filteredStage.map((s,idx)=>{
               const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
               return (
               <div key={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
@@ -687,7 +737,7 @@ export default function App() {
                   <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="移除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
                 </div>
               </div>);
-            })}</div>: <p className="empty-hint">拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入</p>}
+            })}</div>: <p className="empty-hint">{search.trim()?"无匹配":"拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入"}</p>}
           </div>
           <div className="section-label" style={{marginTop:16}}>快捷入口</div>
           <div className="shortcut-row">
@@ -700,7 +750,7 @@ export default function App() {
         <section className="clip-panel">
           <div className="section-label">剪贴板历史</div>
           <div className="clip-list">
-            {clipboard.length? clipboard.map((c,i)=>(
+            {filteredClip.length? filteredClip.map((c,i)=>(
               <div key={i} className="clip-block"
                 onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
                 onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp} onPointerCancel={handleClipPointerUp}
@@ -722,7 +772,7 @@ export default function App() {
                 : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
                 <span className="clip-time">{c.type==="image"?"📷 ":c.type==="file"?"📎 ":""}{ago(c.time)}</span>
               </div>
-            )): <p className="empty-hint">显示时自动读取</p>}
+            )): <p className="empty-hint">{search.trim()?"无匹配":"显示时自动读取"}</p>}
           </div>
         </section>
       </main>
