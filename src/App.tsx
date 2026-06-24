@@ -152,6 +152,11 @@ function getFileIcon(item: ClipItem): string {
   return "📎";
 }
 
+// ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
+type EnhResult =
+  | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
+  | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] };
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -193,6 +198,12 @@ export default function App() {
   useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
+  // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
+  const [enhOpen, setEnhOpen] = useState(false);
+  const [enhQuery, setEnhQuery] = useState("");
+  const [enhSelIdx, setEnhSelIdx] = useState(0);
+  const enhInputRef = useRef<HTMLInputElement>(null);
+  const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -231,7 +242,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; }); // 复位
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhQuery(""); setEnhSelIdx(0); }); // 复位
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -323,6 +334,19 @@ export default function App() {
       .map(({ app, ranges }) => ({ app, ranges }));
   }, [search, sortedApps, appUsage]);
 
+  // ── 增强搜索结果（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
+  const enhResults = useMemo<EnhResult[]>(() => {
+    const q = enhQuery.trim();
+    const nowS = Math.floor(Date.now() / 1000);
+    if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
+    const appHits = apps.map(app => { const r = fuzzyScore(q, app.name); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
+    const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = s.name || s.items?.[0]?.name || "文件"; const r = fuzzyScore(q, nm); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
+    return [...appHits, ...stageHits]
+      .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
+      .slice(0, 50)
+      .map(({ score, ...rest }) => rest as EnhResult);
+  }, [enhQuery, apps, stage, sortedApps, appUsage]);
+
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
     if (launchingRef.current) return; // 防连点：动画进行中忽略后续触发
@@ -339,6 +363,12 @@ export default function App() {
     setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [recordUse]);
+  // 增强搜索激活：app 复用 launchApp（含放大动画+淡出+hide，不在此 setEnhOpen，让整层随 overlay dismiss 一起淡出，hotkey-hide 复位）；
+  // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
+  const activateEnh = useCallback((r: EnhResult, iconEl?: HTMLElement | null) => {
+    if (r.kind === "app") { launchApp(r.app, iconEl ?? null); }
+    else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
+  }, [launchApp]);
   // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶
@@ -563,8 +593,15 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
       if(settingsOpen)return; // 设置打开时屏蔽应用导航/启动按键
+      if(enhOpen){ // 增强搜索接管导航，屏蔽下面 launcher 键（字母键不拦截，正常输入到 enhInput）
+        if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
+        else if(e.key==="ArrowUp"){e.preventDefault();setEnhSelIdx(i=>Math.max(i-1,0));}
+        else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
+        return;
+      }
       if(e.key==="ArrowLeft"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
       if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
@@ -574,7 +611,7 @@ export default function App() {
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, filteredApps, selectedIdx, launchApp, settingsOpen]);
+  }, [visible, filteredApps, selectedIdx, launchApp, settingsOpen, enhOpen, enhResults, enhSelIdx, activateEnh]);
 
   return (
    <>
@@ -689,6 +726,32 @@ export default function App() {
           </div>
         </section>
       </main>
+      {/* ── 增强搜索层（始终挂载，靠 class 切换显隐，沿用 overlay-visible/hidden 模式避免卸载闪烁）── */}
+      <div className={`enh-layer${enhOpen?" enh-open":""}`}>
+        <div className="enh-search-box">
+          <svg className="search-icon-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input ref={enhInputRef} className="enh-search-input" placeholder="搜索应用、中转文件…"
+            value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
+          <span className="enh-hint"><kbd>Esc</kbd> 返回</span>
+        </div>
+        <div className="enh-results">
+          {enhResults.length ? enhResults.map((r,i)=>{
+            const key = r.kind==="app" ? "app:"+r.app.path : "stage:"+r.item.id;
+            const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
+                                        : <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>;
+            const label = r.kind==="app" ? r.app.name : r.name;
+            return (
+              <div key={key} className={`enh-result${i===enhSelIdx?" selected":""}`}
+                onMouseEnter={()=>setEnhSelIdx(i)}
+                onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
+                <div className="enh-result-icon">{icon}</div>
+                <span className="enh-result-label"><HighlightText text={label} ranges={r.ranges}/></span>
+                <span className="enh-result-badge">{r.kind==="app"?"应用":"中转"}</span>
+              </div>
+            );
+          }) : <p className="empty-hint">{enhQuery.trim()?"无匹配":"输入以搜索"}</p>}
+        </div>
+      </div>
       {settingsOpen && (
         <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
           <div className="settings-modal" onClick={e=>e.stopPropagation()}>
