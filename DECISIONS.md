@@ -6,7 +6,7 @@
 - **热键**：§1 RegisterHotKey vs 自建钩子 · §2 放弃长短按 · §9 修饰键选择
 - **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪 · §14 原生拖入(drag-in)废弃
 - **剪贴板 / 粘贴**：§3 粘贴可靠性 6 轮演进 · §6 后台缓存架构 · §7 CF_HDROP/DROPFILES · §10 检测优先级(截图去重) · §11 桌面 SHFileOperation 兜底 + fFlags
-- **搜索 / 启动器 UI**：§15 增强搜索(Ctrl+K)视图层 + 两套搜索分工 · §16 启动器=持久化收藏托盘(vs 自动扫描全量)
+- **搜索 / 启动器 UI**：§15 增强搜索(Ctrl+K)视图层 + 两套搜索分工 · §16 启动器=持久化收藏托盘(vs 自动扫描全量) · §17 文件搜索=自建内存索引+后台预建(vs Windows Search/Everything)
 - **其他**：§12 Git 版本历史（关键节点）
 
 ---
@@ -378,3 +378,25 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 - **app picker 复用 settings-modal + enh-result 样式**：零自创交互范式；搜索去重（排除已加入）、点击添加不关闭（连续添加）、已加入项 filter 后自然消失。Esc 优先级链插入 `pickerOpen`（ctxMenu→enhOpen→pickerOpen→stageSel→settings→关窗）。
 - **S3b 落点判定**：Drop emit `{paths,x,y}`（物理像素），前端 `÷ devicePixelRatio` 换算 CSS px + `getBoundingClientRect()` 判区；启动器 `.app-grid` → `LauncherItem`，其余兜底 → `StageItem`；落地 200ms `drop-flash` 动画确认。DragOver 实时高亮未做（高频 IPC 代价过高，用落地闪烁替代）。
 - **.lnk 拖入走 `resolve_lnk`（S3c，续39）**：`.lnk` 快捷方式拖入启动器时，调用 `resolve_lnk`（`apps.rs`）复用 `extract_icon_base64`（`SHGetFileInfoW` 自动解析 .lnk 图标）+ 去后缀名称，存为 `kind:"app"`，左键走 `ShellExecuteW(.lnk)` 直接执行（不 `parselnk` 解析目标 exe——避开 parselnk 历史坑，且 ShellExecuteW 本就能运行 .lnk）。非 .lnk 走原有 `get_file_info → file/folder` 路径。
+
+---
+
+## 17. 文件搜索：路线 C 自建内存索引 + 后台预建（2026-06-24 S4a）
+
+**目标**：增强搜索（Ctrl+K）Tier 2 要能搜整个文件系统（不止已收藏/中转的条目）。难点在 Windows 上「搜文件」既要快、又不能卡呼出。
+
+**路线对比（为何选自建内存索引）**：
+- **A. Windows Search COM（`ISearchManager`/OLE DB `SystemIndex`）**：依赖系统索引服务，用户若关了索引或目录不在索引范围就查不到；COM 初始化 + SQL 查询有不可控延迟与失败面；跨进程、要处理 STA/线程模型。重而不可控，弃。
+- **B. Everything SDK（`Everything.dll` IPC）**：最快最全，但**要求用户另装 Everything + 服务常驻**，违背本工具「~5MB 单体、零外部依赖」定位。弃。
+- **C. 自建内存索引 + 后台预建（选用）**：`walkdir`（已是依赖，零新增 crate）后台遍历几个用户常用目录，建一份内存 `Vec<IndexEntry>`，查询纯内存子串打分。可控、零外部依赖、查询 µs 级。代价是索引有最长 30min 的陈旧窗口、且只覆盖白名单目录——对"找常用文件直达打开"的场景完全够用。
+
+**不卡前端的三道保险**（命脉，违反任一条都会把耗时遍历泄漏到 UI 线程）：
+1. **永不经命令**：索引只在 `start_index_worker` 内 `std::thread::spawn` 的独立后台线程跑，永不经 Tauri 命令 / invoke / 阻塞 IPC。setup 阶段 spawn，先 `sleep(3s)` 避开开机高峰再首次建索引——不等窗口、不等呼出。
+2. **查询只读内存**：`search_files` / `get_index_status` 只读内存 Vec、绝不碰磁盘（实测查询 µs 级，远 <5ms 目标）。
+3. **双缓冲原子替换 + 瞬间临界区锁**：新索引在后台 `build_index` 里建好（耗时部分**不持锁**），建完一次性 `*guard = new_index` 替换旧 Vec。`FILE_INDEX` 锁只罩「替换 Vec」与「查询读 Vec」两个瞬间临界区。查询永远命中一份完整索引，绝不读到建一半的状态。
+
+- **锁完全独立于剪贴板**：`FILE_INDEX` 是全新独立 `Mutex<Vec<IndexEntry>>`，与 `CLIPBOARD_LOCK` / `CLIP_CACHE` 无任何交集，无锁序问题。
+- **遍历边界**：白名单目录 `Desktop/Downloads/Documents/Pictures/Projects`（不存在则跳过）；`max_depth(8)` 防极深树；`should_skip_dir` 剪枝 `node_modules/.git/target/$recycle.bin/appdata/__pycache__` 及隐藏目录整子树；隐藏文件跳过；硬顶 `MAX_INDEX_ENTRIES=200_000`；`REBUILD_INTERVAL_SECS=30min` 周期重建。
+- **打分**：`name_lower` 预存小写避免查询时重复 `to_lowercase`；子串命中 + 越靠前 + 名越短 + 前缀加分，`sort_by` 降序后 `take(limit.min(50))`。简化版（非子序列模糊），与前端 `fuzzyScore` 思路一致但更轻——后台索引量大，子串足够且快。
+- **本步（S4a）零前端**：前端接入（Ctrl+K 调 `search_files` 展示文件结果 + 「索引建立中…」状态）是 S4b。
+- **验证**：临时单测（`build_index` + `search_files` 对临时目录树）实测——遍历 5 条目 390µs、跳过 node_modules 子树与隐藏文件正确、查询 `report` 7.4µs 返回且短名前缀优先排序正确、limit/空查询守卫正确；验证后已删临时单测，保留正式日志 `[fileindex] ready: N entries (elapsed)`。GUI 层（Ctrl+K 看到文件结果）属 S4b 未验。

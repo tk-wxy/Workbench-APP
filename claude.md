@@ -69,6 +69,11 @@ npm run tauri build    # 打包
 - 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
 - `set_shadow(false)` 后透明窗 `WRY_WEBVIEW` 子窗填满外框（含隐形边框），底边落在 `outer.bottom` 会越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 量 `GetWindowRect`、越界则等量缩 inner 高度贴齐工作区底（动态测量、无硬编码）。详见 DECISIONS §5 延伸。
 
+### 文件搜索索引（`filesearch.rs`）
+- **索引建立只在独立后台线程**（`start_index_worker` 内 `std::thread::spawn`），**永不经 Tauri 命令 / invoke / 阻塞 IPC/UI**；setup 阶段 spawn、先 `sleep(3s)` 再首次建索引，不等窗口/呼出。
+- **查询命令（`search_files`/`get_index_status`）只读内存、永不碰磁盘**（µs 级）。**双缓冲原子替换**：耗时的 `walkdir` 遍历**绝不持锁**，建完一次性换 Vec；`FILE_INDEX` 锁只罩「替换 Vec」「读 Vec」两个瞬间临界区。
+- `FILE_INDEX` 是**全新独立 Mutex**，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无任何交集、无锁序问题。要调遍历目录/深度/重建周期改 `filesearch.rs` 顶部命名常量。详见 DECISIONS §17。
+
 ### 💀 死胡同（已验证失败，别再试，别浪费时间）
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
 - **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
@@ -99,6 +104,7 @@ npm run tauri build    # 打包
 - **诊断优先于修改**：先加日志 / 输出分析确认根因，再动手改。
 - "理论上更优雅" ≠ "实际更好"：已验证的笨方法优于未验证的聪明方法。
 - 出现"焦点回不来"这类**架构性死胡同信号时，果断回退**，不要打补丁硬撑。
+- **`LauncherItem`（启动器收藏）与 `StageItem`（中转条目）不可合并**：二者形似但**左键动作契约不同**——启动器=打开/启动（不走粘贴链/不取 `CLIPBOARD_LOCK`），中转=取走粘贴（走粘贴链）。**动作由"区"决定**，别因字段相似而合并类型或复用左键 handler（详见 DECISIONS §16）。
 - 每到一个稳定点立即 `git commit`。
 
 ## 强制记忆更新 (Post-Task)

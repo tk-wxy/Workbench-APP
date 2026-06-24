@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-24（续39：.lnk 拖入启动器提取图标 + 干净名称）
+> **最后更新**：2026-06-24（续40：文件系统索引 S4a——filesearch.rs 后台预建内存索引，零前端阻塞）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -14,7 +14,8 @@
 ## 0. 当前状态 / 下一步 〔快照〕
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索三区联动**（输入即同时过滤应用/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）
-- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）
+- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——**S4a✓**（filesearch.rs 文件系统后台索引，仅 Rust，零前端）+ S4b（前端 Ctrl+K 接入文件结果，待做）
+- **新增（续40，仅 Rust 后端，零前端改动）**：**文件系统索引 S4a**——新模块 `src-tauri/src/filesearch.rs`：独立后台线程 `start_index_worker`（setup 阶段 spawn，`sleep(3s)` 后用 `walkdir` 遍历 5 个默认目录 Desktop/Downloads/Documents/Pictures/Projects 建内存索引，30min 周期重建）；命令 `search_files(query,limit)` / `get_index_status()` 纯内存读 µs 级。**双缓冲原子替换**：耗时遍历不持锁，建完一次性换 Vec；`FILE_INDEX` 是全新独立 Mutex，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无交集。`lib.rs` 加 `mod filesearch` + handler 注册 + setup 启动线程。**cargo check + clippy 零新增警告（8 条基线不变，无一在 filesearch）；临时单测实测遍历 µs 级 + 跳过 node_modules/隐藏 + 查询排序正确后已删**；GUI 层（Ctrl+K 看文件结果）属 S4b 未验
 - **新增（续39）**：**.lnk 拖入启动器**——`inLauncher` 分支内对 `.lnk` 路径调用新命令 `resolve_lnk`（`apps.rs`）：复用 `extract_icon_base64` 提取图标（`SHGetFileInfoW` 自动解析 .lnk），去掉后缀取干净名称，存为 `kind:"app"` 条目。左键走 `launchApp → ShellExecuteW(.lnk)`，与扫描加入的 app 条目完全一致。非 .lnk 走原有 `get_file_info` 路径，行为不变。**cargo check + tsc 零错误已验；T1–T6 GUI 待实测**
 - **新增（续38）**：**启动器 S3b**——外部文件拖入按松手坐标判定落点：启动器区（.app-grid）→入 `LauncherItem`（file/folder 持久化），中转区/区域外兜底→入 StageItem（原有行为）。落地区域 200ms drop-flash 闪烁确认。Rust 仅扩展 Drop emit payload 加 `{x,y}` 物理像素；前端 `÷ devicePixelRatio` 换算 CSS px 后与 `getBoundingClientRect()` 比对判区。**tsc 零错误、cargo check 零错误已验；T1–T8 GUI 实测通过（2026-06-24）**
 - **新增（续37，纯前端，零 Rust 改动）**：**启动器重设计 S3a**——左侧面板从「自动扫描全量平铺(filteredApps)」改为「手动策展的持久化收藏托盘」。新增独立类型 `LauncherItem`（kind=app/file/folder，与 `StageItem` 不可合并：左键动作由区决定——启动器=打开/启动，中转=取走粘贴）。持久化 store key `launcher-items`（`LAUNCHER_MAX=60`）。app picker 模态（复用 settings-modal + enh-result 样式，搜索去重连续添加，Esc 关闭）。右键条目「从启动器移除」/file·folder「打开所在目录」。**自动扫描链 `scan_start_menu/apps/sortedApps/filteredApps` 全保留**喂增强(Ctrl+K)/普通搜索，面板不再渲染。⚠️ 副作用：顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担）；普通页方向键失去可见目标（保留不删，Enter 加 `search 非空` 守卫防误启动）。`.app-panel` 600→360px、`.app-grid` 6→4 列、中转区相应变宽。**tsc 零错误已验；T1–T10 GUI 待 `npm run tauri dev` 实测**
@@ -27,7 +28,7 @@
 - **新增（续31 GUI 实测通过，纯前端）**：剪贴板卡片 file 类型**按扩展名显示语义图标**——组件外纯函数 `getFileIcon(item: ClipItem)`，多文件→📦，依扩展名映射图片/视频/音频/压缩包/PDF/Office/代码/可执行/文本，兜底→📎。JSX 中 `file-clip-icon` 改为 `clip-file-icon`，调用 `getFileIcon`。CSS 新增 `.clip-file-icon`（1.25rem）。text/image 类型及卡片其余逻辑不变
 - **新增（续32 GUI 实测通过，纯前端）**：**开机自启**——设置 → 常规 tab 新增「开机自启」开/关 seg 控件。`tauri-plugin-autostart`（已内置）通过 `plugin:autostart|enable/disable/is_enabled` 命令写/读 Windows 注册表开机启动项。启动时自动读取当前状态填充 UI；切换即时生效。零 Rust 改动
 - **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**
-- **下一步**：启动器键盘导航；file/folder 收藏的非拖入入口（如选择对话框）。增强搜索 Tier 2（剪贴板条目纳入 + 文件系统实时搜索）。**拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；T9 渲染进程重建后拖入失效（已知罕见限制）
+- **下一步**：**S4b**——前端 Ctrl+K 增强搜索接入文件系统结果（`enhResults` 合并 `search_files` 返回，加 badge「文件」，激活走 `open_file`/`reveal_in_explorer`，监听 `file-index-ready` 显示「索引建立中…」）。启动器键盘导航；file/folder 收藏的非拖入入口（如选择对话框）。增强搜索 Tier 2 剩余（剪贴板条目纳入）。**拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；T9 渲染进程重建后拖入失效（已知罕见限制）
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -69,7 +70,9 @@ src/
 ```
 src-tauri/src/
   lib.rs           # 主逻辑：窗口全屏、热键 handler、剪贴板后台线程、Tauri 命令（~620行）
-  apps.rs          # 应用扫描：Start Menu .lnk 解析、ExtractIconEx 图标提取、get_file_info
+  apps.rs          # 应用扫描：Start Menu .lnk 解析、ExtractIconEx 图标提取、get_file_info、resolve_lnk
+  dragdrop.rs      # 中转区原生拖入：自注册 IDropTarget，Drop emit files-dropped
+  filesearch.rs    # 文件系统搜索：后台预建内存索引（独立线程，双缓冲原子替换，零前端阻塞）
   main.rs          # Rust 入口
 src-tauri/tauri.conf.json   # 窗口配置：transparent:true/alwaysOnTop/decorations:false
 src-tauri/capabilities/default.json
@@ -144,12 +147,17 @@ src-tauri/Cargo.toml
 | `copy_files_to_clipboard` | 只复制文件 CF_HDROP 到当前剪贴板（同上）|
 | `reveal_in_explorer` | 在资源管理器中高亮目标文件（/select,path）|
 | `trigger_screenshot` | hide overlay + emit hotkey-hide + 150ms + enigo Win+Shift+S |
+| `search_files` | 文件系统搜索：纯内存子串打分查询后台索引（µs 级，限 50 条）|
+| `get_index_status` | 返回文件索引状态 `{ready,count}`（前端显示「建立中…」用）|
+| `resolve_lnk` | 解析 .lnk 快捷方式：提取图标 + 去后缀名称（拖入启动器存 kind:"app"）|
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
 |------|------|
 | `hotkey-show` / `hotkey-hide` | 热键 toggle 同步前端 visible 状态 |
 | `clipboard-update` | 后台监听检测到新剪贴板内容，实时推送 |
+| `file-index-ready` | 文件索引后台线程每次建/重建完成推送条目数（前端 S4b 接入用）|
+| `files-dropped` | 原生拖入：`{paths,x,y}` 物理像素，前端判落点入启动器/中转 |
 
 ---
 
@@ -176,6 +184,19 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-24 (文件系统索引 S4a：filesearch.rs 后台预建内存索引，续40，仅 Rust)
+- **功能**：为增强搜索 Tier 2 打底——后台预建一份文件系统内存索引，供后续 Ctrl+K 搜整个文件系统。本步**零前端改动**（前端接入是 S4b）。
+- **新模块**（`src-tauri/src/filesearch.rs`，~190 行）：
+  - `IndexEntry{path,name,name_lower,ext,is_dir}`（`name_lower` 预存小写避免查询重复 to_lowercase）；`FileSearchResult` 为对外序列化结构。
+  - `static FILE_INDEX: OnceLock<Mutex<Vec<IndexEntry>>>`——全新独立锁，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无交集。
+  - `start_index_worker(app)`：setup 阶段 spawn 独立后台线程，`sleep(3s)` 避开开机高峰 → `build_index` → 原子替换 Vec → `emit("file-index-ready", count)` → `sleep(30min)` 周期重建。
+  - `build_index`：`walkdir` 遍历 `scan_dirs()`（Desktop/Downloads/Documents/Pictures/Projects，不存在跳过），`max_depth(8)`，`should_skip_dir` 剪枝 node_modules/.git/target/$recycle.bin/appdata/__pycache__ 及隐藏目录整子树，跳过隐藏文件，硬顶 `MAX_INDEX_ENTRIES=200_000`。**耗时遍历全程不持锁**。
+  - `#[tauri::command] search_files(query,limit)`：纯内存子串打分（越靠前+名越短+前缀加分），`take(limit.min(50))`；`get_index_status()` 返回 `{ready,count}`。
+- **lib.rs**：顶部 `mod filesearch;`；`generate_handler!` 加 `filesearch::search_files, filesearch::get_index_status`；setup 内 `dragdrop::register_drag_drop` 后加 `filesearch::start_index_worker(app.handle().clone())`。
+- **三道不卡前端保险**（DECISIONS §17）：① 索引只在后台线程、永不经命令/invoke；② 查询只读内存、不碰磁盘；③ 双缓冲原子替换、锁只罩替换/读取瞬间临界区。
+- **验证**：`cargo check` 零警告✓；`cargo clippy` 8 条基线不变、无一在 filesearch✓；**临时单测实测**（验证后已删，仅保留正式日志 `[fileindex] ready: N entries (elapsed)`）：`build_index` 5 条目 390µs、node_modules 子树与隐藏文件正确跳过、`search_files("report")` 7.4µs 返回且短名前缀优先、limit/空查询守卫正确。⚠️ **bin 链接失败仅因运行中实例（PID 锁住 workbench_app.exe），非代码问题；lib 编译干净**。GUI 层（Ctrl+K 看文件结果）属 S4b 未验。
+- **文件**：`src-tauri/src/filesearch.rs`（新增）/ `src-tauri/src/lib.rs`（+mod +注册 +线程启动）/ `DECISIONS.md`（§17 新增 + 目录）/ `CLAUDE.md`（文件搜索不变量补一句）/ `MEMORY.md`。
 
 ### 2026-06-24 (.lnk 拖入启动器：resolve_lnk 提取图标+干净名称存 kind:"app"，续39)
 - **功能**：外部拖入 `.lnk` 快捷方式到启动器区时，不再存为 `kind:"file"` 而是调用新命令 `resolve_lnk`，提取图标 + 去掉后缀名称，存为 `kind:"app"` 条目；左键走 `launchApp → ShellExecuteW(.lnk)` 正常启动，与 picker 加入的 app 完全一致。非 .lnk（普通文件/文件夹）走原有 `get_file_info` 路径不变。
