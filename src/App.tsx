@@ -15,6 +15,19 @@ type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: Fi
 const STAGE_MAX = 20; // 中转区上限
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 
+// 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
+// 持久化到 store key "launcher-items"，不参与自动扫描；扫描链(filteredApps)仅供搜索，不再全量平铺到此面板。
+interface LauncherItem {
+  id: number;
+  kind: "app" | "file" | "folder";
+  name: string;
+  icon?: string | null;   // app 图标 base64（来自 AppInfo.icon）；file/folder 无，用 emoji
+  path: string;           // app=launch_app 的 path；file/folder=open_file 的 path
+  ext?: string;           // file 显示图标用
+}
+const LAUNCHER_MAX = 60;
+const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
+
 function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
 function ago(ms: number) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return "刚刚"; if (s<3600) return `${Math.floor(s/60)}分钟前`; return `${Math.floor(s/3600)}小时前`; }
 
@@ -194,6 +207,7 @@ export default function App() {
   const [time, setTime] = useState("");
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
+  const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   const [store, setStore] = useState<any>(null);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
@@ -215,6 +229,7 @@ export default function App() {
   const loadedRef = useRef(false);
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
+  const launcherRef = useRef<LauncherItem[]>(launcher); launcherRef.current = launcher; // 给 []-注册监听用（S3b 拖入落点会用到，先备好）
   const storeRef = useRef<any>(null); storeRef.current = store;
   const [stageSel, setStageSel] = useState<Set<number>>(new Set<number>()); // 中转区多选（选中的 StageItem.id）
   const [stageMultiselect, setStageMultiselect] = useState(false); // 多选模式开关（显式进入，非按住修饰键）
@@ -227,6 +242,7 @@ export default function App() {
   const dragStateRef = useRef(dragState); // 供 pointermove/up 闭包读最新值（setState 异步）
   useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
+  const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
   // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
   const [enhOpen, setEnhOpen] = useState(false);
@@ -234,6 +250,11 @@ export default function App() {
   const [enhSelIdx, setEnhSelIdx] = useState(0);
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
+  // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const pickerOpenRef = useRef(false); pickerOpenRef.current = pickerOpen; // 供 Esc keydown 闭包读最新
+  const pickerInputRef = useRef<HTMLInputElement>(null);
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -257,12 +278,13 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
 
   const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
+  const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
@@ -272,7 +294,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhQuery(""); setEnhSelIdx(0); }); // 复位
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhQuery(""); setEnhSelIdx(0); setPickerOpen(false); setPickerQuery(""); }); // 复位
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -284,24 +306,58 @@ export default function App() {
             return [item, ...filtered].slice(0, clipCacheMaxRef.current);
           });
         });
-        // 原生拖入：Rust IDropTarget 收到外部文件 → emit 真实路径 → 转 file 型 StageItem 入中转（复用续26 去重/置顶/持久化）
+        // 原生拖入（S3b）：落点在启动器区→入启动器，否则→入中转（兜底）；落地区域闪烁确认。
+        // pt 是 Windows 屏幕物理像素，÷ devicePixelRatio 转 CSS px 后与 getBoundingClientRect 比对。
         const un4 = await listen("files-dropped", async (event: any) => {
-          const paths: string[] = event.payload || [];
+          const payload = event.payload as { paths: string[]; x: number; y: number };
+          const paths = payload.paths ?? [];
           if (!paths.length) return;
+          const cssX = payload.x / window.devicePixelRatio;
+          const cssY = payload.y / window.devicePixelRatio;
+          const launcherRect = launcherDropRef.current?.getBoundingClientRect();
+          const inLauncher = !!launcherRect && cssX >= launcherRect.left && cssX <= launcherRect.right && cssY >= launcherRect.top && cssY <= launcherRect.bottom;
           const { invoke } = await import("@tauri-apps/api/core");
-          const built: StageItem[] = [];
-          for (const p of paths) { try { built.push(fileEntryToStage(await invoke<FileEntry>("get_file_info", { path: p }))); } catch {} }
-          if (!built.length) return;
-          let next = [...stageRef.current];
-          for (const it of built) {
-            if (next.length >= STAGE_MAX) break;
-            if (next.some(s => s.type === "file" && s.items?.[0]?.path === it.items?.[0]?.path)) continue; // 同路径去重
-            next.push(it);
+          if (inLauncher) {
+            // 落点在启动器：.lnk → resolve_lnk → kind:"app"；其余 → get_file_info → file/folder
+            let next = [...launcherRef.current];
+            for (const p of paths) {
+              try {
+                if (next.length >= LAUNCHER_MAX) break;
+                if (next.some(x => x.path === p)) continue; // 原始路径去重
+                let newItem: LauncherItem;
+                if (p.toLowerCase().endsWith(".lnk")) {
+                  const lnk = await invoke<{ name: string; path: string; icon: string | null }>("resolve_lnk", { path: p });
+                  newItem = { id: launcherId(), kind: "app", name: lnk.name, icon: lnk.icon, path: lnk.path };
+                } else {
+                  const f = await invoke<FileEntry>("get_file_info", { path: p });
+                  newItem = { id: launcherId(), kind: f.isDir ? "folder" : "file", name: f.name, path: f.path, ext: f.ext };
+                }
+                next = [...next, newItem];
+              } catch {}
+            }
+            next = next.slice(0, LAUNCHER_MAX);
+            setLauncher(next);
+            if (storeRef.current) { try { await storeRef.current.set("launcher-items", next); await storeRef.current.save(); } catch {} }
+            launcherDropRef.current?.classList.add("drop-flash");
+            setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
+          } else {
+            // 落点在中转区或区域外（兜底）：转 StageItem 入中转（原有行为）
+            const built: StageItem[] = [];
+            for (const p of paths) { try { built.push(fileEntryToStage(await invoke<FileEntry>("get_file_info", { path: p }))); } catch {} }
+            if (!built.length) return;
+            let next = [...stageRef.current];
+            for (const it of built) {
+              if (next.length >= STAGE_MAX) break;
+              if (next.some(s => s.type === "file" && s.items?.[0]?.path === it.items?.[0]?.path)) continue;
+              next.push(it);
+            }
+            next = next.slice(0, STAGE_MAX);
+            setStage(next);
+            if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+            dropAreaRef.current?.classList.add("drop-flash");
+            setTimeout(() => dropAreaRef.current?.classList.remove("drop-flash"), 200);
           }
-          next = next.slice(0, STAGE_MAX);
-          setStage(next);
-          if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
-          // Step 3：拖入后回焦点，让 Esc 可用（overlay 已显示+深色渲染，无白闪风险）
+          // 拖入后回焦点，让 Esc 可用
           try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().setFocus(); } catch {}
         });
         cleanup = [un1, un2, un3, un4];
@@ -377,6 +433,15 @@ export default function App() {
       .map(({ score, ...rest }) => rest as EnhResult);
   }, [enhQuery, apps, stage, sortedApps, appUsage]);
 
+  // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
+  const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
+    const q = pickerQuery.trim();
+    const base = sortedApps.filter(a => !launcher.some(x => x.kind === "app" && x.path === a.path)); // 排除已加入
+    if (!q) return base.slice(0, 50).map(app => ({ app, ranges: [] as [number, number][] }));
+    return base.map(app => { const r = fuzzyScore(q, app.name); return { app, score: r.score, ranges: r.ranges }; })
+      .filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 50).map(({ app, ranges }) => ({ app, ranges }));
+  }, [pickerQuery, sortedApps, launcher]);
+
   // ── 顶栏普通搜索：三区联动过滤（与 Ctrl+K 增强搜索的 enhQuery 完全独立）──
   // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
   const filteredStage = useMemo(() => {
@@ -420,6 +485,25 @@ export default function App() {
     else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
   }, [launchApp]);
   // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
+
+  // ── 启动器（收藏托盘）操作 ──
+  // 左键打开/启动条目：app→launchApp（含放大动画+hide）；file/folder→open_file。由区决定动作，不走粘贴/焦点交还/CLIPBOARD_LOCK。
+  const openLauncherItem = useCallback((it:LauncherItem, iconEl?:HTMLElement|null) => {
+    if (it.kind === "app") {
+      launchApp({ name: it.name, path: it.path, icon: it.icon ?? null }, iconEl ?? null);
+    } else {
+      hideWorkbench();
+      import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:it.path})).catch(()=>{});
+    }
+  }, [launchApp]);
+  // 从 app picker 加入应用（按 path 去重）
+  const addAppToLauncher = useCallback((app:AppInfo) => {
+    if (launcher.some(x=>x.kind==="app" && x.path===app.path)) return;
+    saveLauncher([...launcher, { id:launcherId(), kind:"app" as const, name:app.name, icon:app.icon, path:app.path }].slice(0,LAUNCHER_MAX));
+  }, [launcher, saveLauncher]);
+  // 从启动器移除（右键）
+  const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
+
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶
   const addToStage = useCallback((c:ClipItem) => {
@@ -624,6 +708,14 @@ export default function App() {
     openCtxMenu(e, items);
   }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem]);
 
+  // 启动器条目右键菜单（file/folder 额外加「打开所在目录」；通用：从启动器移除）
+  const openLauncherCtxMenu = useCallback((e: React.MouseEvent, it: LauncherItem) => {
+    const items: CtxMenuItem[] = [];
+    if (it.kind !== "app") items.push({ label: "打开所在目录", action: async () => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
+    items.push({ label: "从启动器移除", action: () => removeLauncherItem(it.id) });
+    openCtxMenu(e, items);
+  }, [openCtxMenu, removeLauncherItem]);
+
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
@@ -645,9 +737,9 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
-      if(settingsOpen)return; // 设置打开时屏蔽应用导航/启动按键
+      if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
       if(enhOpen){ // 增强搜索接管导航，屏蔽下面 launcher 键（字母键不拦截，正常输入到 enhInput）
         if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
         else if(e.key==="ArrowUp"){e.preventDefault();setEnhSelIdx(i=>Math.max(i-1,0));}
@@ -659,11 +751,12 @@ export default function App() {
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
       if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
       if(e.key==="Tab"){e.preventDefault();const n=filteredApps.length;if(n)setSelectedIdx(i=>e.shiftKey?(i-1+n)%n:(i+1)%n);} // Tab 下一个 / Shift+Tab 上一个（循环）
-      if(e.key==="Enter"&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));}
+      // 启动器面板已不渲染 filteredApps（改渲染 launcher 收藏托盘），方向键无可见目标、Enter 仅在「用户正用顶栏搜应用」(search 非空) 时才启动，避免空 search 下误启动隐藏的 filteredApps[0]。launcher 键盘导航待后续。
+      if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, filteredApps, selectedIdx, launchApp, settingsOpen, enhOpen, enhResults, enhSelIdx, activateEnh]);
+  }, [visible, search, filteredApps, selectedIdx, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh]);
 
   return (
    <>
@@ -686,15 +779,25 @@ export default function App() {
       </header>
       <main className="main-area">
         <section className="app-panel">
-          <div className="section-label">应用启动器</div>
-          <div className="app-grid">
-            {filteredApps.map(({app,ranges},i)=>(
-              <div key={app.path} className={`app-tile${i===selectedIdx?" selected":""}`} onClick={e=>launchApp(app, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))} onMouseEnter={()=>setSelectedIdx(i)} title="单击打开">
-                <div className="app-tile-icon">{app.icon?<img src={app.icon} alt=""/>:<span>{app.name[0]}</span>}</div>
-                <span className="app-tile-label"><HighlightText text={app.name} ranges={ranges} /></span>
+          <div className="stage-section-header">
+            <span className="section-label">启动器</span>
+            <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title="添加应用">添加</button>
+          </div>
+          <div className="app-grid" ref={launcherDropRef}>
+            {/* 启动器=手动策展的收藏托盘（非自动扫描全量）。条目左键打开/启动，右键移除。键盘导航待后续。 */}
+            {launcher.map(it=>(
+              <div key={it.id} className="app-tile" onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
+                   onContextMenu={e=>openLauncherCtxMenu(e,it)} title={it.kind==="app"?"单击启动":"单击打开"}>
+                <div className="app-tile-icon">
+                  {it.kind==="app" && it.icon ? <img src={it.icon} alt=""/>
+                   : it.kind==="folder" ? <span>📁</span>
+                   : it.kind==="file" ? <span>{fi(it.ext??"")}</span>
+                   : <span>{it.name[0]}</span>}
+                </div>
+                <span className="app-tile-label">{it.name}</span>
               </div>
             ))}
-            {!filteredApps.length && <p className="empty-hint" style={{gridColumn:"1/-1"}}>{apps.length?"无匹配":"扫描中..."}</p>}
+            {!launcher.length && <p className="empty-hint" style={{gridColumn:"1/-1"}}>拖入或点「添加」收藏应用</p>}
           </div>
         </section>
         <section className="center-panel">
@@ -804,6 +907,30 @@ export default function App() {
           }) : <p className="empty-hint">{enhQuery.trim()?"无匹配":"输入以搜索"}</p>}
         </div>
       </div>
+      {/* ── 启动器「添加应用」picker（复用 settings-modal 样式 + enh-result 列表项）── */}
+      {pickerOpen && (
+        <div className="settings-mask" onClick={()=>{setPickerOpen(false);setPickerQuery("");}}>
+          <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
+            <div className="settings-head">
+              <span className="settings-title">添加应用</span>
+              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title="关闭" aria-label="关闭">×</button>
+            </div>
+            <div className="picker-search">
+              <svg className="search-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input ref={pickerInputRef} className="picker-search-input" autoFocus placeholder="搜索要添加的应用…" value={pickerQuery} onChange={e=>setPickerQuery(e.target.value)} spellCheck={false}/>
+            </div>
+            <div className="picker-list">
+              {pickerResults.length ? pickerResults.map(({app,ranges})=>(
+                <div key={app.path} className="enh-result" onClick={()=>addAppToLauncher(app)} title="点击添加到启动器">
+                  <div className="enh-result-icon">{app.icon? <img src={app.icon} alt=""/> : <span>{app.name[0]}</span>}</div>
+                  <span className="enh-result-label"><HighlightText text={app.name} ranges={ranges}/></span>
+                </div>
+              )) : <p className="empty-hint">{pickerQuery.trim()?"无匹配应用":"暂无可添加应用"}</p>}
+            </div>
+            <div className="picker-foot">点击添加，可连续添加；<kbd>Esc</kbd> 关闭</div>
+          </div>
+        </div>
+      )}
       {settingsOpen && (
         <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
           <div className="settings-modal" onClick={e=>e.stopPropagation()}>

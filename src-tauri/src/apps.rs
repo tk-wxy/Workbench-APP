@@ -483,3 +483,28 @@ fn str_to_wide(s: &str) -> Vec<u16> {
         .chain(std::iter::once(0))
         .collect()
 }
+
+// ── .lnk 快捷方式解析（供启动器拖入） ──────────────────────
+
+#[derive(serde::Serialize)]
+pub struct LnkInfo {
+    pub name: String,         // 去掉 .lnk 后缀的干净名称
+    pub path: String,         // 原始 .lnk 路径（ShellExecuteW 可直接执行）
+    pub icon: Option<String>, // base64 图标；提取失败为 null
+}
+
+#[tauri::command]
+pub fn resolve_lnk(path: String) -> LnkInfo {
+    let raw = std::path::Path::new(&path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.clone());
+    // 大小写不敏感去后缀
+    let name = if raw.to_lowercase().ends_with(".lnk") {
+        raw[..raw.len() - 4].to_string()
+    } else {
+        raw
+    };
+    let icon = extract_icon_base64(&path); // SHGetFileInfoW 自动解析 .lnk 图标
+    LnkInfo { name, path, icon }
+}
