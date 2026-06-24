@@ -69,7 +69,8 @@ npm run tauri build    # 打包
 - 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
 - `set_shadow(false)` 后透明窗 `WRY_WEBVIEW` 子窗填满外框（含隐形边框），底边落在 `outer.bottom` 会越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 量 `GetWindowRect`、越界则等量缩 inner 高度贴齐工作区底（动态测量、无硬编码）。详见 DECISIONS §5 延伸。
 
-### 文件搜索索引（`filesearch.rs`）
+### 扫描/索引一律后台预建（`filesearch.rs` 文件索引 · `start_apps_worker` 应用扫描）
+- **耗时预备工作（应用扫描、文件索引）一律挪到独立后台线程预建、前端只监听就绪事件**（`apps-ready` / `file-index-ready`），**绝不在呼出路径同步执行**。应用扫描曾绑在「前端首次 `visible` 时 invoke」，正好砸在首次呼出 → 卡（S4c 修，约 1.5s 移到后台）。前端 invoke 命令仅保留为**兜底**（事件错过时调，命中缓存近乎瞬时）。
 - **索引建立只在独立后台线程**（`start_index_worker` 内 `std::thread::spawn`），**永不经 Tauri 命令 / invoke / 阻塞 IPC/UI**；setup 阶段 spawn、先 `sleep(3s)` 再首次建索引，不等窗口/呼出。
 - **查询命令（`search_files`/`get_index_status`）只读内存、永不碰磁盘**（µs 级）。**双缓冲原子替换**：耗时的 `walkdir` 遍历**绝不持锁**，建完一次性换 Vec；`FILE_INDEX` 锁只罩「替换 Vec」「读 Vec」两个瞬间临界区。
 - `FILE_INDEX` 是**全新独立 Mutex**，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无任何交集、无锁序问题。要调遍历目录/深度/重建周期改 `filesearch.rs` 顶部命名常量。详见 DECISIONS §17。

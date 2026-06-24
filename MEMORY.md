@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-24（续41：增强搜索 S4b——Ctrl+K 接入文件系统结果，分组+分隔线+150ms 防抖）
+> **最后更新**：2026-06-24（续42：应用扫描 S4c——改后台预建 start_apps_worker + apps-ready 事件，消除首次呼出卡顿）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -14,7 +14,8 @@
 ## 0. 当前状态 / 下一步 〔快照〕
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索三区联动**（输入即同时过滤应用/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）
-- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——**S4a✓**（filesearch.rs 文件系统后台索引，仅 Rust）+ **S4b✓**（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖，纯前端）
+- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——**S4a✓**（filesearch.rs 文件系统后台索引，仅 Rust）+ **S4b✓**（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖，纯前端）+ **S4c✓**（应用扫描改后台预建，消除首次呼出卡顿）
+- **新增（续42，Rust 后台线程 + 前端兜底语义）**：**应用扫描后台预建 S4c**——把 ~1.5s 的开始菜单扫描+图标提取从「前端首次 visible 时同步 invoke」挪到 setup 阶段 `start_apps_worker` 后台线程（`lib.rs`，仿 `start_index_worker`，延迟 1s）调用现有 `scan_start_menu`（**逻辑一字不动**，顺带缓存 `APP_CACHE`）→ `emit("apps-ready", apps)`。前端加 `un6` 监听 `apps-ready` 填充 `apps`；首次 visible 改兜底语义（`appsRef.current.length===0` 才 invoke `scan_start_menu` 兜底，命中缓存 ~120µs）。`sortedApps`/搜索链 deps 含 apps、自动响应、零改动。**cargo check/clippy 零新增警告（8 基线不变）；临时单测实测后台扫 114 apps 1.47s、缓存命中 117µs 已验删；T1–T6 GUI 实测通过（2026-06-24，首次呼出无卡顿）**
 - **新增（续41，纯前端，零 Rust 改动）**：**增强搜索接入文件结果 S4b**——Ctrl+K 结果分两组：Tier 1（应用/中转，有查询 ≤10）在前 → `.enh-divider`「文件」分隔线 → Tier 2（`search_files` 文件 ≤20）在后，合并 ≤30。`EnhResult` 加 `fs` 支；`fsResults`/`indexReady` state；文件查询 **150ms 防抖** useEffect；`indexReady` 双来源（`file-index-ready` 事件 un5 + 打开时 `get_index_status` 兜底）；未就绪+有查询显示「文件索引建立中…」不阻塞 Tier 1。↑↓/Enter 跨组连续导航（divider 用 `Fragment` 不占索引）；文件激活走 `open_file`（不碰粘贴/焦点高危区）。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**（可顺带验 S4a 的 `[fileindex] ready` 日志）
 - **新增（续40，仅 Rust 后端，零前端改动）**：**文件系统索引 S4a**——新模块 `src-tauri/src/filesearch.rs`：独立后台线程 `start_index_worker`（setup 阶段 spawn，`sleep(3s)` 后用 `walkdir` 遍历 5 个默认目录 Desktop/Downloads/Documents/Pictures/Projects 建内存索引，30min 周期重建）；命令 `search_files(query,limit)` / `get_index_status()` 纯内存读 µs 级。**双缓冲原子替换**：耗时遍历不持锁，建完一次性换 Vec；`FILE_INDEX` 是全新独立 Mutex，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无交集。`lib.rs` 加 `mod filesearch` + handler 注册 + setup 启动线程。**cargo check + clippy 零新增警告（8 条基线不变，无一在 filesearch）；临时单测实测遍历 µs 级 + 跳过 node_modules/隐藏 + 查询排序正确后已删**；GUI 层（Ctrl+K 看文件结果）属 S4b 未验
 - **新增（续39）**：**.lnk 拖入启动器**——`inLauncher` 分支内对 `.lnk` 路径调用新命令 `resolve_lnk`（`apps.rs`）：复用 `extract_icon_base64` 提取图标（`SHGetFileInfoW` 自动解析 .lnk），去掉后缀取干净名称，存为 `kind:"app"` 条目。左键走 `launchApp → ShellExecuteW(.lnk)`，与扫描加入的 app 条目完全一致。非 .lnk 走原有 `get_file_info` 路径，行为不变。**cargo check + tsc 零错误已验；T1–T6 GUI 待实测**
@@ -158,6 +159,7 @@ src-tauri/Cargo.toml
 | `hotkey-show` / `hotkey-hide` | 热键 toggle 同步前端 visible 状态 |
 | `clipboard-update` | 后台监听检测到新剪贴板内容，实时推送 |
 | `file-index-ready` | 文件索引后台线程每次建/重建完成推送条目数（前端增强搜索据此置 indexReady）|
+| `apps-ready` | 应用扫描后台线程（start_apps_worker）扫完一次性推送 apps 列表（消除首次呼出卡顿）|
 | `files-dropped` | 原生拖入：`{paths,x,y}` 物理像素，前端判落点入启动器/中转 |
 
 ---
@@ -185,6 +187,14 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-24 (应用扫描改后台预建 S4c：start_apps_worker + apps-ready，消除首次呼出卡顿，续42)
+- **功能/根因**：开始菜单/桌面 .lnk 扫描 + 每个 `SHGetFileInfoW` 提图标实测约 **1.5s**，原绑在前端首次 `visible` 时 invoke `scan_start_menu`，正好砸在首次 Ctrl+Space 呼出那一刻 → 卡。改为后台预建（同 filesearch S4a 架构），呼出时 apps 已就绪。
+- **Rust**（`src-tauri/src/lib.rs`）：新增 `start_apps_worker(app)`——setup 阶段 spawn 后台线程，`sleep(1s)` 后调用现有 `apps::scan_start_menu()`（**扫描/图标逻辑一字不动**；其 `APP_CACHE` 顺带缓存；`do_scan` 的 COM init/uninit 在调用线程自包含，后台线程安全）→ `emit("apps-ready", apps)`。setup 内与 `filesearch::start_index_worker` 并列调用。`scan_start_menu`/`refresh_apps` 命令保留（前端兜底）。
+- **前端**（`src/App.tsx`）：① `[]`-effect 加 `un6` 监听 `apps-ready` → `setApps`；② 新增 `appsRef`（供 `[visible]` 闭包读最新 apps）；③ 首次 visible 的扫描改**兜底语义**——`!loadedRef.current` 守卫内仅当 `appsRef.current.length===0`（事件错过/未到）才 invoke `scan_start_menu` 兜底（命中 `APP_CACHE` ~120µs 近乎瞬时），否则跳过。
+- **不破坏**：`scan_start_menu`/`do_scan`/图标提取一字不动；窗口/焦点/热键/剪贴板/粘贴不碰；`start_apps_worker` 与 filesearch/clipboard/focus worker 并列独立；`sortedApps`/`filteredApps`/增强搜索/普通搜索/`appUsage`/`launchApp` deps 含 apps、自动响应、零改动。
+- **验证**：`cargo check` 零警告✓；`cargo clippy` 8 条基线不变✓；`tsc --noEmit` 零错误✓。**临时单测实测**（验证后已删，保留正式日志 `[apps] background scan: N apps in {elapsed}`）：后台扫 **114 apps / 1.47s**、二次缓存命中 **117.5µs**（前端兜底走的就是这条）。⚠️ bin 链接失败仅因运行中实例（PID 锁 exe），非代码问题，全 app 由用户跑。**T1–T6 GUI 实测通过（2026-06-24 用户确认）**：首次呼出无卡顿、增强/普通搜索/picker/排序/动画不受影响、兜底正常。
+- **文件**：`src-tauri/src/lib.rs`（+`start_apps_worker` +setup 调用）/ `src/App.tsx`（+un6 +appsRef +visible 兜底语义）/ `DECISIONS.md`（§17 追加）/ `CLAUDE.md`（扫描/索引后台预建约定扩写）/ `MEMORY.md`。
 
 ### 2026-06-24 (增强搜索接入文件结果 S4b：分组+分隔线+索引提示+150ms 防抖，续41，纯前端)
 - **功能**：Ctrl+K 增强搜索接入 S4a 的文件系统索引。结果分两组——Tier 1（应用 + 中转 file 条目，有查询时 ≤10）在前，`.enh-divider`「文件」分隔线，Tier 2（`search_files` 返回文件 ≤20）在后，合并列表 ≤30。

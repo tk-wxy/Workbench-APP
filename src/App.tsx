@@ -228,6 +228,7 @@ export default function App() {
   const clipCacheMaxRef = useRef(20); clipCacheMaxRef.current = clipCacheMax; // 供 clipboard-update 闭包读最新值
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
+  const appsRef = useRef<AppInfo[]>(apps); appsRef.current = apps; // 供 [visible] 兜底扫描闭包读最新 apps（apps-ready 是否已填充）
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const launcherRef = useRef<LauncherItem[]>(launcher); launcherRef.current = launcher; // 给 []-注册监听用（S3b 拖入落点会用到，先备好）
@@ -366,7 +367,9 @@ export default function App() {
         });
         // 文件索引就绪（S4b）：后台线程每次建/重建完成 emit 条目数，>0 视为就绪
         const un5 = await listen("file-index-ready", (e: any) => setIndexReady((e.payload ?? 0) > 0));
-        cleanup = [un1, un2, un3, un4, un5];
+        // 应用扫描就绪（S4c）：后台预扫线程扫完一次性推送 apps，呼出前填充、消除首次卡顿
+        const un6 = await listen("apps-ready", (e: any) => { const list = (e.payload ?? []) as AppInfo[]; if (list.length) setApps(list); });
+        cleanup = [un1, un2, un3, un4, un5, un6];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); };
@@ -384,17 +387,21 @@ export default function App() {
         }
       } catch {}
     })();
-    // 加载应用（首次加载后缓存，不再重复扫描）
+    // 应用列表：现由后台预扫线程（start_apps_worker）提前填充并 emit("apps-ready")，呼出时通常已就绪。
+    // 此处仅作兜底：首次 visible 时若 apps 仍空（apps-ready 还没到/被错过），才 invoke scan_start_menu
+    // 兜底（命中 APP_CACHE、近乎瞬时）；否则跳过、不重复扫描。
     if (!loadedRef.current) {
       loadedRef.current = true;
-      (async () => {
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const list = await invoke<AppInfo[]>("scan_start_menu");
-          // 不在此处定死顺序：排序交给 sortedApps（响应 appUsage 变化，刚用过的 app 下次浮上来）
-          setApps(list);
-        } catch {}
-      })();
+      if (appsRef.current.length === 0) {
+        (async () => {
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            const list = await invoke<AppInfo[]>("scan_start_menu");
+            // 不在此处定死顺序：排序交给 sortedApps（响应 appUsage 变化，刚用过的 app 下次浮上来）
+            if (list.length) setApps(list);
+          } catch {}
+        })();
+      }
     }
     setTimeout(() => searchRef.current?.focus(), 100);
   }, [visible]);
