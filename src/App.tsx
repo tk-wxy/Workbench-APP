@@ -222,6 +222,8 @@ export default function App() {
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
+  const [hotkeyCombo, setHotkeyCombo] = useState<"ctrl+space"|"ctrl+f12">("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
+  const [hotkeyError, setHotkeyError] = useState(""); // 切换失败提示（如被其他应用占用），3s 后自动清
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
   const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
   const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
@@ -283,7 +285,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(savedHotkey==="ctrl+space"||savedHotkey==="ctrl+f12") setHotkeyCombo(savedHotkey); /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -502,6 +504,12 @@ export default function App() {
       return matchItem(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
     });
   }, [clipboard, search]);
+  // 启动器过滤：有 search 时按名称模糊过滤，无 search 直接返回原列表（持久化/拖入/picker 行为不受影响）
+  const filteredLauncher = useMemo(() => {
+    const q = search.trim();
+    if (!q) return launcher;
+    return launcher.filter(it => matchItem(q, it.name, []));
+  }, [launcher, search]);
 
   // ── 操作函数 ──
   const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
@@ -603,6 +611,21 @@ export default function App() {
   const changeAutostart = useCallback(async (enable: boolean) => {
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke(enable?"plugin:autostart|enable":"plugin:autostart|disable"); setAutostartEnabled(enable); } catch{}
   }, []);
+  // 切换呼出热键：先 invoke set_hotkey（Rust 原子注册新组合，失败 throw）成功后再更新 state + 持久化。
+  // Rust 失败（如被占用）则保留旧组合工作，UI 红字提示 3s 后自清。
+  const changeHotkey = useCallback(async (next:"ctrl+space"|"ctrl+f12") => {
+    if (next === hotkeyCombo) return;
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      await invoke("set_hotkey", { combo: next });
+      setHotkeyCombo(next);
+      setHotkeyError("");
+      if (store) { await store.set("hotkey-combo", next); await store.save(); }
+    } catch (e:any) {
+      setHotkeyError(String(e));
+      setTimeout(() => setHotkeyError(""), 3000);
+    }
+  }, [hotkeyCombo, store]);
   const clearClipboard = useCallback(async () => {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
@@ -827,7 +850,7 @@ export default function App() {
           </div>
           <div className="app-grid" ref={launcherDropRef}>
             {/* 启动器=手动策展的收藏托盘（非自动扫描全量）。条目左键打开/启动，右键移除。键盘导航待后续。 */}
-            {launcher.map(it=>(
+            {filteredLauncher.map(it=>(
               <div key={it.id} className="app-tile" onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
                    onContextMenu={e=>openLauncherCtxMenu(e,it)} title={it.kind==="app"?"单击启动":"单击打开"}>
                 <div className="app-tile-icon">
@@ -839,7 +862,11 @@ export default function App() {
                 <span className="app-tile-label">{it.name}</span>
               </div>
             ))}
-            {!launcher.length && <p className="empty-hint" style={{gridColumn:"1/-1"}}>拖入或点「添加」收藏应用</p>}
+            {!filteredLauncher.length && (
+              <p className="empty-hint" style={{gridColumn:"1/-1"}}>
+                {launcher.length ? "无匹配" : "拖入或点「添加」收藏应用"}
+              </p>
+            )}
           </div>
         </section>
         <section className="center-panel">
@@ -1048,11 +1075,19 @@ export default function App() {
                 </>)}
                 {settingsTab==="hotkeys" && (<>
                   <div className="settings-panel-title">快捷键</div>
-                  <div className="settings-row"><span className="settings-row-label">呼出 / 隐藏</span><kbd>Ctrl+Space</kbd></div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">呼出 / 隐藏</span>
+                    <div className="seg">
+                      <button className={`seg-btn${hotkeyCombo==="ctrl+space"?" seg-active":""}`} onClick={()=>changeHotkey("ctrl+space")}>Ctrl + Space</button>
+                      <button className={`seg-btn${hotkeyCombo==="ctrl+f12"?" seg-active":""}`} onClick={()=>changeHotkey("ctrl+f12")}>Ctrl + F12</button>
+                    </div>
+                  </div>
+                  {hotkeyError && <p className="settings-hint settings-hint-error">{hotkeyError}</p>}
+                  {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>恢复默认</button>}
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
-                  <p className="settings-hint">当前快捷键暂不可自定义，后续版本开放配置。</p>
+                  <p className="settings-hint">长按 = 按住显示松开关闭；短按 = 切换显隐。</p>
                 </>)}
                 {settingsTab==="about" && (<>
                   <div className="settings-panel-title">关于</div>

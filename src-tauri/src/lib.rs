@@ -28,6 +28,11 @@ static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
 static CLIP_HISTORY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 /// 原图落盘目录（setup 阶段初始化）。未初始化时 save_clip_image_to_disk 静默跳过。
 static CLIP_IMAGE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// 自定义热键——轮询用的 VK 列表（setup 按 store 落地，set_hotkey 运行时原子切换）。
+/// start_hotkey_monitor 每拍读它判断 combo 是否按下；与其他锁无交集、无锁序问题。
+static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLock::new();
+/// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
+static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
 
 // ── 可调参数 ───────────────────────────────────────────────
 /// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
@@ -1016,6 +1021,58 @@ fn clear_clip_image_cache() -> Result<(), String> {
 // ── 入口 ───────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════════════
+//  自定义热键（V1）—— combo 白名单解析 + 运行时原子切换
+//
+//  两层硬编码统一收口：轮询层读 HOTKEY_VK_KEYS（VK 列表），注册层用 CURRENT_SHORTCUT。
+//  V1 仅 2 预设（Ctrl+Space / Ctrl+F12）；加新预设尤其三键组合须先按 DECISIONS §9 spike
+//  验证长短按语义在多键下的真实表现。Alt 系 / Alt+Space / Fn 是死路（DECISIONS §9）。
+// ════════════════════════════════════════════════════════════════════
+
+/// 白名单解析 combo 字符串 → (轮询 VK 列表, RegisterHotKey Shortcut)。未知组合返 Err。
+fn parse_combo(s: &str) -> Result<(Vec<u16>, Shortcut), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_F12, VK_SPACE};
+    match s {
+        "ctrl+space" => Ok((
+            vec![VK_CONTROL.0, VK_SPACE.0],
+            Shortcut::new(Some(Modifiers::CONTROL), Code::Space),
+        )),
+        "ctrl+f12" => Ok((
+            vec![VK_CONTROL.0, VK_F12.0],
+            Shortcut::new(Some(Modifiers::CONTROL), Code::F12),
+        )),
+        _ => Err(format!("unknown combo: {s}")),
+    }
+}
+
+/// setup 阶段同步读 store JSON（平凡顶层 KV）取 hotkey-combo。任何失败 → None，调用方兜底默认。
+/// 直接读文件而非经插件——setup 早于前端、需同步落地，避免启动空窗按错键。
+fn read_combo_from_store(app: &AppHandle) -> Option<String> {
+    let path = app.path().app_data_dir().ok()?.join("workbench-data.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("hotkey-combo")?.as_str().map(|s| s.to_string())
+}
+
+/// 运行时原子切换热键：先 register(new) 成功 → 再 unregister(old) → 再更新轮询 VK 与当前 Shortcut。
+/// 任一步失败则保持旧组合工作（new 注册失败直接返 Err，旧组合从未动）。不写 store——持久化
+/// 由前端负责（同 set_clip_cache_max 惯例）。
+#[tauri::command]
+fn set_hotkey(combo: String, app: AppHandle) -> Result<(), String> {
+    let (new_vk, new_shortcut) = parse_combo(&combo)?;
+    let old_shortcut = *CURRENT_SHORTCUT.get().unwrap().lock().unwrap();
+    if old_shortcut == new_shortcut {
+        return Ok(());
+    }
+    app.global_shortcut()
+        .register(new_shortcut)
+        .map_err(|e| format!("快捷键被其他应用占用：{e}"))?;
+    let _ = app.global_shortcut().unregister(old_shortcut); // 失败仅忽略，不中断（新已生效）
+    *HOTKEY_VK_KEYS.get().unwrap().lock().unwrap() = new_vk;
+    *CURRENT_SHORTCUT.get().unwrap().lock().unwrap() = new_shortcut;
+    Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════════
 //  热键监听 — GetAsyncKeyState 物理键态轮询（驱动 show/hide 的唯一真相）
 //
 //  为什么是轮询而非热键事件：历史上 rdev / WH_KEYBOARD_LL / RegisterHotKey 时长判定均失败
@@ -1032,7 +1089,7 @@ fn clear_clip_image_cache() -> Result<(), String> {
 //     show/hide 复刻 §8 路径配方（emit→show→延迟 set_focus / 纯 hide+emit）。
 // ════════════════════════════════════════════════════════════════════
 fn start_hotkey_monitor(app: AppHandle) {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL, VK_SPACE};
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState; // combo VK 列表改读 HOTKEY_VK_KEYS
 
     std::thread::spawn(move || {
         let window = match app.get_webview_window("main") {
@@ -1065,10 +1122,15 @@ fn start_hotkey_monitor(app: AppHandle) {
         let mut down_at: Option<std::time::Instant> = None;  // 当前这次按住的起点
         let mut visible_at_press = false;                    // 按下瞬间窗口是否已可见（区分 toggle 开/关）
 
-        println!("[hotkey] keystate monitor started poll={HOTKEY_POLL_MS}ms tap_max={HOTKEY_TAP_MAX_MS}ms keys=Ctrl+Space");
+        println!("[hotkey] keystate monitor started poll={HOTKEY_POLL_MS}ms tap_max={HOTKEY_TAP_MAX_MS}ms (combo from HOTKEY_VK_KEYS)");
 
         loop {
-            let combo = is_down(VK_CONTROL.0) && is_down(VK_SPACE.0);
+            // combo = 当前热键的所有 VK 同时按下。整个 25ms 循环里唯一加锁处，持锁仅 µs 级、
+            // 立即 drop；与 CLIPBOARD_LOCK/FILE_INDEX 等无交集，无锁序问题。
+            let combo = {
+                let keys = HOTKEY_VK_KEYS.get().unwrap().lock().unwrap();
+                keys.iter().all(|vk| is_down(*vk))
+            };
 
             if combo && !prev_combo {
                 // ── 按下沿 ──
@@ -1177,7 +1239,8 @@ pub fn run() {
             copy_text_to_clipboard, copy_image_to_clipboard, copy_files_to_clipboard,
             get_clip_cache_max, set_clip_cache_max,
             open_clip_image_dir, clear_clip_image_cache,
-            filesearch::search_files, filesearch::get_index_status
+            filesearch::search_files, filesearch::get_index_status,
+            set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -1189,9 +1252,15 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // 注册 Ctrl+Space 仅用于"消费"该键（防漏给前台：IME 切换 / 编辑器补全）；
-            // 实际 show/hide 由下面的物理键态轮询驱动（长按 momentary + 短按 toggle）
-            app.global_shortcut().register(Shortcut::new(Some(Modifiers::CONTROL), Code::Space))?;
+            // 自定义热键：同步读 store 落地（避免启动空窗按错键），失败/未知 combo 兜底默认 Ctrl+Space。
+            // 注册仅用于"消费"该键（防漏给前台：IME 切换 / 编辑器补全）；实际 show/hide 由下面的
+            // 物理键态轮询驱动（长按 momentary + 短按 toggle）。
+            let combo_str = read_combo_from_store(app.handle()).unwrap_or_else(|| "ctrl+space".into());
+            let (vk_keys, shortcut) =
+                parse_combo(&combo_str).unwrap_or_else(|_| parse_combo("ctrl+space").unwrap());
+            HOTKEY_VK_KEYS.set(Mutex::new(vk_keys)).ok();
+            CURRENT_SHORTCUT.set(Mutex::new(shortcut)).ok();
+            app.global_shortcut().register(shortcut)?;
             start_hotkey_monitor(app.handle().clone());
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }

@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-24（续42：应用扫描 S4c——改后台预建 start_apps_worker + apps-ready 事件，消除首次呼出卡顿）
+> **最后更新**：2026-06-25（续43：自定义热键 V1——2 预设 Ctrl+Space / Ctrl+F12，segmented 切换 + 运行时原子注册 + store 持久化）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -13,14 +13,14 @@
 
 ## 0. 当前状态 / 下一步 〔快照〕
 
-- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索三区联动**（输入即同时过滤应用/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）
-- **进行中**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ **S3c✓**（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——**S4a✓**（filesearch.rs 文件系统后台索引，仅 Rust）+ **S4b✓**（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖，纯前端）+ **S4c✓**（应用扫描改后台预建，消除首次呼出卡顿）
+- **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索四区联动**（输入即同时过滤启动台/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）+ **启动器收藏托盘**（手动策展持久化，app picker，.lnk 拖入提取图标存 kind:"app"，S3a/S3b/S3c GUI 实测通过 2026-06-25）+ **增强搜索接入文件系统**（Ctrl+K 分两组 Tier1+Tier2，文件结果分隔线+防抖+未就绪提示，filesearch.rs 后台索引，S4a/S4b/S4c GUI 实测通过 2026-06-25）+ **自定义热键 V1**（设置→快捷键 segmented 切换 Ctrl+Space / Ctrl+F12，两层硬编码收口到 `HOTKEY_VK_KEYS`/`CURRENT_SHORTCUT` 静态，`set_hotkey` 命令运行时原子注册，setup 同步读 store 落地无空窗，store 持久化）
+- **已完成（全部 GUI 实测通过）**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ S3c✓（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——S4a✓（filesearch.rs 文件系统后台索引）+ S4b✓（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖）+ S4c✓（应用扫描改后台预建，消除首次呼出卡顿）。**所有功能 2026-06-25 GUI 实测通过。**
 - **新增（续42，Rust 后台线程 + 前端兜底语义）**：**应用扫描后台预建 S4c**——把 ~1.5s 的开始菜单扫描+图标提取从「前端首次 visible 时同步 invoke」挪到 setup 阶段 `start_apps_worker` 后台线程（`lib.rs`，仿 `start_index_worker`，延迟 1s）调用现有 `scan_start_menu`（**逻辑一字不动**，顺带缓存 `APP_CACHE`）→ `emit("apps-ready", apps)`。前端加 `un6` 监听 `apps-ready` 填充 `apps`；首次 visible 改兜底语义（`appsRef.current.length===0` 才 invoke `scan_start_menu` 兜底，命中缓存 ~120µs）。`sortedApps`/搜索链 deps 含 apps、自动响应、零改动。**cargo check/clippy 零新增警告（8 基线不变）；临时单测实测后台扫 114 apps 1.47s、缓存命中 117µs 已验删；T1–T6 GUI 实测通过（2026-06-24，首次呼出无卡顿）**
-- **新增（续41，纯前端，零 Rust 改动）**：**增强搜索接入文件结果 S4b**——Ctrl+K 结果分两组：Tier 1（应用/中转，有查询 ≤10）在前 → `.enh-divider`「文件」分隔线 → Tier 2（`search_files` 文件 ≤20）在后，合并 ≤30。`EnhResult` 加 `fs` 支；`fsResults`/`indexReady` state；文件查询 **150ms 防抖** useEffect；`indexReady` 双来源（`file-index-ready` 事件 un5 + 打开时 `get_index_status` 兜底）；未就绪+有查询显示「文件索引建立中…」不阻塞 Tier 1。↑↓/Enter 跨组连续导航（divider 用 `Fragment` 不占索引）；文件激活走 `open_file`（不碰粘贴/焦点高危区）。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**（可顺带验 S4a 的 `[fileindex] ready` 日志）
-- **新增（续40，仅 Rust 后端，零前端改动）**：**文件系统索引 S4a**——新模块 `src-tauri/src/filesearch.rs`：独立后台线程 `start_index_worker`（setup 阶段 spawn，`sleep(3s)` 后用 `walkdir` 遍历 5 个默认目录 Desktop/Downloads/Documents/Pictures/Projects 建内存索引，30min 周期重建）；命令 `search_files(query,limit)` / `get_index_status()` 纯内存读 µs 级。**双缓冲原子替换**：耗时遍历不持锁，建完一次性换 Vec；`FILE_INDEX` 是全新独立 Mutex，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无交集。`lib.rs` 加 `mod filesearch` + handler 注册 + setup 启动线程。**cargo check + clippy 零新增警告（8 条基线不变，无一在 filesearch）；临时单测实测遍历 µs 级 + 跳过 node_modules/隐藏 + 查询排序正确后已删**；GUI 层（Ctrl+K 看文件结果）属 S4b 未验
-- **新增（续39）**：**.lnk 拖入启动器**——`inLauncher` 分支内对 `.lnk` 路径调用新命令 `resolve_lnk`（`apps.rs`）：复用 `extract_icon_base64` 提取图标（`SHGetFileInfoW` 自动解析 .lnk），去掉后缀取干净名称，存为 `kind:"app"` 条目。左键走 `launchApp → ShellExecuteW(.lnk)`，与扫描加入的 app 条目完全一致。非 .lnk 走原有 `get_file_info` 路径，行为不变。**cargo check + tsc 零错误已验；T1–T6 GUI 待实测**
+- **新增（续41，纯前端，零 Rust 改动）**：**增强搜索接入文件结果 S4b**——Ctrl+K 结果分两组：Tier 1（应用/中转，有查询 ≤10）在前 → `.enh-divider`「文件」分隔线 → Tier 2（`search_files` 文件 ≤20）在后，合并 ≤30。`EnhResult` 加 `fs` 支；`fsResults`/`indexReady` state；文件查询 **150ms 防抖** useEffect；`indexReady` 双来源（`file-index-ready` 事件 un5 + 打开时 `get_index_status` 兜底）；未就绪+有查询显示「文件索引建立中…」不阻塞 Tier 1。↑↓/Enter 跨组连续导航（divider 用 `Fragment` 不占索引）；文件激活走 `open_file`（不碰粘贴/焦点高危区）。**tsc 零错误已验；T1–T11 GUI 实测通过（2026-06-25）**（含 S4a `[fileindex] ready` 日志验证）
+- **新增（续40，仅 Rust 后端，零前端改动）**：**文件系统索引 S4a**——新模块 `src-tauri/src/filesearch.rs`：独立后台线程 `start_index_worker`（setup 阶段 spawn，`sleep(3s)` 后用 `walkdir` 遍历 5 个默认目录 Desktop/Downloads/Documents/Pictures/Projects 建内存索引，30min 周期重建）；命令 `search_files(query,limit)` / `get_index_status()` 纯内存读 µs 级。**双缓冲原子替换**：耗时遍历不持锁，建完一次性换 Vec；`FILE_INDEX` 是全新独立 Mutex，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无交集。`lib.rs` 加 `mod filesearch` + handler 注册 + setup 启动线程。**cargo check + clippy 零新增警告（8 条基线不变，无一在 filesearch）；临时单测实测遍历 µs 级 + 跳过 node_modules/隐藏 + 查询排序正确后已删**；GUI 层已通过 S4b 实测（2026-06-25）
+- **新增（续39）**：**.lnk 拖入启动器**——`inLauncher` 分支内对 `.lnk` 路径调用新命令 `resolve_lnk`（`apps.rs`）：复用 `extract_icon_base64` 提取图标（`SHGetFileInfoW` 自动解析 .lnk），去掉后缀取干净名称，存为 `kind:"app"` 条目。左键走 `launchApp → ShellExecuteW(.lnk)`，与扫描加入的 app 条目完全一致。非 .lnk 走原有 `get_file_info` 路径，行为不变。**cargo check + tsc 零错误已验；T1–T6 GUI 实测通过（2026-06-25）**
 - **新增（续38）**：**启动器 S3b**——外部文件拖入按松手坐标判定落点：启动器区（.app-grid）→入 `LauncherItem`（file/folder 持久化），中转区/区域外兜底→入 StageItem（原有行为）。落地区域 200ms drop-flash 闪烁确认。Rust 仅扩展 Drop emit payload 加 `{x,y}` 物理像素；前端 `÷ devicePixelRatio` 换算 CSS px 后与 `getBoundingClientRect()` 比对判区。**tsc 零错误、cargo check 零错误已验；T1–T8 GUI 实测通过（2026-06-24）**
-- **新增（续37，纯前端，零 Rust 改动）**：**启动器重设计 S3a**——左侧面板从「自动扫描全量平铺(filteredApps)」改为「手动策展的持久化收藏托盘」。新增独立类型 `LauncherItem`（kind=app/file/folder，与 `StageItem` 不可合并：左键动作由区决定——启动器=打开/启动，中转=取走粘贴）。持久化 store key `launcher-items`（`LAUNCHER_MAX=60`）。app picker 模态（复用 settings-modal + enh-result 样式，搜索去重连续添加，Esc 关闭）。右键条目「从启动器移除」/file·folder「打开所在目录」。**自动扫描链 `scan_start_menu/apps/sortedApps/filteredApps` 全保留**喂增强(Ctrl+K)/普通搜索，面板不再渲染。⚠️ 副作用：顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担）；普通页方向键失去可见目标（保留不删，Enter 加 `search 非空` 守卫防误启动）。`.app-panel` 600→360px、`.app-grid` 6→4 列、中转区相应变宽。**tsc 零错误已验；T1–T10 GUI 待 `npm run tauri dev` 实测**
+- **新增（续37，纯前端，零 Rust 改动）**：**启动器重设计 S3a**——左侧面板从「自动扫描全量平铺(filteredApps)」改为「手动策展的持久化收藏托盘」。新增独立类型 `LauncherItem`（kind=app/file/folder，与 `StageItem` 不可合并：左键动作由区决定——启动器=打开/启动，中转=取走粘贴）。持久化 store key `launcher-items`（`LAUNCHER_MAX=60`）。app picker 模态（复用 settings-modal + enh-result 样式，搜索去重连续添加，Esc 关闭）。右键条目「从启动器移除」/file·folder「打开所在目录」。**自动扫描链 `scan_start_menu/apps/sortedApps/filteredApps` 全保留**喂增强(Ctrl+K)/普通搜索，面板不再渲染。⚠️ 副作用：顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担）；普通页方向键失去可见目标（保留不删，Enter 加 `search 非空` 守卫防误启动）。`.app-panel` 600→360px、`.app-grid` 6→4 列、中转区相应变宽。**tsc 零错误已验；T1–T10 GUI 实测通过（2026-06-25）**
 - **新增（续23 GUI 实测通过）**：应用启动「放大暂留」动画（Mac 启动台式）——路线 B 克隆浮层 + 克制档 scale1.4/200ms，纯前端
 - **新增（续24 实测通过）**：剪贴板粘贴消失动画统一为「快速淡出露桌面」（纯前端）。启动+粘贴共用 `dismissing` 状态
 - **续25 已回退**：快捷键关闭也淡出——实测连续短按导致热键失灵/不灵敏，架构性冲突（淡出延长可见期破坏 toggle 的 is_visible 采样），已回退。详见下方记录 + CLAUDE.md 铁律警示
@@ -29,8 +29,9 @@
 - **新增（续30 GUI 实测通过，纯前端）**：剪贴板卡片**长按拖拽到中转区**——Pointer Events 方案 A（移动超 `DRAG_THRESHOLD_PX=8` 才激活，短按仍走 onClick 粘贴不拦截）。激活后跟手克隆 `.clip-drag-ghost`（渲染为 #overlay 兄弟节点，避开 backdrop-filter 的 fixed 包含块陷阱）+ 中转区 `.drop-area.drag-over` 高亮；落点命中→`addToStage`（不粘贴），命中外→取消。`suppressClickRef` 抑制激活后随之而来的 onClick 误粘贴；`#overlay.dragging{user-select:none}` 防长按泛蓝。📌 按钮/右键菜单/复制删除按钮全保留（PointerDown 检测 `.clip-actions` 内则跳过）。零 Rust 改动。**T9 tsc 零错误已验；T1–T8 为 GUI 交互、本环境无法驱动，未实测**
 - **新增（续31 GUI 实测通过，纯前端）**：剪贴板卡片 file 类型**按扩展名显示语义图标**——组件外纯函数 `getFileIcon(item: ClipItem)`，多文件→📦，依扩展名映射图片/视频/音频/压缩包/PDF/Office/代码/可执行/文本，兜底→📎。JSX 中 `file-clip-icon` 改为 `clip-file-icon`，调用 `getFileIcon`。CSS 新增 `.clip-file-icon`（1.25rem）。text/image 类型及卡片其余逻辑不变
 - **新增（续32 GUI 实测通过，纯前端）**：**开机自启**——设置 → 常规 tab 新增「开机自启」开/关 seg 控件。`tauri-plugin-autostart`（已内置）通过 `plugin:autostart|enable/disable/is_enabled` 命令写/读 Windows 注册表开机启动项。启动时自动读取当前状态填充 UI；切换即时生效。零 Rust 改动
-- **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 待 `npm run tauri dev` 实测**
-- **下一步**：S4 实测（`npm run tauri dev` 跑 T1–T11 + 看 `[fileindex] ready` 日志）。可选增强：文件结果右键「打开所在目录」(`reveal_in_explorer`)、文件查询纳入高亮（Rust 回传命中区间）、索引目录可配置。启动器键盘导航；file/folder 收藏的非拖入入口（如选择对话框）。增强搜索 Tier 2 剩余（剪贴板条目纳入）。**拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）。阶段 3 可选：文件「复制固化一份」防源删失效；设置面板继续扩项；T9 渲染进程重建后拖入失效（已知罕见限制）
+- **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 实测通过（2026-06-25）**
+- **下一步（候选，无阻塞）**：① 启动器键盘导航（←→↑↓ + Enter）；② 文件结果右键「打开所在目录」(`reveal_in_explorer`) + 高亮区间回传（Rust 回传命中 ranges）；③ 索引目录可配置（设置面板扩项）；④ 增强搜索 Tier 2 剩余（剪贴板条目纳入）；⑤ file/folder 收藏的非拖入入口（如文件选择对话框）；⑥ **拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）；⑦ T9 渲染进程重建后拖入失效（已知罕见限制，低优先级）
+- **新增（2026-06-25，纯前端，零 Rust 改动）**：**顶栏 search 联动启动台过滤**——`filteredLauncher` useMemo（`search` 非空时 `launcher.filter(it => matchItem(q, it.name, []))`，空时直接返回 launcher）；JSX 数据源 `launcher.map` → `filteredLauncher.map`；空态 hint 区分「无收藏：拖入或点添加」vs「有收藏但无匹配：无匹配」。「＋ 添加」卡片不参与过滤（始终在 launcher-add 独立渲染）。**tsc 零错误✓；GUI 实测通过（2026-06-25）**
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -152,6 +153,7 @@ src-tauri/Cargo.toml
 | `search_files` | 文件系统搜索：纯内存子串打分查询后台索引（µs 级，限 50 条）|
 | `get_index_status` | 返回文件索引状态 `{ready,count}`（前端显示「建立中…」用）|
 | `resolve_lnk` | 解析 .lnk 快捷方式：提取图标 + 去后缀名称（拖入启动器存 kind:"app"）|
+| `set_hotkey` | 运行时切换呼出热键：白名单 parse_combo → register(new) 成功 → unregister(old) → 更新 HOTKEY_VK_KEYS/CURRENT_SHORTCUT；失败保留旧组合并 Err；不写 store（持久化前端负责）|
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
@@ -188,6 +190,15 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 
 ## 九、变更记录 〔追加〕
 
+### 2026-06-25 (自定义热键 V1：2 预设 Ctrl+Space / Ctrl+F12，运行时原子注册 + store 持久化，续43)
+- **功能**：设置→快捷键 tab 新增 segmented control（Ctrl+Space 默认 / Ctrl+F12），切换即时生效、重启保留。把原本硬编码在「轮询层 + 注册层」两处的 Ctrl+Space 统一收口到两个静态，运行时可切换。
+- **预备验证（动手前实测，关键）**：① store = `%APPDATA%/Roaming/com.workbench.app/workbench-data.json`，**平凡顶层 KV JSON** → setup 阶段 `std::fs::read_to_string` + `serde_json` **同步读可行**，无需前端 invoke 兜底（启动无空窗）；② `Shortcut` = `global_hotkey::HotKey`，derive `Clone+Copy+PartialEq+Eq+Hash` → 直接存 `Shortcut`、不必降级存 String；③ `VK_F12` 在 `windows::Win32::UI::Input::KeyboardAndMouse`（=123），与 VK_CONTROL/VK_SPACE 同模块。
+- **Rust**（`src-tauri/src/lib.rs`）：新增 2 静态 `HOTKEY_VK_KEYS: OnceLock<Mutex<Vec<u16>>>`（轮询用 VK 列表）+ `CURRENT_SHORTCUT: OnceLock<Mutex<Shortcut>>`（反注册旧组合用）；新增 `parse_combo(s)`（白名单 "ctrl+space"/"ctrl+f12" → (VK列表, Shortcut)，未知返 Err）、`read_combo_from_store(app)`（同步读 store JSON，任何失败 →None）、命令 `set_hotkey(combo)`（先 register(new) 成功→unregister(old)→更新 2 静态；任一步失败保留旧组合；**不写 store**，持久化前端负责）。轮询循环**仅改 combo 检测一行**：`is_down(VK_CONTROL.0)&&is_down(VK_SPACE.0)` → 读 `HOTKEY_VK_KEYS` 锁内 `keys.iter().all(|vk| is_down(*vk))`（25ms 循环唯一加锁处，持锁 µs 级立即 drop，与其他锁无交集）。setup：register 前先 `read_combo_from_store` 落地 + init 2 静态，register 改用解析出的 shortcut。`generate_handler!` 追加 `set_hotkey`。
+- **前端**（`src/App.tsx` + `src/App.css`）：state `hotkeyCombo`/`hotkeyError`；store 加载块读 `hotkey-combo` 填 state（**不 invoke**，Rust setup 已落地）；`changeHotkey(next)` callback（invoke `set_hotkey` 成功才更 state + 写 store，失败红字提示 3s 自清）；快捷键 tab JSX 占位文字 → segmented + 「恢复默认」按钮 + 错误提示，复用 `.seg/.seg-btn/.seg-active/.settings-action`；CSS 仅加 `.settings-hint-error{color:#ef4444}`。
+- **不破坏**：show 路径三约束、长短按判定（HOTKEY_TAP_MAX_MS）、momentary/toggle 语义、按下/松开沿检测、tray_toggle、light dismiss、RegisterHotKey 空 handler、所有锁、其他 settings tab、其他 store key——全未动。`HOTKEY_TAP_MAX_MS`/`HOTKEY_POLL_MS` 常量原值不变。
+- **验证**：`cargo check --lib` 0 警告✓；`cargo clippy --lib` 8 警告（基线不变，过程中曾因 `&app.handle()` needless borrow 多 1 条、已修）✓；`tsc --noEmit` 0 错误✓。**GUI T1–T9 实测通过（2026-06-25）**（T1 默认长短按正常 / T2 切 F12 后 Space 失效·F12 生效 / T3 重启立即按 F12 即生效，同步读 store 无空窗 / T4 切回 Space / T5 恢复默认 / T6 切换无抖动·白闪·开即关 / T7 light dismiss / T8 Esc / T9 占用冲突红字提示）。
+- **文件**：`src-tauri/src/lib.rs`（+2 静态 +parse_combo +read_combo_from_store +set_hotkey +轮询 1 行 +setup 落地 +handler 注册）/ `src/App.tsx`（+2 state +store 加载 +changeHotkey +tab JSX）/ `src/App.css`（+`.settings-hint-error`）/ `DECISIONS.md` §9 / `CLAUDE.md` 全局热键节 / `MEMORY.md`。
+
 ### 2026-06-24 (应用扫描改后台预建 S4c：start_apps_worker + apps-ready，消除首次呼出卡顿，续42)
 - **功能/根因**：开始菜单/桌面 .lnk 扫描 + 每个 `SHGetFileInfoW` 提图标实测约 **1.5s**，原绑在前端首次 `visible` 时 invoke `scan_start_menu`，正好砸在首次 Ctrl+Space 呼出那一刻 → 卡。改为后台预建（同 filesearch S4a 架构），呼出时 apps 已就绪。
 - **Rust**（`src-tauri/src/lib.rs`）：新增 `start_apps_worker(app)`——setup 阶段 spawn 后台线程，`sleep(1s)` 后调用现有 `apps::scan_start_menu()`（**扫描/图标逻辑一字不动**；其 `APP_CACHE` 顺带缓存；`do_scan` 的 COM init/uninit 在调用线程自包含，后台线程安全）→ `emit("apps-ready", apps)`。setup 内与 `filesearch::start_index_worker` 并列调用。`scan_start_menu`/`refresh_apps` 命令保留（前端兜底）。
@@ -205,7 +216,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **JSX**：渲染用全局连续索引 `i` 比对 `enhSelIdx`；`i===enhTier1.length && enhTier1.length>0` 时此项前插 `.enh-divider`（用 `Fragment` 包裹 divider+result，divider 不占 result 索引 → ↑↓/Enter 跨组连续）；fs 图标 `isDir?📁:fi(ext)`、badge「文件」、`ranges=[]`（Rust 侧子串匹配未回传位置）。索引未就绪+有查询时搜索框下显示「文件索引建立中…」（不阻塞 Tier 1）。`hotkey-hide` 复位加 `setFsResults([])`。
 - **CSS**：`.enh-divider`（小写灰字分组标签）+ `.enh-index-hint`（斜体灰字，宽度对齐 `min(640px,80%)` 结果列）。文件结果项复用 `.enh-result`/`.enh-result-badge`。
 - **不破坏**：普通搜索三区联动/启动器/中转/剪贴板/设置不受影响；增强搜索 Tier 1 渲染、键盘导航、Esc 退出、Ctrl+K toggle 保持；索引未就绪不阻塞 Tier 1。
-- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T11 GUI 待 `npm run tauri dev` 实测**（文件结果分组/分隔线/图标/badge、↑↓ 跨组连续、Enter/单击 open_file、文件夹 open_file、未就绪「建立中…」+Tier1 照常、就绪后文件结果出、上限 20/防抖/清空/Esc 退出）；可顺带验 S4a `[fileindex] ready` 日志。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T11 GUI 实测通过（2026-06-25）**（文件结果分组/分隔线/图标/badge、↑↓ 跨组连续、Enter/单击 open_file、文件夹 open_file、未就绪「建立中…」+Tier1 照常、就绪后文件结果出、上限 20/防抖/清空/Esc 退出；含 S4a `[fileindex] ready` 日志验证）。
 - **文件**：`src/App.tsx`（+fs 支 +2 state +un5 +防抖/状态 effect +enhResults 拆分 +activateEnh fs +JSX 分组）/ `src/App.css`（+`.enh-divider` +`.enh-index-hint`）/ `DECISIONS.md`（§17 追加前端分组渲染）/ `MEMORY.md`。
 
 ### 2026-06-24 (文件系统索引 S4a：filesearch.rs 后台预建内存索引，续40，仅 Rust)
@@ -218,7 +229,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
   - `#[tauri::command] search_files(query,limit)`：纯内存子串打分（越靠前+名越短+前缀加分），`take(limit.min(50))`；`get_index_status()` 返回 `{ready,count}`。
 - **lib.rs**：顶部 `mod filesearch;`；`generate_handler!` 加 `filesearch::search_files, filesearch::get_index_status`；setup 内 `dragdrop::register_drag_drop` 后加 `filesearch::start_index_worker(app.handle().clone())`。
 - **三道不卡前端保险**（DECISIONS §17）：① 索引只在后台线程、永不经命令/invoke；② 查询只读内存、不碰磁盘；③ 双缓冲原子替换、锁只罩替换/读取瞬间临界区。
-- **验证**：`cargo check` 零警告✓；`cargo clippy` 8 条基线不变、无一在 filesearch✓；**临时单测实测**（验证后已删，仅保留正式日志 `[fileindex] ready: N entries (elapsed)`）：`build_index` 5 条目 390µs、node_modules 子树与隐藏文件正确跳过、`search_files("report")` 7.4µs 返回且短名前缀优先、limit/空查询守卫正确。⚠️ **bin 链接失败仅因运行中实例（PID 锁住 workbench_app.exe），非代码问题；lib 编译干净**。GUI 层（Ctrl+K 看文件结果）属 S4b 未验。
+- **验证**：`cargo check` 零警告✓；`cargo clippy` 8 条基线不变、无一在 filesearch✓；**临时单测实测**（验证后已删，仅保留正式日志 `[fileindex] ready: N entries (elapsed)`）：`build_index` 5 条目 390µs、node_modules 子树与隐藏文件正确跳过、`search_files("report")` 7.4µs 返回且短名前缀优先、limit/空查询守卫正确。⚠️ **bin 链接失败仅因运行中实例（PID 锁住 workbench_app.exe），非代码问题；lib 编译干净**。GUI 层（Ctrl+K 看文件结果）已通过 S4b 实测（2026-06-25）。
 - **文件**：`src-tauri/src/filesearch.rs`（新增）/ `src-tauri/src/lib.rs`（+mod +注册 +线程启动）/ `DECISIONS.md`（§17 新增 + 目录）/ `CLAUDE.md`（文件搜索不变量补一句）/ `MEMORY.md`。
 
 ### 2026-06-24 (.lnk 拖入启动器：resolve_lnk 提取图标+干净名称存 kind:"app"，续39)
@@ -227,7 +238,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **前端**（`App.tsx`，仅改 `inLauncher` 分支内部）：在路径 `p` 判断 `.lnk` 后缀，走 `invoke("resolve_lnk")` 或 `invoke("get_file_info")` 两条 if-else 分支；去重改为检查原始路径 `x.path === p`（`invoke` 前即检，避免无效请求）。
 - **CSS 零改动**：`kind:"app"` 复用现有 `app-tile-icon img` 渲染路径，icon 为 null 时自动走首字母兜底（已有逻辑）。
 - **不碰**：`extract_icon_base64` 函数体、`dragdrop.rs` 注册、`openLauncherItem`、picker、持久化加载、S3b 落点判定逻辑。
-- **验证**：`cargo check` 零错误✓；`tsc --noEmit` 零错误✓。**T1–T6 GUI 待 `npm run tauri dev` 实测**（.lnk 图标/名称/启动/持久化/去重；非 .lnk 行为不变；icon=null 首字母兜底）。
+- **验证**：`cargo check` 零错误✓；`tsc --noEmit` 零错误✓。**T1–T6 GUI 实测通过（2026-06-25）**（.lnk 图标/名称/启动/持久化/去重；非 .lnk 行为不变；icon=null 首字母兜底正常）。
 - **文件**：`src-tauri/src/apps.rs`（+LnkInfo struct +resolve_lnk 命令）/ `src-tauri/src/lib.rs`（+注册）/ `src/App.tsx`（inLauncher 分支改 .lnk 判断）/ `DECISIONS.md` §16 / `MEMORY.md`。
 
 ### 2026-06-24 (启动器 S3b：外部文件拖入落点双区判定 + drop-flash 确认动画，续38)
@@ -257,7 +268,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **扫描链全保留**：`scan_start_menu/apps/sortedApps/filteredApps` 不动，喂 Ctrl+K 增强搜索 + 普通搜索数据链；面板不再渲染 `filteredApps`。
 - **⚠️ 设计副作用**（已知、有意）：① 顶栏普通搜索不再过滤左侧应用区（应用搜索改由 Ctrl+K 承担，`filteredStage`/`filteredClip` 中转·剪贴板过滤照常）；② 普通页方向键失去可见目标，保留 handler 不删，Enter 加 `search.trim()` 守卫防空查询误启动隐藏 `filteredApps[0]`；launcher 键盘导航待后续。
 - **布局**：`.app-panel` 600→360px、`.app-grid` `repeat(6→4,1fr)`，中转区(flex:1)相应变宽；新增 `.launcher-add`/`.picker-*` 样式（复用 token，零改现有类）。
-- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 待 `npm run tauri dev` 实测**（picker 添加/去重/连续添加/Esc、app 条目启动动画、右键移除、重启持久化、Ctrl+K 与普通搜索不受影响、空 search Enter 不误启动、布局协调）。**file/folder 条目暂无添加入口**（picker 只加 app）→ 其右键「打开所在目录」需 S3b 拖入后或手动构造数据验证，如实标注。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 实测通过（2026-06-25）**（picker 添加/去重/连续添加/Esc、app 条目启动动画、右键移除、重启持久化、Ctrl+K 与普通搜索不受影响、空 search Enter 不误启动、布局协调正常）。
 - **文件**：`src/App.tsx` / `src/App.css` / `DECISIONS.md` / `CLAUDE.md` / `MEMORY.md`。
 
 ### 2026-06-24 (顶栏普通搜索 → 三区联动过滤，续36，纯前端，零 Rust 改动)
@@ -268,7 +279,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **placeholder** 改「搜索应用、中转、剪贴板…」。
 - **不破坏**：三区点击/右键/拖拽/中转多选(基于 id)/剪贴板 handler(基于对象+time) 不受过滤影响。
 - **bug 修复（用户实测反馈，续36b）**：中转区 Shift 区间选 + **同时有 search 过滤** 时会遗漏锚点起始项——根因 `handleStageClick` shift 分支用 `stage.slice(全量索引)`，而 idx/anchor 均为 `filteredStage` 索引。改为 `filteredStage.slice(...)`（deps `stage`→`filteredStage`）。无 search 时 `filteredStage===stage`，原行为不变。
-- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 待 `npm run tauri dev` 实测**（各区名称过滤/类型词"图片""txt""pdf"命中/清空恢复/独立空态/过滤态交互不破坏/Ctrl+K 不清 search）。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T10 GUI 实测通过（2026-06-25）**（各区名称过滤/类型词"图片""txt""pdf"命中/清空恢复/独立空态/过滤态交互不破坏/Ctrl+K 不清 search 全部正常）。
 - **文件**：`src/App.tsx` / `DECISIONS.md`（§15 补两套搜索分工）/ `MEMORY.md`。
 
 ### 2026-06-24 (增强搜索独立全屏页 Ctrl+K，续35，纯前端，零 Rust 改动)
@@ -280,7 +291,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **键盘**（全局 onKey）：Esc 链插入 enhOpen（ctxMenu→**enhOpen**→stageSel→settings→关窗）；新增 Ctrl+K toggle；`if(enhOpen){↑↓/Enter 接管;return}` 屏蔽 launcher 导航（字母键不拦截）。deps 增 `enhOpen/enhResults/enhSelIdx/activateEnh`。`hotkey-hide` 复位 enh 三 state。
 - **JSX**：`.enh-layer` 始终挂载、靠 `.enh-open` class 切显隐（沿用 overlay-visible/hidden 模式避免卸载闪烁），放 `</main>` 后、settings 模态前。复用 `HighlightText`/`fi()`。
 - **CSS**（`App.css`）：`.enh-*` 一组，复用现有 token（--bg/--hover/--border/--text/--text3/--fill-2/--accent/--font），160ms 淡入上浮，不改任何现有类。
-- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T11 GUI 清单需用户 `npm run tauri dev` 实测**（Ctrl+K 进入/丝滑切换/自动聚焦/↑↓Enter/中转 badge/高亮/空查询兜底/Esc 两级退出/复位/light dismiss 不串扰）。
+- **验证**：`tsc --noEmit` 零错误（静态✓）。**T1–T11 GUI 实测通过（2026-06-25）**（Ctrl+K 进入/丝滑切换/自动聚焦/↑↓Enter/中转 badge/高亮/空查询兜底/Esc 两级退出/复位/light dismiss 不串扰全部正常）。
 - **文件**：`src/App.tsx` / `src/App.css` / `DECISIONS.md`（§窗口补设计取舍）/ `MEMORY.md`。
 
 ### 2026-06-23 (中转区多选 UX 重设计，续34b，纯前端，零 Rust 改动)
