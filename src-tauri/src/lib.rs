@@ -1021,27 +1021,95 @@ fn clear_clip_image_cache() -> Result<(), String> {
 // ── 入口 ───────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════════════
-//  自定义热键（V1）—— combo 白名单解析 + 运行时原子切换
+//  自定义热键（V2-1）—— 表驱动任意组合解析 + 运行时原子切换
 //
-//  两层硬编码统一收口：轮询层读 HOTKEY_VK_KEYS（VK 列表），注册层用 CURRENT_SHORTCUT。
-//  V1 仅 2 预设（Ctrl+Space / Ctrl+F12）；加新预设尤其三键组合须先按 DECISIONS §9 spike
-//  验证长短按语义在多键下的真实表现。Alt 系 / Alt+Space / Fn 是死路（DECISIONS §9）。
+//  两层编码：VK 供 GetAsyncKeyState 轮询（HOTKEY_VK_KEYS），Shortcut 供 RegisterHotKey
+//  消费（CURRENT_SHORTCUT）。blocklist: win/super/meta（OS 吞）/ alt 系（WebView2 菜单栏
+//  激活死路，DECISIONS §9）。必须含 Ctrl；可选 Shift；恰一个主键（a-z/0-9/f1-f12/space/
+//  方向键，共 53 条）。三键长短按语义由 start_hotkey_monitor 状态机天然支持——spike B GUI 待实测。
 // ════════════════════════════════════════════════════════════════════
 
-/// 白名单解析 combo 字符串 → (轮询 VK 列表, RegisterHotKey Shortcut)。未知组合返 Err。
-fn parse_combo(s: &str) -> Result<(Vec<u16>, Shortcut), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_F12, VK_SPACE};
-    match s {
-        "ctrl+space" => Ok((
-            vec![VK_CONTROL.0, VK_SPACE.0],
-            Shortcut::new(Some(Modifiers::CONTROL), Code::Space),
-        )),
-        "ctrl+f12" => Ok((
-            vec![VK_CONTROL.0, VK_F12.0],
-            Shortcut::new(Some(Modifiers::CONTROL), Code::F12),
-        )),
-        _ => Err(format!("unknown combo: {s}")),
+/// 主键 token（全小写）→ (GetAsyncKeyState VK 码, RegisterHotKey Code)。
+/// 支持 a-z / 0-9 / f1-f12 / space / up/down/left/right（53 条）。
+fn key_token(tok: &str) -> Option<(u16, Code)> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
+        VK_A, VK_B, VK_C, VK_D, VK_E, VK_F, VK_G, VK_H, VK_I, VK_J,
+        VK_K, VK_L, VK_M, VK_N, VK_O, VK_P, VK_Q, VK_R, VK_S, VK_T,
+        VK_U, VK_V, VK_W, VK_X, VK_Y, VK_Z,
+        VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
+        VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12,
+        VK_SPACE, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
+    };
+    Some(match tok {
+        "a" => (VK_A.0, Code::KeyA),   "b" => (VK_B.0, Code::KeyB),
+        "c" => (VK_C.0, Code::KeyC),   "d" => (VK_D.0, Code::KeyD),
+        "e" => (VK_E.0, Code::KeyE),   "f" => (VK_F.0, Code::KeyF),
+        "g" => (VK_G.0, Code::KeyG),   "h" => (VK_H.0, Code::KeyH),
+        "i" => (VK_I.0, Code::KeyI),   "j" => (VK_J.0, Code::KeyJ),
+        "k" => (VK_K.0, Code::KeyK),   "l" => (VK_L.0, Code::KeyL),
+        "m" => (VK_M.0, Code::KeyM),   "n" => (VK_N.0, Code::KeyN),
+        "o" => (VK_O.0, Code::KeyO),   "p" => (VK_P.0, Code::KeyP),
+        "q" => (VK_Q.0, Code::KeyQ),   "r" => (VK_R.0, Code::KeyR),
+        "s" => (VK_S.0, Code::KeyS),   "t" => (VK_T.0, Code::KeyT),
+        "u" => (VK_U.0, Code::KeyU),   "v" => (VK_V.0, Code::KeyV),
+        "w" => (VK_W.0, Code::KeyW),   "x" => (VK_X.0, Code::KeyX),
+        "y" => (VK_Y.0, Code::KeyY),   "z" => (VK_Z.0, Code::KeyZ),
+        "0" => (VK_0.0, Code::Digit0), "1" => (VK_1.0, Code::Digit1),
+        "2" => (VK_2.0, Code::Digit2), "3" => (VK_3.0, Code::Digit3),
+        "4" => (VK_4.0, Code::Digit4), "5" => (VK_5.0, Code::Digit5),
+        "6" => (VK_6.0, Code::Digit6), "7" => (VK_7.0, Code::Digit7),
+        "8" => (VK_8.0, Code::Digit8), "9" => (VK_9.0, Code::Digit9),
+        "f1"    => (VK_F1.0,  Code::F1),  "f2"  => (VK_F2.0,  Code::F2),
+        "f3"    => (VK_F3.0,  Code::F3),  "f4"  => (VK_F4.0,  Code::F4),
+        "f5"    => (VK_F5.0,  Code::F5),  "f6"  => (VK_F6.0,  Code::F6),
+        "f7"    => (VK_F7.0,  Code::F7),  "f8"  => (VK_F8.0,  Code::F8),
+        "f9"    => (VK_F9.0,  Code::F9),  "f10" => (VK_F10.0, Code::F10),
+        "f11"   => (VK_F11.0, Code::F11), "f12" => (VK_F12.0, Code::F12),
+        "space" => (VK_SPACE.0, Code::Space),
+        "up"    => (VK_UP.0,    Code::ArrowUp),
+        "down"  => (VK_DOWN.0,  Code::ArrowDown),
+        "left"  => (VK_LEFT.0,  Code::ArrowLeft),
+        "right" => (VK_RIGHT.0, Code::ArrowRight),
+        _ => return None,
+    })
+}
+
+/// combo 串解析 → (轮询 VK 列表, RegisterHotKey Shortcut)。
+/// 格式：全小写 '+' 分隔，修饰在前主键在后，如 "ctrl+space" / "ctrl+shift+f" / "ctrl+down"。
+fn parse_combo(combo: &str) -> Result<(Vec<u16>, Shortcut), String> {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT};
+    let lower = combo.to_lowercase();
+    let tokens: Vec<&str> = lower.split('+').map(str::trim).collect();
+    if tokens.iter().any(|t| matches!(*t, "win" | "super" | "meta" | "windows")) {
+        return Err("不支持 Win 键".into());
     }
+    if tokens.iter().any(|t| matches!(*t, "alt" | "option")) {
+        return Err("暂不支持 Alt 组合".into());
+    }
+    if !tokens.iter().any(|t| matches!(*t, "ctrl" | "control")) {
+        return Err("快捷键必须包含 Ctrl".into());
+    }
+    let has_shift = tokens.contains(&"shift");
+    let main_keys: Vec<&str> = tokens.iter()
+        .copied()
+        .filter(|t| !matches!(*t, "ctrl" | "control" | "shift"))
+        .collect();
+    if main_keys.len() != 1 {
+        return Err("需要且只能有一个主键".into());
+    }
+    let main_tok = main_keys[0];
+    let (main_vk, code) = key_token(main_tok)
+        .ok_or_else(|| format!("不支持的键：{main_tok}"))?;
+    let mods = if has_shift {
+        Modifiers::CONTROL | Modifiers::SHIFT
+    } else {
+        Modifiers::CONTROL
+    };
+    let mut vk_list = vec![VK_CONTROL.0];
+    if has_shift { vk_list.push(VK_SHIFT.0); }
+    vk_list.push(main_vk);
+    Ok((vk_list, Shortcut::new(Some(mods), code)))
 }
 
 /// setup 阶段同步读 store JSON（平凡顶层 KV）取 hotkey-combo。任何失败 → None，调用方兜底默认。
@@ -1065,7 +1133,7 @@ fn set_hotkey(combo: String, app: AppHandle) -> Result<(), String> {
     }
     app.global_shortcut()
         .register(new_shortcut)
-        .map_err(|e| format!("快捷键被其他应用占用：{e}"))?;
+        .map_err(|_| "组合被占用或系统不可用".to_string())?;
     let _ = app.global_shortcut().unregister(old_shortcut); // 失败仅忽略，不中断（新已生效）
     *HOTKEY_VK_KEYS.get().unwrap().lock().unwrap() = new_vk;
     *CURRENT_SHORTCUT.get().unwrap().lock().unwrap() = new_shortcut;
