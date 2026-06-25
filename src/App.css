@@ -69,8 +69,8 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .section-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text3);padding:16px 16px 8px;flex-shrink:0;}
 
 /* ── 左：应用启动器（图标宫格）── */
-.app-panel{width:600px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;}
-.app-grid{flex:1;overflow-y:auto;padding:4px 8px 8px;display:grid;grid-template-columns:repeat(6,1fr);gap:4px;align-content:start;}
+.app-panel{width:360px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;}
+.app-grid{flex:1;overflow-y:auto;padding:4px 8px 8px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;align-content:start;}
 .app-tile{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;cursor:pointer;transition:background 60ms;min-width:0;}
 .app-tile:hover,.app-tile.selected{background:var(--hover);}
 .app-tile-icon{width:48px;height:48px;border-radius:10px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
@@ -135,6 +135,9 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 #overlay.dragging{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 /* 中转区接收高亮 */
 .drop-area.drag-over{border:2px dashed var(--accent,#60a5fa);background:rgba(96,165,250,0.06);transition:background 0.1s;}
+/* OLE 拖入落地闪烁确认（200ms，两区共用） */
+.drop-area.drop-flash,.app-grid.drop-flash{animation:drop-flash 200ms ease-out;}
+@keyframes drop-flash{0%{background:rgba(0,120,212,0.18);}100%{background:transparent;}}
 /* 跟手克隆 */
 .clip-drag-ghost{background:var(--fill-2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;max-width:180px;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.5);font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;}
@@ -175,6 +178,7 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-panel{flex:1;min-width:0;overflow-y:auto;padding:18px 22px 22px;}
 .settings-panel-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:6px;}
 .settings-hint{font-size:11px;color:var(--text3);line-height:1.7;margin-top:12px;}
+.settings-hint-error{color:#ef4444;}
 .settings-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;}
 .settings-row-label{font-size:13px;color:var(--text);display:flex;align-items:center;gap:8px;}
 .settings-row-sub{font-size:11px;color:var(--text3);}
@@ -187,3 +191,32 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-action:disabled{opacity:0.4;cursor:default;}
 .settings-action.copied,.settings-action.copied:hover{color:#4ade80;border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08);}
 .settings-about{font-size:12px;color:var(--text2);line-height:1.9;padding:4px 0;}
+
+/* ── 启动器「添加应用」picker（复用 settings-modal 外框，内部为搜索 + enh-result 列表）── */
+.picker-modal{width:480px;height:520px;}
+.picker-search{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.picker-search-input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:15px;font-family:var(--font);}
+.picker-search-input::placeholder{color:var(--text3);}
+.picker-list{flex:1;min-height:0;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:2px;}
+.picker-foot{flex-shrink:0;padding:10px 20px;border-top:1px solid var(--border);font-size:11px;color:var(--text3);}
+
+/* ── 增强搜索层（Ctrl+K）：同 overlay 内的视图层，靠 .enh-open class 丝滑淡入上浮 ── */
+.enh-layer{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;
+  padding-top:14vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  opacity:0;transform:translateY(10px) scale(0.985);pointer-events:none;transition:opacity 160ms ease,transform 160ms ease;}
+.enh-layer.enh-open{opacity:1;transform:none;pointer-events:auto;}
+.enh-search-box{display:flex;align-items:center;gap:10px;width:min(640px,80%);background:var(--hover);
+  border:1px solid var(--border);border-radius:12px;padding:14px 18px;}
+.enh-search-input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:18px;font-family:var(--font);}
+.enh-search-input::placeholder{color:var(--text3);}
+.enh-hint{font-size:11px;color:var(--text3);flex-shrink:0;}
+.enh-results{width:min(640px,80%);margin-top:12px;flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
+.enh-result{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;}
+.enh-result:hover,.enh-result.selected{background:var(--hover);}
+.enh-result-icon{width:32px;height:32px;border-radius:7px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
+.enh-result-icon img{width:24px;height:24px;object-fit:contain;}
+.enh-result-icon span{font-size:15px;}
+.enh-result-label{flex:1;min-width:0;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;}
+.enh-divider{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 12px 4px;}
+.enh-index-hint{width:min(640px,80%);font-size:11px;color:var(--text3);padding:6px 12px;font-style:italic;}

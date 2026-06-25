@@ -24,6 +24,13 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const CF_HDROP_FMT: u16 = 15;
 
+#[derive(serde::Serialize, Clone)]
+struct FilesDroppedPayload {
+    paths: Vec<String>,
+    x: i32,
+    y: i32,
+}
+
 // 裸 extern：避开 windows-crate 版本签名猜测，直接用 HDROP 的 isize 句柄
 #[link(name = "shell32")]
 extern "system" {
@@ -52,12 +59,13 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         self.accept.store(false, Ordering::Relaxed);
         Ok(())
     }
-    fn Drop(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, _pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
+    fn Drop(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
         // handler 极简：取路径 + emit + 返回。不碰剪贴板 / 不 hide / 不阻塞。
+        // pt 是屏幕物理像素坐标（Windows POINTL），前端需 ÷ devicePixelRatio 换算 CSS px。
         let paths = p_data_obj.map(extract_paths).unwrap_or_default();
-        println!("[dragdrop] Drop {} path(s)", paths.len());
+        println!("[dragdrop] Drop {} path(s) at ({}, {})", paths.len(), pt.x, pt.y);
         let accept = !paths.is_empty();
-        if accept { let _ = self.app.emit("files-dropped", paths); }
+        if accept { let _ = self.app.emit("files-dropped", FilesDroppedPayload { paths, x: pt.x, y: pt.y }); }
         self.accept.store(false, Ordering::Relaxed);
         set_effect(pdweffect, accept);
         Ok(())
