@@ -6,6 +6,7 @@
 - **热键**：§1 RegisterHotKey vs 自建钩子 · §2 放弃长短按 · §9 修饰键选择
 - **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪 · §14 原生拖入(drag-in)废弃
 - **剪贴板 / 粘贴**：§3 粘贴可靠性 6 轮演进 · §6 后台缓存架构 · §7 CF_HDROP/DROPFILES · §10 检测优先级(截图去重) · §11 桌面 SHFileOperation 兜底 + fFlags
+- **搜索 / 启动器 UI**：§15 增强搜索(Ctrl+K)视图层 + 两套搜索分工 · §16 启动器=持久化收藏托盘(vs 自动扫描全量) · §17 文件搜索=自建内存索引+后台预建(vs Windows Search/Everything)
 - **其他**：§12 Git 版本历史（关键节点）
 
 ---
@@ -237,6 +238,24 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 | Ctrl+F1 | 可用但不顺手 | 过渡方案 |
 | Ctrl+Space | 可能和输入法切换冲突 | **当前方案**（实测可工作） |
 
+### V1 自定义热键 = 2 预设方案（2026-06-25，续43）
+
+**结论**：仅提供 2 个预设组合（Ctrl+Space 默认 / Ctrl+F12），segmented control 切换，**不做按键录入态**。
+
+**为什么不做录入态（三条死路）**：
+- WebView2 里捕获 `Alt` 系组合会触发 Windows 菜单栏激活（§9 表，与 Alt 修饰键同根）；
+- 部分组合（含 IME/系统占用）的 `keydown` 被 WebView2 内部拦截、JS 根本收不到，录不到真实键；
+- 录制期间旧组合仍处于 `RegisterHotKey` 注册态，按下会触发 show/hide 干扰录制本身。
+预设白名单（`parse_combo`）规避全部三条，对普通用户也更友好。
+
+**两层硬编码的统一收口**：Ctrl+Space 原本硬编码在 ① 轮询层（`is_down(VK_CONTROL.0)&&is_down(VK_SPACE.0)`）② 注册层（setup `register`）。V1 收口到两个静态——`HOTKEY_VK_KEYS`（轮询读的 VK 列表）+ `CURRENT_SHORTCUT`（注册层切换时反注册旧组合用）。轮询循环只改 combo 检测一行为 `keys.iter().all(is_down)`，长短按/momentary/toggle 语义一字未动。
+
+**原子切换顺序**（`set_hotkey` 命令）：先 `register(new)` 成功 → 再 `unregister(old)` → 再原子更新 `HOTKEY_VK_KEYS`/`CURRENT_SHORTCUT`。任一步失败（典型：new 被其他应用占用）则直接返 Err、旧组合从未动、继续工作。unregister(old) 失败仅忽略（极罕见，残留旧空 handler 无害）。
+
+**持久化与运行时分离**：`set_hotkey` 只切运行时注册、**不写 store**（同 `set_clip_cache_max` 惯例）；store 写由前端 `changeHotkey` 负责。**启动一致性**靠 setup **同步读 store**（`read_combo_from_store` 直接 `read_to_string`+`serde_json` 读平凡 KV JSON，早于前端、无空窗按错键）——预备验证确认 store 是平凡顶层 KV，此路可行，故未退化到「前端 `[]`-effect invoke 兜底（~500ms 空窗）」。
+
+**V2 注意**：加更多预设若涉及**三键**（如 Ctrl+Shift+Space）必须先 spike 验证 §2 的 `GetAsyncKeyState` 严格全键 `all(is_down)` 长短按语义在三键下的真实表现（修饰键先松/后松、采样窗口边界），不可想当然套用二键结论。Alt 系 / Alt+Space / Fn 永久禁用（§9 表 + CLAUDE.md 死胡同）。
+
 ---
 
 ## 10. 检测优先级：图片 > 文件 > 文本（截图去重）
@@ -336,8 +355,9 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 
 **正确机制**：
 1. **`tauri.conf.json` `dragDropEnabled:false`**（永久）：让 wry 不抢 OLE drop target 槽、不拦 HTML5，把槽留给我们自注册。（HTML5 拖放本未用，无损失。）
-2. **自注册 IDropTarget**（`src-tauri/src/dragdrop.rs`，windows crate `#[implement]`）：`OleInitialize`（RegisterDragDrop 要求之，仅 `CoInitializeEx` 会 `CO_E_NOTINITIALIZED`）→ `EnumChildWindows` 枚举窗口树 → `RegisterDragDrop` 到顶层 + 全部子孙窗。**DragEnter/DragOver** 查 CF_HDROP 设 `DROPEFFECT_COPY`/`NONE`（光标反馈）；**Drop** 用 `DragQueryFileW` 取路径 → `emit("files-dropped", paths)` 后立即返回（handler 极简，不碰剪贴板/不 hide/不阻塞）。
-3. **路径入中转**（前端）：listen `files-dropped` → 每条 `get_file_info` → file 型 StageItem（isDir 区分）→ 复用续26 的去重/置顶/持久化。拖入后 `getCurrentWindow().setFocus()` 让 Esc 可用（overlay 已显示+深色渲染，实测无白闪）。
+2. **自注册 IDropTarget**（`src-tauri/src/dragdrop.rs`，windows crate `#[implement]`）：`OleInitialize`（RegisterDragDrop 要求之，仅 `CoInitializeEx` 会 `CO_E_NOTINITIALIZED`）→ `EnumChildWindows` 枚举窗口树 → `RegisterDragDrop` 到顶层 + 全部子孙窗。**DragEnter/DragOver** 查 CF_HDROP 设 `DROPEFFECT_COPY`/`NONE`（光标反馈）；**Drop** 用 `DragQueryFileW` 取路径 → `emit("files-dropped", { paths, x: pt.x, y: pt.y })` 后立即返回（handler 极简，不碰剪贴板/不 hide/不阻塞）。`pt`（`POINTL`）为屏幕物理像素。
+3. **落点双区判定**（S3b，前端，续38）：listen `files-dropped`，payload `{paths,x,y}`；`cssX/cssY = x/y ÷ window.devicePixelRatio`；`getBoundingClientRect()` 判是否在 `launcherDropRef`（`.app-grid`）内：`inLauncher`→入 `LauncherItem`（file/folder，持久化 `launcher-items`）；否则→原有 StageItem 路径（完整保留）。两分支末尾均保留 `setFocus`。落地区域 200ms `drop-flash` CSS 动画确认。
+   - **DragOver 实时高亮未做**：需 Rust DragOver 持续 emit 坐标，IPC 高频代价过高（每 wry 帧 ~16ms 一次 emit → 前端每帧响应），用落地闪烁代替。如后续确有需求，可在 DragEnter emit 一次「drag-enter」事件触发区域高亮（一次性，代价低）——当前未做，留后续。
 
 **耐久性（关键设计，Step 0 微测定）**：OLE **不沿父链 walk-up**——只注册祖先 `WRY_WEBVIEW` 时 DragEnter 零触发；drop 只投递给光标正下方最深窗口。故注册「顶层+全部子孙窗」。**只在 setup 注册一次**：曾试「每次 show 经 `run_on_main_thread` 幂等重注册」扛 webview 重建，实测**重注册虽报成功、产出的 target 却收不到回调、破坏正常拖入**（单变量隔离：停掉重注册即恢复）——已回退，接受「渲染进程重建后失效到重启」的罕见代价。
 
@@ -350,3 +370,52 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 **拖出（drag-out）未做**：从 WebView 拖文件出去到 Explorer 需原生 `DoDragDrop`/`IDataObject` 拖放源 FFI（WebView2 不原生支持），比拖入更难；且优先级低（「单击取走→Ctrl+V」已覆盖取走）。暂不做，非死胡同、是未实现。
 
 **死胡同登记**：CLAUDE.md【💀 死胡同】已补一条。后续若仍想要「主动加文件/文件夹」，走原生文件选择器（`tauri-plugin-dialog`，未装），不要回头试拖拽。
+
+---
+
+## 15. 增强搜索（Ctrl+K）：同 overlay 内的「视图层」，不是新窗口（2026-06-24）
+
+**取舍**：增强搜索做成**同一个全屏 overlay 内的一个视图层**（`.enh-layer`，靠 `.enh-open` class 切显隐），而非 Tauri 新窗口。
+
+- **为什么不开新窗口**：本项目窗口/焦点/热键是最高危区（见 CLAUDE.md 铁律）——`transparent:true`/`focus:false`/键态轮询/light dismiss/set_focus dance 全是为「单一全屏 overlay」精心调过的。再开一个窗口要重走一遍焦点交还与可见性真相同步，性价比极低且极易引连锁 bug。把它当 overlay 内的一层，**完全复用现成 show/hide 机制**，零 Rust 改动。
+- **激活只走 launch/open，绕开粘贴高危区**：结果激活=应用 `launchApp`（开了即 hide，复用放大动画）或中转 file `open_file`（fire-and-forget）。**绝不触碰**「写回剪贴板 → 焦点交还 → Ctrl+V」那条链路，也不取 `CLIPBOARD_LOCK`。整个功能待在高危区之外，因此能纯前端落地。
+- **结果范围（Tier 1）**：应用 + 中转区 `type==="file"` 条目。剪贴板条目、文件系统实时搜索留 Tier 2（需新数据源/可能 Rust 改动）。
+- **键盘门控**：全局 onKey 在 `enhOpen` 时由第 4 段 `↑↓/Enter` 接管并 `return`，屏蔽下面的 launcher 方向键，避免两套导航串扰；Esc 优先级链插入 enhOpen（先退视图层、再退主页面）。
+
+**两套搜索分工（2026-06-24 续36 补）**：① 顶栏普通搜索（`search` state）= **页面内三区就地过滤**——输入即同时筛应用/中转/剪贴板各自列表（名称/内容子序列模糊优先 + `typeKeywords` 类型词子串叠加，任一命中即保留），不改布局、不离开主页面。② Ctrl+K 增强搜索（`enhQuery`）= **独立全屏结果页**，把应用 + 中转 file 跨区合并成单一排序结果列表、键盘驱动直达激活。两者 query 互相独立（Ctrl+K 进出不清 `search`），定位不同：普通搜索是"在原位看哪些还在"，增强搜索是"跨区找一个直接打开"。
+
+---
+
+## 16. 启动器：持久化收藏托盘 vs 自动扫描全量平铺（2026-06-24 S3a）
+
+**取舍**：左侧启动器面板从「自动扫描 Start Menu 全量 .lnk 平铺(`filteredApps`)」改为「用户**手动策展的持久化收藏托盘**」（store key `launcher-items`）。理由：全量平铺信息密度低、要的 app 淹没在几百个里；收藏托盘 = 把高频 app/file/folder 钉成一个稳定宫格，像"功能增强版开始菜单"的常用区。
+
+- **`LauncherItem` 独立于 `StageItem`，不可合并**：两者形似（都带 path/name），但**左键动作契约根本不同**——启动器条目左键 = 打开/启动（app→`launch_app`，file/folder→`open_file`，由"区"决定动作），**不走**「写回剪贴板 → 焦点交还 → Ctrl+V」那条粘贴链、不取 `CLIPBOARD_LOCK`；中转 `StageItem` 左键 = 取走粘贴（走粘贴链）。动作语义不同 → 类型不同，强行合并会让"这条左键到底干啥"取决于隐式上下文，是 bug 温床。这条已升格为 CLAUDE.md 协作约定不变量。
+- **自动扫描链全保留、只是不再全量平铺到面板**：`scan_start_menu/apps/sortedApps/filteredApps` 一字不动——它们仍是 Ctrl+K 增强搜索、顶栏普通搜索、以及 app picker 候选的**数据源**。改的只是"主面板渲染什么"（`launcher` 而非 `filteredApps`）。
+- **已知副作用（有意接受）**：① 顶栏普通搜索不再过滤左侧应用区（应用区现在是收藏托盘，与 `search` 无关）——应用搜索的职责整体交给 Ctrl+K；中转/剪贴板过滤照常。② 普通页方向键(`selectedIdx`/`filteredApps`)失去可见目标，保留 handler 不删（增强搜索/picker 打开时本就被拦截），Enter 分支加 `search.trim()` 守卫，防空查询下误启动隐藏的 `filteredApps[0]`。launcher 自身的键盘导航留后续（条目少、鼠标为主）。
+- **app picker 复用 settings-modal + enh-result 样式**：零自创交互范式；搜索去重（排除已加入）、点击添加不关闭（连续添加）、已加入项 filter 后自然消失。Esc 优先级链插入 `pickerOpen`（ctxMenu→enhOpen→pickerOpen→stageSel→settings→关窗）。
+- **S3b 落点判定**：Drop emit `{paths,x,y}`（物理像素），前端 `÷ devicePixelRatio` 换算 CSS px + `getBoundingClientRect()` 判区；启动器 `.app-grid` → `LauncherItem`，其余兜底 → `StageItem`；落地 200ms `drop-flash` 动画确认。DragOver 实时高亮未做（高频 IPC 代价过高，用落地闪烁替代）。
+- **.lnk 拖入走 `resolve_lnk`（S3c，续39）**：`.lnk` 快捷方式拖入启动器时，调用 `resolve_lnk`（`apps.rs`）复用 `extract_icon_base64`（`SHGetFileInfoW` 自动解析 .lnk 图标）+ 去后缀名称，存为 `kind:"app"`，左键走 `ShellExecuteW(.lnk)` 直接执行（不 `parselnk` 解析目标 exe——避开 parselnk 历史坑，且 ShellExecuteW 本就能运行 .lnk）。非 .lnk 走原有 `get_file_info → file/folder` 路径。
+
+---
+
+## 17. 文件搜索：路线 C 自建内存索引 + 后台预建（2026-06-24 S4a）
+
+**目标**：增强搜索（Ctrl+K）Tier 2 要能搜整个文件系统（不止已收藏/中转的条目）。难点在 Windows 上「搜文件」既要快、又不能卡呼出。
+
+**路线对比（为何选自建内存索引）**：
+- **A. Windows Search COM（`ISearchManager`/OLE DB `SystemIndex`）**：依赖系统索引服务，用户若关了索引或目录不在索引范围就查不到；COM 初始化 + SQL 查询有不可控延迟与失败面；跨进程、要处理 STA/线程模型。重而不可控，弃。
+- **B. Everything SDK（`Everything.dll` IPC）**：最快最全，但**要求用户另装 Everything + 服务常驻**，违背本工具「~5MB 单体、零外部依赖」定位。弃。
+- **C. 自建内存索引 + 后台预建（选用）**：`walkdir`（已是依赖，零新增 crate）后台遍历几个用户常用目录，建一份内存 `Vec<IndexEntry>`，查询纯内存子串打分。可控、零外部依赖、查询 µs 级。代价是索引有最长 30min 的陈旧窗口、且只覆盖白名单目录——对"找常用文件直达打开"的场景完全够用。
+
+**不卡前端的三道保险**（命脉，违反任一条都会把耗时遍历泄漏到 UI 线程）：
+1. **永不经命令**：索引只在 `start_index_worker` 内 `std::thread::spawn` 的独立后台线程跑，永不经 Tauri 命令 / invoke / 阻塞 IPC。setup 阶段 spawn，先 `sleep(3s)` 避开开机高峰再首次建索引——不等窗口、不等呼出。
+2. **查询只读内存**：`search_files` / `get_index_status` 只读内存 Vec、绝不碰磁盘（实测查询 µs 级，远 <5ms 目标）。
+3. **双缓冲原子替换 + 瞬间临界区锁**：新索引在后台 `build_index` 里建好（耗时部分**不持锁**），建完一次性 `*guard = new_index` 替换旧 Vec。`FILE_INDEX` 锁只罩「替换 Vec」与「查询读 Vec」两个瞬间临界区。查询永远命中一份完整索引，绝不读到建一半的状态。
+
+- **锁完全独立于剪贴板**：`FILE_INDEX` 是全新独立 `Mutex<Vec<IndexEntry>>`，与 `CLIPBOARD_LOCK` / `CLIP_CACHE` 无任何交集，无锁序问题。
+- **遍历边界**：白名单目录 `Desktop/Downloads/Documents/Pictures/Projects`（不存在则跳过）；`max_depth(8)` 防极深树；`should_skip_dir` 剪枝 `node_modules/.git/target/$recycle.bin/appdata/__pycache__` 及隐藏目录整子树；隐藏文件跳过；硬顶 `MAX_INDEX_ENTRIES=200_000`；`REBUILD_INTERVAL_SECS=30min` 周期重建。
+- **打分**：`name_lower` 预存小写避免查询时重复 `to_lowercase`；子串命中 + 越靠前 + 名越短 + 前缀加分，`sort_by` 降序后 `take(limit.min(50))`。简化版（非子序列模糊），与前端 `fuzzyScore` 思路一致但更轻——后台索引量大，子串足够且快。
+- **应用扫描同样后台预建（S4c，续42）**：扫开始菜单/桌面几百个 .lnk + 每个 `SHGetFileInfoW` 提图标实测约 **1.5s**——原本绑在「前端首次 `visible` 时 invoke `scan_start_menu`」，正好砸在首次呼出那一刻 → 卡。改为 setup 阶段 `start_apps_worker` 后台线程（仿 `start_index_worker`，延迟 1s 避开启动高峰）调用现有 `scan_start_menu`（**扫描/图标逻辑一字不动**，其 `APP_CACHE` 顺带缓存）→ `emit("apps-ready", apps)` 一次性推前端。前端 `[]`-注册 `apps-ready` 监听填充 `apps`；首次 `visible` 改为**兜底语义**——仅当 `apps` 仍空（事件错过/未到）才 invoke `scan_start_menu`（命中 `APP_CACHE`、实测 **~120µs** 近乎瞬时），否则跳过。`sortedApps`/搜索链 deps 含 `apps`、自动响应，零改动。**与文件索引同一架构原则**：扫描这类耗时预备工作一律挪到后台线程预建、前端只监听就绪事件，绝不在呼出路径同步执行。
+- **前端分组渲染（S4b，续41）**：Ctrl+K 增强搜索结果分两组——Tier 1（应用/中转，有查询时 ≤10）在前，一条 `.enh-divider`「文件」分隔线，Tier 2（`search_files` 文件结果 ≤20）在后，合并列表 ≤30。文件查询 **150ms 防抖**（每次 `search_files` 是 Rust 命令往返，避免逐键 invoke）。索引未就绪（`!indexReady`）且有查询时显示「文件索引建立中…」一行小字，**不阻塞 Tier 1 显示**（应用/中转照常出）。`indexReady` 双来源：监听 `file-index-ready` 事件 + 打开时主动 `get_index_status` 兜底（防错过 emit）。↑↓/Enter 跨 Tier1+Tier2 整个列表连续导航（分隔线只是视觉、不占 result 索引——用 `Fragment` 把 divider 与结果项并列渲染）。文件结果激活走 `open_file`（不碰粘贴/焦点交还/`CLIPBOARD_LOCK`）。
+- **验证**：临时单测（`build_index` + `search_files` 对临时目录树）实测——遍历 5 条目 390µs、跳过 node_modules 子树与隐藏文件正确、查询 `report` 7.4µs 返回且短名前缀优先排序正确、limit/空查询守卫正确；验证后已删临时单测，保留正式日志 `[fileindex] ready: N entries (elapsed)`。GUI 层（Ctrl+K 看到文件结果）属 S4b 未验。

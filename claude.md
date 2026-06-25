@@ -45,6 +45,7 @@ npm run tauri build    # 打包
 - **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——那条路有 500-800ms 抖动（见【💀 死胡同】）。
 - `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
 - **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
+- **自定义热键（V1，续43）**：combo 不再硬编码——轮询读静态 `HOTKEY_VK_KEYS`（VK 列表），注册层用 `CURRENT_SHORTCUT`。setup **同步读 store** 落地（`read_combo_from_store`，失败兜底 Ctrl+Space，无启动空窗）；`set_hotkey` 命令做**原子注册切换**（先 register(new) 成功→unregister(old)→更新两静态，失败保留旧组合并回滚 + 红字提示）；**持久化由前端 store 负责**，命令不写 store。V1 仅 2 预设（Ctrl+Space / Ctrl+F12，白名单 `parse_combo`）；**加新预设尤其三键组合必须按 DECISIONS §9 注意事项先 spike 验证长短按语义**。轮询循环只改 combo 检测一行、长短按判定不动。
 - 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
   - ⚠️ **别再给热键关闭加「淡出再 hide」**：试过（续25），延迟 hide 让窗口多可见 200ms，破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按时第 N 次「开」被误判成「关」→ 热键失灵/不灵敏。已回退。淡出仅用于前端点击驱动的关闭（启动/粘贴），不用于键态轮询驱动的热键关闭。
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
@@ -68,6 +69,12 @@ npm run tauri build    # 打包
 - 用**工作区（work area）尺寸**而非物理全屏，保留任务栏。
 - 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
 - `set_shadow(false)` 后透明窗 `WRY_WEBVIEW` 子窗填满外框（含隐形边框），底边落在 `outer.bottom` 会越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 量 `GetWindowRect`、越界则等量缩 inner 高度贴齐工作区底（动态测量、无硬编码）。详见 DECISIONS §5 延伸。
+
+### 扫描/索引一律后台预建（`filesearch.rs` 文件索引 · `start_apps_worker` 应用扫描）
+- **耗时预备工作（应用扫描、文件索引）一律挪到独立后台线程预建、前端只监听就绪事件**（`apps-ready` / `file-index-ready`），**绝不在呼出路径同步执行**。应用扫描曾绑在「前端首次 `visible` 时 invoke」，正好砸在首次呼出 → 卡（S4c 修，约 1.5s 移到后台）。前端 invoke 命令仅保留为**兜底**（事件错过时调，命中缓存近乎瞬时）。
+- **索引建立只在独立后台线程**（`start_index_worker` 内 `std::thread::spawn`），**永不经 Tauri 命令 / invoke / 阻塞 IPC/UI**；setup 阶段 spawn、先 `sleep(3s)` 再首次建索引，不等窗口/呼出。
+- **查询命令（`search_files`/`get_index_status`）只读内存、永不碰磁盘**（µs 级）。**双缓冲原子替换**：耗时的 `walkdir` 遍历**绝不持锁**，建完一次性换 Vec；`FILE_INDEX` 锁只罩「替换 Vec」「读 Vec」两个瞬间临界区。
+- `FILE_INDEX` 是**全新独立 Mutex**，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无任何交集、无锁序问题。要调遍历目录/深度/重建周期改 `filesearch.rs` 顶部命名常量。详见 DECISIONS §17。
 
 ### 💀 死胡同（已验证失败，别再试，别浪费时间）
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
@@ -99,6 +106,7 @@ npm run tauri build    # 打包
 - **诊断优先于修改**：先加日志 / 输出分析确认根因，再动手改。
 - "理论上更优雅" ≠ "实际更好"：已验证的笨方法优于未验证的聪明方法。
 - 出现"焦点回不来"这类**架构性死胡同信号时，果断回退**，不要打补丁硬撑。
+- **`LauncherItem`（启动器收藏）与 `StageItem`（中转条目）不可合并**：二者形似但**左键动作契约不同**——启动器=打开/启动（不走粘贴链/不取 `CLIPBOARD_LOCK`），中转=取走粘贴（走粘贴链）。**动作由"区"决定**，别因字段相似而合并类型或复用左键 handler（详见 DECISIONS §16）。
 - 每到一个稳定点立即 `git commit`。
 
 ## 强制记忆更新 (Post-Task)
