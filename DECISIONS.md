@@ -274,7 +274,7 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 - 按下边沿（false→true）：三键全按下时 `combo=true`，状态机记录 `down_at`，按下沿开窗——与 2 键无异。
 - 松开边沿：任一键（含修饰键 Shift）松开即 `combo=false`，触发松开沿逻辑（momentary/toggle）。
 - 潜在风险：Shift 先松、Ctrl 后松的场景——松开 Shift 即触发松开沿，主键 + Ctrl 仍按下不影响采样（`all` 已 false）。长短按分界由按下到首次 `combo=false` 的时间差决定，语义清晰。
-- **结论（理论）**：三键无连锁 bug；但 GUI 实测是确认修饰键先松的体感（用户需 V21-TEMP harness 实测 Ctrl+Shift+X 的 momentary/toggle 分界）。
+- **结论（已实测）**：三键无连锁 bug；GUI 实测通过（2026-06-25）——可正常开关，长短按符合预期。
 
 **未完成（V2-2）**：① 设置 segmented 改文本输入区（删 V21-TEMP harness、删 segmented、加 input+验证提示）；② 底栏 kbd 文案改动态展示 `hotkeyCombo`（当前仍硬编码 "Ctrl+Space"）；③ `set_hotkey` 成功后前端 `setHotkeyCombo` 需接受任意字符串（类型签名由 union→string）。
 
