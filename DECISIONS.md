@@ -256,6 +256,28 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 
 **V2 注意**：加更多预设若涉及**三键**（如 Ctrl+Shift+Space）必须先 spike 验证 §2 的 `GetAsyncKeyState` 严格全键 `all(is_down)` 长短按语义在三键下的真实表现（修饰键先松/后松、采样窗口边界），不可想当然套用二键结论。Alt 系 / Alt+Space / Fn 永久禁用（§9 表 + CLAUDE.md 死胡同）。
 
+### V2-1 表驱动任意组合机器（2026-06-25，续44）
+
+**变更**：`parse_combo` 从 2 预设白名单改为表驱动任意组合解析器（`key_token` 53 条）。
+
+**解析规则**（`lib.rs`，`parse_combo` + `key_token`）：
+1. blocklist：含 win/super/meta/windows → Err；含 alt/option → Err（WebView2 菜单栏激活，§9 表，永久禁用）
+2. 必须含 ctrl/control；否则 Err
+3. 可选 shift；其余 token 恰为 1 个主键（多/少 Err）
+4. 主键走 `key_token` 表（a-z / 0-9 / f1-f12 / space / up/down/left/right）；未命中 → "不支持的键：{tok}"
+5. VK 列表 = [VK_CONTROL] + (VK_SHIFT 若有 Shift) + main_vk；Shortcut = Modifiers::CONTROL (| SHIFT) + Code
+
+**单测结果**（`cargo test --lib hotkey_parse_tests`，验证后已删）：11 个断言全 ok。
+
+**三键长短按 spike B 分析（GUI 未验证）**：
+- 轮询检测 `keys.iter().all(is_down)`——3 键与 2 键逻辑完全相同，`all()` 对任一键松开即返 false。
+- 按下边沿（false→true）：三键全按下时 `combo=true`，状态机记录 `down_at`，按下沿开窗——与 2 键无异。
+- 松开边沿：任一键（含修饰键 Shift）松开即 `combo=false`，触发松开沿逻辑（momentary/toggle）。
+- 潜在风险：Shift 先松、Ctrl 后松的场景——松开 Shift 即触发松开沿，主键 + Ctrl 仍按下不影响采样（`all` 已 false）。长短按分界由按下到首次 `combo=false` 的时间差决定，语义清晰。
+- **结论（理论）**：三键无连锁 bug；但 GUI 实测是确认修饰键先松的体感（用户需 V21-TEMP harness 实测 Ctrl+Shift+X 的 momentary/toggle 分界）。
+
+**未完成（V2-2）**：① 设置 segmented 改文本输入区（删 V21-TEMP harness、删 segmented、加 input+验证提示）；② 底栏 kbd 文案改动态展示 `hotkeyCombo`（当前仍硬编码 "Ctrl+Space"）；③ `set_hotkey` 成功后前端 `setHotkeyCombo` 需接受任意字符串（类型签名由 union→string）。
+
 ---
 
 ## 10. 检测优先级：图片 > 文件 > 文本（截图去重）

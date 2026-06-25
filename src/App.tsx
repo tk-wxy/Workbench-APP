@@ -14,6 +14,8 @@ interface StageItem { id: number; type: "text" | "image" | "file"; content?: str
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX = 20; // 中转区上限
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
+// PROBE V2-0 录入捕获 spike — 便于一次性删除（搜 PROBE 全删）
+type CapRow = { key:string; code:string; keyCode:number; ctrl:boolean; shift:boolean; alt:boolean; meta:boolean; repeat:boolean; composing:boolean }; // PROBE
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
 // 持久化到 store key "launcher-items"，不参与自动扫描；扫描链(filteredApps)仅供搜索，不再全量平铺到此面板。
@@ -262,6 +264,10 @@ export default function App() {
   const [pickerQuery, setPickerQuery] = useState("");
   const pickerOpenRef = useRef(false); pickerOpenRef.current = pickerOpen; // 供 Esc keydown 闭包读最新
   const pickerInputRef = useRef<HTMLInputElement>(null);
+  const [probing, setProbing] = useState(false); // PROBE
+  const probingRef = useRef(false); // PROBE
+  const [capLog, setCapLog] = useState<CapRow[]>([]); // PROBE
+  const [v21TempCombo, setV21TempCombo] = useState(""); // V21-TEMP
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -801,7 +807,9 @@ export default function App() {
   const GRID_COLS = 6;
   useEffect(() => {
     if (!visible) return;
+    const logCap=(e:KeyboardEvent)=>{setCapLog(prev=>[...prev.slice(-14),{key:e.key,code:e.code,keyCode:e.keyCode,ctrl:e.ctrlKey,shift:e.shiftKey,alt:e.altKey,meta:e.metaKey,repeat:e.repeat,composing:e.isComposing}]);console.log(`[PROBE] key="${e.key}" code="${e.code}" kc=${e.keyCode} C=${e.ctrlKey} S=${e.shiftKey} A=${e.altKey} M=${e.metaKey}`);}; // PROBE
     const onKey=(e:KeyboardEvent)=>{
+      if(probingRef.current){logCap(e);e.preventDefault();return;} // PROBE
       if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
@@ -1084,10 +1092,45 @@ export default function App() {
                   </div>
                   {hotkeyError && <p className="settings-hint settings-hint-error">{hotkeyError}</p>}
                   {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>恢复默认</button>}
+                  {/* V21-TEMP 任意 combo 验证 harness ─────────────────── */}
+                  <div className="settings-row" style={{gap:6}}>
+                    <input
+                      className="probe-test-input"
+                      style={{flex:1,fontSize:12}}
+                      placeholder="输入 combo，如 ctrl+shift+f / ctrl+down"
+                      value={v21TempCombo}
+                      onChange={e=>setV21TempCombo(e.target.value)}
+                    />
+                    <button className="settings-action" onClick={()=>(changeHotkey as (s:string)=>Promise<void>)(v21TempCombo.trim())}>应用</button>
+                  </div>
+                  {/* ─────────────────────────────── V21-TEMP end */}
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
                   <p className="settings-hint">长按 = 按住显示松开关闭；短按 = 切换显隐。</p>
+                  {/* PROBE V2-0 录入捕获 spike ──────────────────────────── */}
+                  <div className="probe-section">
+                    <div className="settings-row">
+                      <span className="settings-row-label">录制探针 <span className="settings-row-sub">PROBE</span></span>
+                      <div style={{display:"flex",gap:6}}>
+                        <button className="settings-action" onClick={()=>{const n=!probing;setProbing(n);probingRef.current=n;}}>{probing?"■ 停止录制":"▶ 开始录制"}</button>
+                        <button className="settings-action" onClick={()=>setCapLog([])}>清空日志</button>
+                      </div>
+                    </div>
+                    <input className="probe-test-input" placeholder="Tab 焦点测试框（探针开启时测 preventDefault 拦截效果）" />
+                    {capLog.length===0&&probing&&<p className="settings-hint">探针已激活，请按任意键…</p>}
+                    {capLog.length>0&&(
+                      <div className="probe-log">
+                        <table className="probe-table">
+                          <thead><tr><th>key</th><th>code</th><th>kc</th><th>C</th><th>S</th><th>A</th><th>M</th><th>rep</th><th>ime</th></tr></thead>
+                          <tbody>{capLog.slice().reverse().map((r,i)=>(
+                            <tr key={i}><td>{r.key}</td><td>{r.code}</td><td>{r.keyCode}</td><td>{r.ctrl?"✓":""}</td><td>{r.shift?"✓":""}</td><td>{r.alt?"✓":""}</td><td>{r.meta?"✓":""}</td><td>{r.repeat?"✓":""}</td><td>{r.composing?"✓":""}</td></tr>
+                          ))}</tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                  {/* ─────────────────────────────────────── PROBE end */}
                 </>)}
                 {settingsTab==="about" && (<>
                   <div className="settings-panel-title">关于</div>
