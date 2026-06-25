@@ -238,6 +238,24 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 | Ctrl+F1 | 可用但不顺手 | 过渡方案 |
 | Ctrl+Space | 可能和输入法切换冲突 | **当前方案**（实测可工作） |
 
+### V1 自定义热键 = 2 预设方案（2026-06-25，续43）
+
+**结论**：仅提供 2 个预设组合（Ctrl+Space 默认 / Ctrl+F12），segmented control 切换，**不做按键录入态**。
+
+**为什么不做录入态（三条死路）**：
+- WebView2 里捕获 `Alt` 系组合会触发 Windows 菜单栏激活（§9 表，与 Alt 修饰键同根）；
+- 部分组合（含 IME/系统占用）的 `keydown` 被 WebView2 内部拦截、JS 根本收不到，录不到真实键；
+- 录制期间旧组合仍处于 `RegisterHotKey` 注册态，按下会触发 show/hide 干扰录制本身。
+预设白名单（`parse_combo`）规避全部三条，对普通用户也更友好。
+
+**两层硬编码的统一收口**：Ctrl+Space 原本硬编码在 ① 轮询层（`is_down(VK_CONTROL.0)&&is_down(VK_SPACE.0)`）② 注册层（setup `register`）。V1 收口到两个静态——`HOTKEY_VK_KEYS`（轮询读的 VK 列表）+ `CURRENT_SHORTCUT`（注册层切换时反注册旧组合用）。轮询循环只改 combo 检测一行为 `keys.iter().all(is_down)`，长短按/momentary/toggle 语义一字未动。
+
+**原子切换顺序**（`set_hotkey` 命令）：先 `register(new)` 成功 → 再 `unregister(old)` → 再原子更新 `HOTKEY_VK_KEYS`/`CURRENT_SHORTCUT`。任一步失败（典型：new 被其他应用占用）则直接返 Err、旧组合从未动、继续工作。unregister(old) 失败仅忽略（极罕见，残留旧空 handler 无害）。
+
+**持久化与运行时分离**：`set_hotkey` 只切运行时注册、**不写 store**（同 `set_clip_cache_max` 惯例）；store 写由前端 `changeHotkey` 负责。**启动一致性**靠 setup **同步读 store**（`read_combo_from_store` 直接 `read_to_string`+`serde_json` 读平凡 KV JSON，早于前端、无空窗按错键）——预备验证确认 store 是平凡顶层 KV，此路可行，故未退化到「前端 `[]`-effect invoke 兜底（~500ms 空窗）」。
+
+**V2 注意**：加更多预设若涉及**三键**（如 Ctrl+Shift+Space）必须先 spike 验证 §2 的 `GetAsyncKeyState` 严格全键 `all(is_down)` 长短按语义在三键下的真实表现（修饰键先松/后松、采样窗口边界），不可想当然套用二键结论。Alt 系 / Alt+Space / Fn 永久禁用（§9 表 + CLAUDE.md 死胡同）。
+
 ---
 
 ## 10. 检测优先级：图片 > 文件 > 文本（截图去重）
