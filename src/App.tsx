@@ -14,8 +14,7 @@ interface StageItem { id: number; type: "text" | "image" | "file"; content?: str
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX = 20; // 中转区上限
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
-// PROBE V2-0 录入捕获 spike — 便于一次性删除（搜 PROBE 全删）
-type CapRow = { key:string; code:string; keyCode:number; ctrl:boolean; shift:boolean; alt:boolean; meta:boolean; repeat:boolean; composing:boolean }; // PROBE
+
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
 // 持久化到 store key "launcher-items"，不参与自动扫描；扫描链(filteredApps)仅供搜索，不再全量平铺到此面板。
@@ -224,7 +223,8 @@ export default function App() {
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
-  const [hotkeyCombo, setHotkeyCombo] = useState<"ctrl+space"|"ctrl+f12">("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
+  const [hotkeyCombo, setHotkeyCombo] = useState("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
+  const [hotkeyInput, setHotkeyInput] = useState("ctrl+space"); // 设置面板输入框编辑态
   const [hotkeyError, setHotkeyError] = useState(""); // 切换失败提示（如被其他应用占用），3s 后自动清
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
   const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
@@ -264,10 +264,6 @@ export default function App() {
   const [pickerQuery, setPickerQuery] = useState("");
   const pickerOpenRef = useRef(false); pickerOpenRef.current = pickerOpen; // 供 Esc keydown 闭包读最新
   const pickerInputRef = useRef<HTMLInputElement>(null);
-  const [probing, setProbing] = useState(false); // PROBE
-  const probingRef = useRef(false); // PROBE
-  const [capLog, setCapLog] = useState<CapRow[]>([]); // PROBE
-  const [v21TempCombo, setV21TempCombo] = useState(""); // V21-TEMP
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -291,7 +287,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(savedHotkey==="ctrl+space"||savedHotkey==="ctrl+f12") setHotkeyCombo(savedHotkey); /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -619,14 +615,16 @@ export default function App() {
   }, []);
   // 切换呼出热键：先 invoke set_hotkey（Rust 原子注册新组合，失败 throw）成功后再更新 state + 持久化。
   // Rust 失败（如被占用）则保留旧组合工作，UI 红字提示 3s 后自清。
-  const changeHotkey = useCallback(async (next:"ctrl+space"|"ctrl+f12") => {
-    if (next === hotkeyCombo) return;
+  const changeHotkey = useCallback(async (next: string) => {
+    const normalized = next.trim().toLowerCase();
+    if (normalized === hotkeyCombo) return;
     try {
       const {invoke}=await import("@tauri-apps/api/core");
-      await invoke("set_hotkey", { combo: next });
-      setHotkeyCombo(next);
+      await invoke("set_hotkey", { combo: normalized });
+      setHotkeyCombo(normalized);
+      setHotkeyInput(normalized);
       setHotkeyError("");
-      if (store) { await store.set("hotkey-combo", next); await store.save(); }
+      if (store) { await store.set("hotkey-combo", normalized); await store.save(); }
     } catch (e:any) {
       setHotkeyError(String(e));
       setTimeout(() => setHotkeyError(""), 3000);
@@ -807,9 +805,7 @@ export default function App() {
   const GRID_COLS = 6;
   useEffect(() => {
     if (!visible) return;
-    const logCap=(e:KeyboardEvent)=>{setCapLog(prev=>[...prev.slice(-14),{key:e.key,code:e.code,keyCode:e.keyCode,ctrl:e.ctrlKey,shift:e.shiftKey,alt:e.altKey,meta:e.metaKey,repeat:e.repeat,composing:e.isComposing}]);console.log(`[PROBE] key="${e.key}" code="${e.code}" kc=${e.keyCode} C=${e.ctrlKey} S=${e.shiftKey} A=${e.altKey} M=${e.metaKey}`);}; // PROBE
     const onKey=(e:KeyboardEvent)=>{
-      if(probingRef.current){logCap(e);e.preventDefault();return;} // PROBE
       if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
@@ -1085,52 +1081,25 @@ export default function App() {
                   <div className="settings-panel-title">快捷键</div>
                   <div className="settings-row">
                     <span className="settings-row-label">呼出 / 隐藏</span>
-                    <div className="seg">
-                      <button className={`seg-btn${hotkeyCombo==="ctrl+space"?" seg-active":""}`} onClick={()=>changeHotkey("ctrl+space")}>Ctrl + Space</button>
-                      <button className={`seg-btn${hotkeyCombo==="ctrl+f12"?" seg-active":""}`} onClick={()=>changeHotkey("ctrl+f12")}>Ctrl + F12</button>
+                    <div style={{display:"flex",gap:6}}>
+                      <input
+                        className="hotkey-input"
+                        value={hotkeyInput}
+                        onChange={e=>setHotkeyInput(e.target.value)}
+                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeHotkey(hotkeyInput);}}}
+                        placeholder="如 ctrl+shift+f"
+                        spellCheck={false}
+                      />
+                      <button className="settings-action" onClick={()=>changeHotkey(hotkeyInput)}>应用</button>
                     </div>
                   </div>
                   {hotkeyError && <p className="settings-hint settings-hint-error">{hotkeyError}</p>}
+                  <p className="settings-hint">格式：ctrl+x · ctrl+shift+x · ctrl+f12 · ctrl+down（必须含 Ctrl）</p>
                   {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>恢复默认</button>}
-                  {/* V21-TEMP 任意 combo 验证 harness ─────────────────── */}
-                  <div className="settings-row" style={{gap:6}}>
-                    <input
-                      className="probe-test-input"
-                      style={{flex:1,fontSize:12}}
-                      placeholder="输入 combo，如 ctrl+shift+f / ctrl+down"
-                      value={v21TempCombo}
-                      onChange={e=>setV21TempCombo(e.target.value)}
-                    />
-                    <button className="settings-action" onClick={()=>(changeHotkey as (s:string)=>Promise<void>)(v21TempCombo.trim())}>应用</button>
-                  </div>
-                  {/* ─────────────────────────────── V21-TEMP end */}
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
                   <p className="settings-hint">长按 = 按住显示松开关闭；短按 = 切换显隐。</p>
-                  {/* PROBE V2-0 录入捕获 spike ──────────────────────────── */}
-                  <div className="probe-section">
-                    <div className="settings-row">
-                      <span className="settings-row-label">录制探针 <span className="settings-row-sub">PROBE</span></span>
-                      <div style={{display:"flex",gap:6}}>
-                        <button className="settings-action" onClick={()=>{const n=!probing;setProbing(n);probingRef.current=n;}}>{probing?"■ 停止录制":"▶ 开始录制"}</button>
-                        <button className="settings-action" onClick={()=>setCapLog([])}>清空日志</button>
-                      </div>
-                    </div>
-                    <input className="probe-test-input" placeholder="Tab 焦点测试框（探针开启时测 preventDefault 拦截效果）" />
-                    {capLog.length===0&&probing&&<p className="settings-hint">探针已激活，请按任意键…</p>}
-                    {capLog.length>0&&(
-                      <div className="probe-log">
-                        <table className="probe-table">
-                          <thead><tr><th>key</th><th>code</th><th>kc</th><th>C</th><th>S</th><th>A</th><th>M</th><th>rep</th><th>ime</th></tr></thead>
-                          <tbody>{capLog.slice().reverse().map((r,i)=>(
-                            <tr key={i}><td>{r.key}</td><td>{r.code}</td><td>{r.keyCode}</td><td>{r.ctrl?"✓":""}</td><td>{r.shift?"✓":""}</td><td>{r.alt?"✓":""}</td><td>{r.meta?"✓":""}</td><td>{r.repeat?"✓":""}</td><td>{r.composing?"✓":""}</td></tr>
-                          ))}</tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
-                  {/* ─────────────────────────────────────── PROBE end */}
                 </>)}
                 {settingsTab==="about" && (<>
                   <div className="settings-panel-title">关于</div>
@@ -1147,7 +1116,7 @@ export default function App() {
       )}
       <footer className="bottom-bar">
         <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} 核</span></div>
-        <div className="bot-center"><kbd>Ctrl+Space</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
+        <div className="bot-center"><kbd>{hotkeyCombo.split('+').map(t=>t==='ctrl'?'Ctrl':t==='shift'?'Shift':t==='space'?'Space':t==='up'?'↑':t==='down'?'↓':t==='left'?'←':t==='right'?'→':t.toUpperCase()).join('+')}</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
         <div className="bot-right"><span>Workbench v0.1.0</span></div>
       </footer>
     </div>
