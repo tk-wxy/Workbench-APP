@@ -46,11 +46,9 @@ impl EverythingClient {
     pub fn search(&self, query: &str, limit: usize) -> Vec<EverythingResult> {
         let q = query.trim();
         if q.is_empty() { return Vec::new(); }
-        // es.exe 默认匹配全路径并按名称排序，与 Everything 本尊行为一致。
-        // -n 给大上限（500），前端 search_files 还会做最终截断。
-        let n = limit.max(100).min(500).to_string();
+        // es.exe 默认匹配全路径，与 Everything 本尊行为一致。
+        // 不设 -n 限制让 Everything 返回全部结果，前端 search_files 做最终截断。
         let output = match Command::new(&self.es_path)
-            .arg("-n").arg(&n)
             .arg(q)
             .output()
         {
@@ -70,6 +68,7 @@ impl EverythingClient {
             .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
+            .take(limit.min(200))
             .map(|path| {
                 let p = std::path::Path::new(path);
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
