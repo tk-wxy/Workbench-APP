@@ -34,5 +34,10 @@
       "csp": null
     }
   },
-  "plugins": {}
+  "plugins": {},
+  "bundle": {
+    "resources": [
+      "../Everything64.dll"
+    ]
+  }
 }
