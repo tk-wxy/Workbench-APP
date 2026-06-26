@@ -563,9 +563,7 @@ fn write_cf_hdrop(paths: &[String]) -> Result<(), String> {
 /// 将文件路径列表写回剪贴板（CF_HDROP 格式）或桌面落地 + 粘贴
 #[tauri::command]
 fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     println!("[filepaste] paths count={}", paths.len());
     for (i, p) in paths.iter().enumerate() {
@@ -592,15 +590,7 @@ fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String>
     }
     suppress_clip_until_now(); // 锁后水位补检：与文本路径对齐，封住 SKIP_CLIP_EVENTS 的竞态死角
 
-    let target = unsafe { GetForegroundWindow() };
-    unsafe { let _ = SetForegroundWindow(target); }
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+    paste_ctrl_v()?;
     Ok(())
 }
 
@@ -659,6 +649,27 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
         if op.fAnyOperationsAborted != 0 { println!("[desktop] 操作被中止 (aborted)"); }
     }
     println!("[desktop] copy done");
+    Ok(())
+}
+
+// ── 焦点交还 + Ctrl/V ─────────────────────────────────────
+/// hide+sleep(150ms) 之后调用，把系统剪贴板内容贴到前景窗口。
+/// 三处粘贴命令共用（图片-文件夹 / 图片-其余app / 文件），消除 Ctrl+V 九行重复。
+/// 锁纪律：不碰 CLIPBOARD_LOCK——调用方进入前已完成剪贴板写入并释放锁。
+fn paste_ctrl_v() -> Result<(), String> {
+    use enigo::Direction::{Press, Release};
+    use enigo::Keyboard;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+
+    let target = unsafe { GetForegroundWindow() };
+    unsafe { let _ = SetForegroundWindow(target); }
+    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+    let _ = enigo.key(enigo::Key::Control, Press);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::V, Press);
+    let _ = enigo.key(enigo::Key::V, Release);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::Control, Release);
     Ok(())
 }
 
@@ -814,9 +825,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     // 先隐藏窗口，再判断目标（与 set_clipboard_files 逻辑对齐）
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
@@ -893,15 +902,7 @@ fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>
         }
         suppress_clip_until_now();
 
-        let target = unsafe { GetForegroundWindow() };
-        unsafe { let _ = SetForegroundWindow(target); }
-        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-        let _ = enigo.key(enigo::Key::Control, Press);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::V, Press);
-        let _ = enigo.key(enigo::Key::V, Release);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::Control, Release);
+        paste_ctrl_v()?;
 
         // 临时文件不在此删：大图用的是 clip_images/ 原图（缓存管理）；小图也写在 clip_images/、
         // 由 janitor 孤儿清理（不被任何 orig_path 引用）。无脆弱定时 race，Explorer 读多久都安全。
@@ -938,24 +939,12 @@ fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>
         suppress_clip_until_now();
     }
 
-    let target = unsafe { GetForegroundWindow() };
-    unsafe { let _ = SetForegroundWindow(target); }
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+    paste_ctrl_v()?;
     Ok(())
 }
 
 #[tauri::command]
 fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-
     let t0 = std::time::Instant::now();
     {
         // 仅罩写入临界区；绝不跨下面的 hide/sleep/焦点交还/Ctrl+V 持锁（否则阻塞监听线程）
@@ -968,18 +957,7 @@ fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
     std::thread::sleep(std::time::Duration::from_millis(150));
 
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        let _ = SetForegroundWindow(hwnd);
-    }
-
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+    paste_ctrl_v()?;
     println!("[paste] done at {:?}", t0.elapsed());
     Ok(())
 }
