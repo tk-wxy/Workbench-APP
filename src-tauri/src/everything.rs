@@ -123,14 +123,19 @@ unsafe fn wide_to_string(ptr: *const u16) -> String {
 
 /// 定位 Everything64.dll：app 资源目录 → exe 同目录 → Everything 安装目录。
 fn find_dll() -> Option<PathBuf> {
-    // 1) app 资源目录（捆绑的 DLL，最优先）
+    // 1) exe 同目录（开发/打包通用）+ resources 子目录
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            // 开发模式：与 exe 同级；打包后：在 resources/ 下
-            for d in &[dir.to_path_buf(), dir.join("resources"), dir.join("../resources")] {
-                let dll = d.join("Everything64.dll");
-                if dll.exists() { eprintln!("[everything] found bundled DLL at {}", dll.display()); return Some(dll); }
+            let candidates = [
+                dir.join("Everything64.dll"),
+                dir.join("resources").join("Everything64.dll"),
+            ];
+            for dll in &candidates {
+                if dll.exists() { eprintln!("[everything] DLL: {}", dll.display()); return Some(dll.clone()); }
             }
+            // 开发模式 cargo run：exe 在 target/debug/，resources 在项目根 src-tauri/resources/
+            let proj_res = dir.join("../../../src-tauri/resources/Everything64.dll");
+            if proj_res.exists() { eprintln!("[everything] DLL (dev): {}", proj_res.display()); return Some(proj_res); }
         }
     }
     // 2) Everything 安装目录
