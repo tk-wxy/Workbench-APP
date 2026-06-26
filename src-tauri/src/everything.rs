@@ -63,7 +63,9 @@ impl EverythingClient {
             eprintln!("[everything] es.exe search exit={} stderr={}", output.status, String::from_utf8_lossy(&output.stderr).trim());
             return Vec::new();
         }
-        String::from_utf8_lossy(&output.stdout)
+        // es.exe 输出使用系统 ANSI 编码（中文 Windows = GBK），不能用 from_utf8_lossy
+        let text = ansi_to_utf8(&output.stdout);
+        text
             .lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
@@ -189,4 +191,28 @@ fn reg_install_path(hkey: isize) -> Option<PathBuf> {
     let clen = (buf_len as usize / 2).min(buf.len() - 1);
     buf.truncate(clen);
     String::from_utf16(&buf).ok().map(PathBuf::from)
+}
+
+// ── 编码：ANSI（系统代码页，中文 Win=GBK）→ UTF-8 ──
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn MultiByteToWideChar(
+        CodePage: u32, dwFlags: u32, lpMultiByteStr: *const u8,
+        cbMultiByte: i32, lpWideCharStr: *mut u16, cchWideChar: i32,
+    ) -> i32;
+}
+
+const CP_ACP: u32 = 0; // 系统默认 ANSI 代码页
+
+fn ansi_to_utf8(bytes: &[u8]) -> String {
+    if bytes.is_empty() { return String::new(); }
+    unsafe {
+        // 先取所需宽字符长度
+        let wlen = MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), bytes.len() as i32, std::ptr::null_mut(), 0);
+        if wlen <= 0 { return String::from_utf8_lossy(bytes).to_string(); }
+        let mut wide = vec![0u16; wlen as usize];
+        MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), bytes.len() as i32, wide.as_mut_ptr(), wlen);
+        String::from_utf16_lossy(&wide)
+    }
 }
