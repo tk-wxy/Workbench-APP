@@ -76,18 +76,23 @@ pub struct EverythingClient {
 unsafe impl Send for EverythingClient {}
 unsafe impl Sync for EverythingClient {}
 
-/// 加载 DLL 中的指定函数指针。name 以 \0 结尾的字节串传入。
-macro_rules! load_fn {
+/// 加载 DLL 中的指定函数指针。失败返回 None（不 panic）。
+macro_rules! load_fn_opt {
     ($dll:expr, $name:expr, $t:ty) => {{
         let addr = unsafe { GetProcAddress($dll, concat!($name, "\0").as_ptr()) };
-        if addr.is_null() { return None; }
-        unsafe { std::mem::transmute::<*mut std::ffi::c_void, $t>(addr) }
+        if addr.is_null() {
+            eprintln!("[everything] GetProcAddress({}) failed", $name);
+            None
+        } else {
+            Some(unsafe { std::mem::transmute::<*mut std::ffi::c_void, $t>(addr) })
+        }
     }};
 }
 
 impl EverythingClient {
     pub fn try_connect() -> Option<Self> {
         let dll_path = find_everything_dll()?;
+        eprintln!("[everything] found DLL: {}", dll_path.display());
         let wide: Vec<u16> = dll_path
             .to_string_lossy()
             .encode_utf16()
@@ -95,26 +100,36 @@ impl EverythingClient {
             .collect();
         let dll = unsafe { LoadLibraryW(wide.as_ptr()) };
         if dll.is_null() {
+            eprintln!("[everything] LoadLibraryW failed");
             return None;
         }
+        eprintln!("[everything] LoadLibraryW OK");
 
-        let set_search = load_fn!(dll, "Everything_SetSearchW", FnSetSearchW);
-        let query = load_fn!(dll, "Everything_QueryW", FnQueryW);
-        let get_num_results = load_fn!(dll, "Everything_GetNumResults", FnGetNumResults);
-        let get_result_file_name =
-            load_fn!(dll, "Everything_GetResultFileNameW", FnGetResultFileNameW);
-        let get_result_path = load_fn!(dll, "Everything_GetResultPathW", FnGetResultPathW);
-        let clean_up = load_fn!(dll, "Everything_CleanUp", FnCleanUp);
+        // 尝试 W 后缀，失败则尝试无后缀（部分版本差异）
+        let set_search = load_fn_opt!(dll, "Everything_SetSearchW", FnSetSearchW)
+            .or_else(|| load_fn_opt!(dll, "Everything_SetSearch", FnSetSearchW))?;
+        let query = load_fn_opt!(dll, "Everything_QueryW", FnQueryW)
+            .or_else(|| load_fn_opt!(dll, "Everything_Query", FnQueryW))?;
+        let get_num_results = load_fn_opt!(dll, "Everything_GetNumResults", FnGetNumResults)?;
+        let get_result_file_name = load_fn_opt!(dll, "Everything_GetResultFileNameW", FnGetResultFileNameW)?;
+        let get_result_path = load_fn_opt!(dll, "Everything_GetResultPathW", FnGetResultPathW)?;
+        let clean_up = load_fn_opt!(dll, "Everything_CleanUp", FnCleanUp)?;
 
-        // 一次性配置
+        eprintln!("[everything] all function pointers resolved OK");
+
+        // 一次性配置（同样尝试 W 和无后缀两种命名）
         let set_match_path: unsafe extern "system" fn(i32) =
-            load_fn!(dll, "Everything_SetMatchPath", unsafe extern "system" fn(i32));
+            load_fn_opt!(dll, "Everything_SetMatchPathW", unsafe extern "system" fn(i32))
+                .or_else(|| load_fn_opt!(dll, "Everything_SetMatchPath", unsafe extern "system" fn(i32)))?;
         let set_match_case: unsafe extern "system" fn(i32) =
-            load_fn!(dll, "Everything_SetMatchCase", unsafe extern "system" fn(i32));
-        let set_sort: FnSetSort = load_fn!(dll, "Everything_SetSort", FnSetSort);
+            load_fn_opt!(dll, "Everything_SetMatchCaseW", unsafe extern "system" fn(i32))
+                .or_else(|| load_fn_opt!(dll, "Everything_SetMatchCase", unsafe extern "system" fn(i32)))?;
+        let set_sort: FnSetSort =
+            load_fn_opt!(dll, "Everything_SetSort", FnSetSort)?;
         let set_request_flags: unsafe extern "system" fn(u32) =
-            load_fn!(dll, "Everything_SetRequestFlags", unsafe extern "system" fn(u32));
-        let set_max: FnSetMax = load_fn!(dll, "Everything_SetMax", FnSetMax);
+            load_fn_opt!(dll, "Everything_SetRequestFlags", unsafe extern "system" fn(u32))?;
+        let set_max: FnSetMax =
+            load_fn_opt!(dll, "Everything_SetMax", FnSetMax)?;
 
         unsafe {
             set_match_path(1); // 匹配全路径
@@ -188,26 +203,114 @@ unsafe fn wide_to_string(ptr: *const u16) -> String {
     String::from_utf16_lossy(std::slice::from_raw_parts(ptr, len))
 }
 
-/// 定位 Everything64.dll：注册表 → 常见路径。
-fn find_everything_dll() -> Option<std::path::PathBuf> {
+/// 定位 Everything DLL：注册表 → 常见路径 → Everything 进程路径。
+pub fn find_everything_dll() -> Option<std::path::PathBuf> {
+    // 1) 注册表
     for hkey in &[HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
         if let Some(p) = reg_install_path(*hkey) {
-            let dll = p.join("Everything64.dll");
-            if dll.exists() {
-                return Some(dll);
+            eprintln!("[everything] reg install path: {}", p.display());
+            for name in &["Everything64.dll", "Everything.dll"] {
+                let dll = p.join(name);
+                if dll.exists() {
+                    return Some(dll);
+                }
             }
         }
     }
+    // 2) 常见路径
     for candidate in &[
         r"C:\Program Files\Everything\Everything64.dll",
+        r"C:\Program Files\Everything\Everything.dll",
         r"C:\Program Files (x86)\Everything\Everything64.dll",
+        r"C:\Program Files (x86)\Everything\Everything.dll",
     ] {
         let p = std::path::PathBuf::from(candidate);
         if p.exists() {
             return Some(p);
         }
     }
+    // 3) Everything 进程路径：查找 Everything.exe 所在目录
+    if let Some(exe_dir) = find_everything_exe_dir() {
+        eprintln!("[everything] found via process: {}", exe_dir.display());
+        for name in &["Everything64.dll", "Everything.dll"] {
+            let dll = PathBuf::from(&exe_dir).join(name);
+            if dll.exists() {
+                return Some(dll);
+            }
+        }
+    }
+    eprintln!("[everything] DLL not found (reg + paths + process)");
     None
+}
+
+/// 通过 Toolhelp32 快照查找 Everything.exe 进程，取其所在目录。
+fn find_everything_exe_dir() -> Option<std::path::PathBuf> {
+    // 使用 kernel32 CreateToolhelp32Snapshot + Process32First/Next
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> *mut std::ffi::c_void;
+        fn Process32FirstW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn Process32NextW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W) -> i32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
+        fn QueryFullProcessImageNameW(
+            hProcess: *mut std::ffi::c_void, dwFlags: u32,
+            lpExeName: *mut u16, lpdwSize: *mut u32,
+        ) -> i32;
+    }
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESSENTRY32W {
+        dwSize: u32,
+        cntUsage: u32,
+        th32ProcessID: u32,
+        th32DefaultHeapID: usize,
+        th32ModuleID: u32,
+        cntThreads: u32,
+        th32ParentProcessID: u32,
+        pcPriClassBase: i32,
+        dwFlags: u32,
+        szExeFile: [u16; 260],
+    }
+
+    let snap = unsafe { CreateToolhelp32Snapshot(2/*TH32CS_SNAPPROCESS*/, 0) };
+    if snap.is_null() || snap as isize == -1 {
+        return None;
+    }
+    let mut pe = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        cntUsage: 0, th32ProcessID: 0, th32DefaultHeapID: 0, th32ModuleID: 0,
+        cntThreads: 0, th32ParentProcessID: 0, pcPriClassBase: 0, dwFlags: 0,
+        szExeFile: [0; 260],
+    };
+    let mut found = None;
+    unsafe {
+        if Process32FirstW(snap, &mut pe) != 0 {
+            loop {
+                let name = String::from_utf16_lossy(&pe.szExeFile);
+                let name = name.trim_end_matches('\0');
+                if name.eq_ignore_ascii_case("everything.exe") || name.eq_ignore_ascii_case("everything64.exe") {
+                    // 打开进程取完整路径
+                    let hp = OpenProcess(0x1000/*PROCESS_QUERY_LIMITED_INFORMATION*/, 0, pe.th32ProcessID);
+                    if !hp.is_null() {
+                        let mut buf = vec![0u16; 520];
+                        let mut len = (buf.len() * 2) as u32;
+                        if QueryFullProcessImageNameW(hp, 0, buf.as_mut_ptr(), &mut len) != 0 {
+                            let exe_path = String::from_utf16_lossy(&buf[..len as usize / 2]);
+                            if let Some(parent) = std::path::Path::new(exe_path.trim_end_matches('\0')).parent() {
+                                found = Some(parent.to_path_buf());
+                            }
+                        }
+                        CloseHandle(hp);
+                    }
+                    if found.is_some() { break; }
+                }
+                if Process32NextW(snap, &mut pe) == 0 { break; }
+            }
+        }
+        CloseHandle(snap);
+    }
+    found
 }
 
 fn reg_install_path(hkey: isize) -> Option<PathBuf> {
