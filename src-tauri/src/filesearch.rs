@@ -333,25 +333,22 @@ pub fn rebuild_index(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 切换搜索引擎（"builtin" / "everything"）。Everything 不可用时前端会收到回退提示。
+/// 切换搜索引擎。返回 (engine, connected) 供前端显示状态。
 #[tauri::command]
-pub fn set_search_engine(engine: String) -> Result<(), String> {
+pub fn set_search_engine(engine: String) -> serde_json::Value {
     match engine.as_str() {
         "everything" => {
-            // 尝试连接 Everything，失败则返回错误（前端可据此显示提示）
             EVERYTHING_CLIENT.get_or_init(EverythingClient::try_connect);
-            if EVERYTHING_CLIENT.get().and_then(|o| o.as_ref()).is_none() {
-                // 连接失败但不阻止切换——用户可能在 Everything 未运行时选择，
-                // 实际查询时 search_files 会自动回退内置引擎
-            }
+            let connected = EVERYTHING_CLIENT.get().and_then(|o| o.as_ref()).is_some();
             USE_EVERYTHING.store(true, Ordering::Relaxed);
+            serde_json::json!({ "ok": true, "connected": connected })
         }
         "builtin" => {
             USE_EVERYTHING.store(false, Ordering::Relaxed);
+            serde_json::json!({ "ok": true, "connected": false })
         }
-        _ => return Err(format!("未知搜索引擎: {engine}")),
+        _ => serde_json::json!({ "ok": false }),
     }
-    Ok(())
 }
 
 /// 获取当前搜索引擎 + Everything 可用状态 + 诊断信息。
