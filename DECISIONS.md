@@ -291,6 +291,8 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 - **落地**：放开 Alt（`has_alt` → MOD_ALT + VK_MENU）；**仅保留小黑名单**：Win 全系 + 裸 `Alt+Space`（系统菜单）/ 裸 `Alt+F4`（关窗）——这俩可注册但语义被 OS 占，留着是脚枪（Alt+Tab/Esc 不在主键表、天然无法构造）。
 - **教训**：「永久禁用/死胡同」标签也可能因架构演进而失效；存疑时开 spike 用数据验，别让旧结论挡住该走的路。
 
+**IME 兼容说明（2026-06-26）**：中文 IME 激活时 Ctrl+Space 录不进（IMM32 层拦截早于 RegisterHotKey）；切英文输入法后正常。非 bug，已在设置面板说明文字中告知用户。
+
 ---
 
 ## 10. 检测优先级：图片 > 文件 > 文本（截图去重）
@@ -390,9 +392,10 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 
 **正确机制**：
 1. **`tauri.conf.json` `dragDropEnabled:false`**（永久）：让 wry 不抢 OLE drop target 槽、不拦 HTML5，把槽留给我们自注册。（HTML5 拖放本未用，无损失。）
+   > ⚠️ **捆绑开关**：`dragDropEnabled:false` 同时做两件事——① wry 不注册自己的 OLE IDropTarget；② WebView2 `AllowExternalDrop` 置 false，**外部文件拖动的 HTML5 dragenter/dragleave 不触发**。上文"不拦 HTML5"仅指内部文本/图片拖拽，对外部 OS 文件无效。曾尝试纯前端 HTML5 dragenter 方案做悬停高亮，实测零触发——根因即此（见「拖入悬停高亮」条目）。
 2. **自注册 IDropTarget**（`src-tauri/src/dragdrop.rs`，windows crate `#[implement]`）：`OleInitialize`（RegisterDragDrop 要求之，仅 `CoInitializeEx` 会 `CO_E_NOTINITIALIZED`）→ `EnumChildWindows` 枚举窗口树 → `RegisterDragDrop` 到顶层 + 全部子孙窗。**DragEnter/DragOver** 查 CF_HDROP 设 `DROPEFFECT_COPY`/`NONE`（光标反馈）；**Drop** 用 `DragQueryFileW` 取路径 → `emit("files-dropped", { paths, x: pt.x, y: pt.y })` 后立即返回（handler 极简，不碰剪贴板/不 hide/不阻塞）。`pt`（`POINTL`）为屏幕物理像素。
 3. **落点双区判定**（S3b，前端，续38）：listen `files-dropped`，payload `{paths,x,y}`；`cssX/cssY = x/y ÷ window.devicePixelRatio`；`getBoundingClientRect()` 判是否在 `launcherDropRef`（`.app-grid`）内：`inLauncher`→入 `LauncherItem`（file/folder，持久化 `launcher-items`）；否则→原有 StageItem 路径（完整保留）。两分支末尾均保留 `setFocus`。落地区域 200ms `drop-flash` CSS 动画确认。
-   - **DragOver 实时高亮未做**：需 Rust DragOver 持续 emit 坐标，IPC 高频代价过高（每 wry 帧 ~16ms 一次 emit → 前端每帧响应），用落地闪烁代替。如后续确有需求，可在 DragEnter emit 一次「drag-enter」事件触发区域高亮（一次性，代价低）——当前未做，留后续。
+   - **拖入悬停高亮（2026-06-26 已实现）**：`dragDropEnabled:false` 下 WebView2 的 `AllowExternalDrop` 被禁用，HTML5 dragenter/dragleave **不触发**——放弃纯前端方案。改为 Rust `DragEnter` emit `"file-drag-enter"`、`DragLeave`/`Drop` emit `"file-drag-leave"`；前端 listen 后 100ms 防抖（过滤多 HWND 注册导致的快速 leave-enter 序列）；`fileDragOver` state 驱动 `.file-drag-active` CSS 类，`box-shadow inset` 同时高亮 `.app-panel` 和 `.drop-area`（不破坏 overflow/layout）。`Drop` 中主动 emit leave（OLE 在 Drop 后不再调 DragLeave）。
 
 **耐久性（关键设计，Step 0 微测定）**：OLE **不沿父链 walk-up**——只注册祖先 `WRY_WEBVIEW` 时 DragEnter 零触发；drop 只投递给光标正下方最深窗口。故注册「顶层+全部子孙窗」。**只在 setup 注册一次**：曾试「每次 show 经 `run_on_main_thread` 幂等重注册」扛 webview 重建，实测**重注册虽报成功、产出的 target 却收不到回调、破坏正常拖入**（单变量隔离：停掉重注册即恢复）——已回退，接受「渲染进程重建后失效到重启」的罕见代价。
 

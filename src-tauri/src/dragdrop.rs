@@ -48,6 +48,8 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
     fn DragEnter(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, _pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
         let has = has_cf_hdrop(p_data_obj);
         self.accept.store(has, Ordering::Relaxed);
+        // 每次进入（含 HWND 切换）都 emit；前端用防抖过滤 HWND 间快速 leave-enter
+        if has { let _ = self.app.emit("file-drag-enter", ()); }
         set_effect(pdweffect, has);
         Ok(())
     }
@@ -57,6 +59,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
     }
     fn DragLeave(&self) -> Result<()> {
         self.accept.store(false, Ordering::Relaxed);
+        let _ = self.app.emit("file-drag-leave", ());
         Ok(())
     }
     fn Drop(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
@@ -65,6 +68,8 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         let paths = p_data_obj.map(extract_paths).unwrap_or_default();
         println!("[dragdrop] Drop {} path(s) at ({}, {})", paths.len(), pt.x, pt.y);
         let accept = !paths.is_empty();
+        // Drop 是终态，OLE 不再调 DragLeave，主动通知前端清除高亮
+        let _ = self.app.emit("file-drag-leave", ());
         if accept { let _ = self.app.emit("files-dropped", FilesDroppedPayload { paths, x: pt.x, y: pt.y }); }
         self.accept.store(false, Ordering::Relaxed);
         set_effect(pdweffect, accept);
