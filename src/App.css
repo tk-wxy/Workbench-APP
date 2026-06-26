@@ -222,3 +222,6 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-index-hint{width:min(640px,80%);font-size:11px;color:var(--text3);padding:6px 12px;font-style:italic;}
 .hotkey-input{width:140px;padding:4px 8px;background:var(--fill-2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--font);}
 .hotkey-input:focus{outline:none;border-color:var(--accent);}
+/* 录制态按钮：高亮 + 呼吸动画提示「正在监听按键」 */
+.settings-action.recording,.settings-action.recording:hover{color:var(--accent);border-color:var(--accent);background:rgba(96,165,250,0.12);animation:hotkey-rec 1.2s ease-in-out infinite;}
+@keyframes hotkey-rec{0%,100%{opacity:1;}50%{opacity:0.55;}}

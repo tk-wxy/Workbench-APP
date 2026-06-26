@@ -45,7 +45,7 @@ npm run tauri build    # 打包
 - **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——那条路有 500-800ms 抖动（见【💀 死胡同】）。
 - `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
 - **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
-- **自定义热键（V2-1，续44）**：combo 不再硬编码——轮询读静态 `HOTKEY_VK_KEYS`（VK 列表），注册层用 `CURRENT_SHORTCUT`。setup **同步读 store** 落地（`read_combo_from_store`，失败兜底 Ctrl+Space，无启动空窗）；`set_hotkey` 命令做**原子注册切换**（先 register(new) 成功→unregister(old)→更新两静态，失败保留旧组合并回滚 + 红字提示）；**持久化由前端 store 负责**，命令不写 store。**V2-1 表驱动 `parse_combo`**（非白名单）：blocklist win/super/meta + alt 系（永久禁用见下方死胡同）；必须含 Ctrl；可选 Shift；恰 1 个主键（`key_token` 表，a-z/0-9/f1-f12/space/方向键，53 条）。**三键（Ctrl+Shift+X）GUI 未验证**——DECISIONS §9 V2-1 注意事项。V21-TEMP 文本框为临时 harness，V2-2 清理。轮询循环只改 combo 检测一行、长短按判定不动。
+- **自定义热键（V2-1，续44）**：combo 不再硬编码——轮询读静态 `HOTKEY_VK_KEYS`（VK 列表），注册层用 `CURRENT_SHORTCUT`。setup **同步读 store** 落地（`read_combo_from_store`，失败兜底 Ctrl+Space，无启动空窗）；`set_hotkey` 命令做**原子注册切换**（先 register(new) 成功→unregister(old)→更新两静态，失败保留旧组合并回滚 + 红字提示）；**持久化由前端 store 负责**，命令不写 store。**表驱动 `parse_combo`**（非白名单）：blocklist **仅** win/super/meta + 裸 alt+space/alt+f4（OS 占用）；**修饰键 Ctrl/Shift/Alt 均可选（续46 起，含全无 = 纯主键，已弃「必须含 Ctrl」）**；恰 1 个主键（`key_token` 表，a-z/0-9/f1-f12/space/方向键，53 条）。⚠️ **Alt 续46 spike 实测可用**（RegisterHotKey 消费组合 → 前台收不到 Alt → 不触发菜单栏激活；推翻旧「Alt 死路」，详见 DECISIONS §9 续46 + 下方死胡同已划掉条目）。⚠️ **纯主键会注册成全局热键、抢占该键**（如录 `f` → 打字 f 触发窗口）——用户自负，前端提示已警示。**录制式输入（续46）**：快捷键 tab「录制」按钮，capture 阶段监听 keydown（`addEventListener(..,true)`+preventDefault/stopPropagation 抢在全局 onKey 前）→ `tokenFromCode` 映射 `e.code` 成 token → 写回文本框（不自动应用，再点「应用」走 changeHotkey）。轮询循环只改 combo 检测一行、长短按判定不动。
 - 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
   - ⚠️ **别再给热键关闭加「淡出再 hide」**：试过（续25），延迟 hide 让窗口多可见 200ms，破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按时第 N 次「开」被误判成「关」→ 热键失灵/不灵敏。已回退。淡出仅用于前端点击驱动的关闭（启动/粘贴），不用于键态轮询驱动的热键关闭。
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
@@ -80,7 +80,7 @@ npm run tauri build    # 打包
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
 - **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
 - **用 `RegisterHotKey` 的 Pressed/Released 事件判按键时长**：其事件经消息队列异步投递、有 500–800ms 抖动，阈值 200/300/500ms 全失败。⚠️ 注意区分：长短按本身**已实现**，但靠的是 `GetAsyncKeyState` 轮询物理电平（DECISIONS §2），**不是** RegisterHotKey 事件——别再回头试事件时长判定。
-- **修饰键 `Alt`（裸 Alt 触发菜单栏）/ `Alt+Space`（被系统窗口菜单占用）/ `Fn`（硬件键，OS 收不到）**：改用非 Alt 修饰键（`Ctrl+空格` / `Ctrl+反引号`）。
+- ~~**修饰键 `Alt`（裸 Alt 触发菜单栏）**~~：**已推翻（续46 spike 实测）**——Alt 组合（如 Alt+Q）可用，`RegisterHotKey` 消费整个组合、前台应用收不到 Alt → 不触发菜单栏激活；旧结论来自早期 JS/rdev 录入态路线、与当前架构无关（详见 DECISIONS §9 续46）。仍禁：`Fn`（硬件键，OS 收不到）/ 裸 `Alt+Space`（系统窗口菜单）/ 裸 `Alt+F4`（关窗）——这几个语义被 OS 占用。
 - **拖入 target「每次 show 经 `run_on_main_thread` 幂等重注册」**：实测重注册虽报成功、产出的 IDropTarget 却收不到回调、破坏正常拖入（单变量隔离确认）。拖入注册**只在 setup 做一次**。详见 DECISIONS §14。（注：原生拖入本身**可行、已实现**，别误删——曾被错误登记为死胡同后已推翻。）
 
 ### 🔍 出问题时反查（症状 → 先查哪条铁律）

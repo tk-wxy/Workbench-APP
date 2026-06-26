@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-25（续45：自定义热键 V2-2——正式文本输入 UI + 底栏动态化 + 清理 PROBE/V21-TEMP）
+> **最后更新**：2026-06-26（续46：录制式快捷键自定义——「录制」按钮捕获物理按键写回文本框，纯前端）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -15,6 +15,7 @@
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索四区联动**（输入即同时过滤启动台/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）+ **启动器收藏托盘**（手动策展持久化，app picker，.lnk 拖入提取图标存 kind:"app"，S3a/S3b/S3c GUI 实测通过 2026-06-25）+ **增强搜索接入文件系统**（Ctrl+K 分两组 Tier1+Tier2，文件结果分隔线+防抖+未就绪提示，filesearch.rs 后台索引，S4a/S4b/S4c GUI 实测通过 2026-06-25）+ **自定义热键 V2**（V2-1：`parse_combo` 表驱动任意组合，53 条主键，三键 GUI 实测通过；V2-2：正式文本输入 UI + Enter 触发 + 格式提示 + 底栏动态 kbd + `changeHotkey` 类型放宽为 string + 清理 PROBE/V21-TEMP，**全部 GUI 实测通过（2026-06-25）**）
 - **已完成（全部 GUI 实测通过）**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ S3c✓（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——S4a✓（filesearch.rs 文件系统后台索引）+ S4b✓（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖）+ S4c✓（应用扫描改后台预建，消除首次呼出卡顿）。**所有功能 2026-06-25 GUI 实测通过。**
+- **新增（续46，前端 + Rust）**：**录制式热键 + 修饰键全可选 + 放开 Alt**。三件事：① **录制式输入**——快捷键 tab「应用」前加「录制」按钮，录制态 capture 阶段挂 `keydown`（`addEventListener(..,true)`+preventDefault/stopPropagation，抢在全局冒泡 `onKey` 前）→ `tokenFromCode` 映射 `e.code` 成 token 写回文本框（不自动应用，再点「应用」走 `changeHotkey`）。② **修饰键全可选**——`parse_combo` 去掉「必须含 Ctrl」，`has_ctrl/has_shift/has_alt` 各自可选动态构建 mods/vk_list（含全无=纯主键，会抢占该键、前端已警示）。③ **🔑 放开 Alt（spike 实测推翻 §9「Alt 死路」）**——探针证 RegisterHotKey 对 Alt+Q/Alt+Space 全可注册；运行时实测 Alt+Q：呼出/Esc/light dismiss/记事本菜单栏未激活/焦点回归全正常。根因：RegisterHotKey 消费整个组合，前台收不到 Alt → 不触发菜单栏激活；旧结论来自早期 JS/rdev 录入态、张冠李戴。落地：放开 Alt，**仅留小黑名单 Win + 裸 Alt+Space/Alt+F4**（OS 占用）。**验证**：tsc 零错误 + cargo clippy 8 基线不变；GUI 实测 Alt+Q 通过（2026-06-26，呼出/关闭/Esc/light dismiss/记事本菜单栏不激活全正常）。文件：`src-tauri/src/lib.rs`（parse_combo 重写 + 头注释）/ `src/App.tsx`（+recording state/useEffect/录制按钮，handler 放开 Alt）/ `src/App.css`（+`.settings-action.recording`）/ DECISIONS §9 续46 + CLAUDE.md（Alt 死胡同划掉）。
 - **新增（续45，纯前端清理 + UI 完善）**：**自定义热键 V2-2**——删 PROBE V2-0（CapRow/logCap/probingRef/capLog/probe CSS）和 V21-TEMP harness（v21TempCombo/segmented）。`changeHotkey` 签名放宽为 `string`，输入 normalize toLowercase；新增 `hotkeyInput` state（编辑态与已提交值分离，成功时同步）；store 加载放宽接受任意非空字符串。热键 tab 改文本输入框 + 应用按钮（Enter 触发）+ 格式提示行。底栏 `<kbd>` 改动态渲染（ctrl→Ctrl/shift→Shift/space→Space/方向键→箭头）。`.hotkey-input` CSS 替换 `.probe-*`。**tsc 零错误✓；GUI 实测通过（2026-06-25）。**
 - **新增（续44，Rust `parse_combo` 重写 + 前端 V21-TEMP harness）**：**自定义热键 V2-1**——`key_token` 表驱动任意 combo 替换 V1 白名单 `parse_combo`；blocklist win/alt；必须含 Ctrl；可选 Shift（三键轮询天然支持）；`key_token` 53 条（a-z/0-9/f1-f12/space/方向键）。`set_hotkey` register 错误 → "组合被占用或系统不可用"。单测 11 断言全过后已删。前端 `v21TempCombo` state + 文本框 + 应用按钮（V21-TEMP 标注）。**cargo check/clippy 零新增警告（8 基线不变）；tsc 零错误；单测实测通过已删；三键长短按 GUI 实测通过（2026-06-25，可正常开关，长短按符合预期）。**
 - **新增（续42，Rust 后台线程 + 前端兜底语义）**：**应用扫描后台预建 S4c**——把 ~1.5s 的开始菜单扫描+图标提取从「前端首次 visible 时同步 invoke」挪到 setup 阶段 `start_apps_worker` 后台线程（`lib.rs`，仿 `start_index_worker`，延迟 1s）调用现有 `scan_start_menu`（**逻辑一字不动**，顺带缓存 `APP_CACHE`）→ `emit("apps-ready", apps)`。前端加 `un6` 监听 `apps-ready` 填充 `apps`；首次 visible 改兜底语义（`appsRef.current.length===0` 才 invoke `scan_start_menu` 兜底，命中缓存 ~120µs）。`sortedApps`/搜索链 deps 含 apps、自动响应、零改动。**cargo check/clippy 零新增警告（8 基线不变）；临时单测实测后台扫 114 apps 1.47s、缓存命中 117µs 已验删；T1–T6 GUI 实测通过（2026-06-24，首次呼出无卡顿）**
@@ -191,6 +192,26 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-26 (录制式热键 + 修饰键全可选 + 放开 Alt（spike 推翻 §9 死路），续46)
+本次三件事，递进完成：
+
+**① 录制式输入（前端）**
+- 快捷键 tab「应用」前加「录制」按钮。录制态 useEffect（dep `[recording]`）capture 阶段挂 `window.addEventListener("keydown", onKey, true)`，`preventDefault()+stopPropagation()` 抢在全局冒泡 `onKey`（visible effect，line ~806）前，录制时不触发 Esc 关窗/Ctrl+K/方向键。`tokenFromCode` 映射 `e.code`→token（KeyA→a/Digit1→1/F1-12→f1-12/Space→space/Arrow*→up·down·left·right，对齐 Rust 53 条）；仅修饰键时实时预览 `ctrl+…`，按主键定型写回 `hotkeyInput`（**不自动应用**，再点「应用」走 `changeHotkey`）；Esc 取消录制。CSS `.settings-action.recording` 高亮 + `@keyframes hotkey-rec` 呼吸动画。
+
+**② 修饰键全可选（去「必须含 Ctrl」）**
+- `parse_combo`：删掉「必须含 Ctrl」检查；`has_ctrl/has_shift/has_alt` 各自可选、动态构建 mods/vk_list；主键恒在保证 vk_list 永不为空（防轮询 `all()` 恒真卡死）。`Shortcut::new(Some(empty))` 与 `None` 等价、无需分支。⚠️ 纯主键会注册成全局热键抢占该键——用户自负，前端提示警示。
+
+**③ 🔑 放开 Alt（spike 实测推翻 §9「Alt 死路」）**
+- **探针（headless，`cargo test alt_spike` 验后已删）**：`RegisterHotKey` 对 Alt+Q / Alt+Space / Ctrl+Q **全部可注册 OK**（连 Alt+Space 都能注册 → 旧说「Alt+Space 谁都抢不到」也不准）。
+- **运行时实测（Alt+Q，用户 GUI）**：呼出/关闭无白闪；Esc 能关；light dismiss 正常；**记事本前台按 Alt+Q，菜单栏未激活、焦点正常回归、无系统音**。
+- **根因**：`RegisterHotKey` 消费整个 Alt+Q 组合 → 前台应用收不到 Alt 的 `WM_SYSKEYDOWN` → 不触发菜单栏激活；show/hide 由独立物理轮询驱动。旧「Alt 死路」来自早期 JS/rdev 录入态路线、与本架构无关（张冠李戴）。
+- **落地**：`parse_combo` 放开 Alt（`has_alt` → `Modifiers::ALT` + `VK_MENU`）；前端录制 handler 改为仅拒 Win；**仅保留小黑名单**：Win 全系 + 裸 `Alt+Space`（`has_alt && !ctrl && !shift && main∈{space,f4}` → Err）。前端格式提示同步更新。
+
+**不破坏**：show 路径三约束/轮询循环/长短按语义/注册原子切换/store 读写/全局 onKey/light dismiss 全未动；轮询读 `HOTKEY_VK_KEYS` 自动支持 Alt（VK_MENU），未改轮询代码。
+**验证**：`tsc --noEmit` 零错误✓；`cargo check` 干净 + `cargo clippy` 8 条基线不变✓；GUI 实测 Alt+Q 全过（2026-06-26）。
+**教训**：「永久禁用/死胡同」标签会因架构演进失效；存疑开 spike 用数据验，别让旧结论挡路。
+**文件**：`src-tauri/src/lib.rs`（parse_combo 重写 + 头注释，临时 alt_spike 测试已删）/ `src/App.tsx`（+recording state/useEffect/录制按钮，handler 放开 Alt，提示语）/ `src/App.css`（+`.settings-action.recording` +`@keyframes hotkey-rec`）/ `DECISIONS.md` §9 续46 / `CLAUDE.md`（热键节 + Alt 死胡同划掉）/ `MEMORY.md`。
 
 ### 2026-06-25 (自定义热键 V2-1：表驱动任意 combo parse_combo + V21-TEMP harness，续44)
 - **功能**：将 `parse_combo` 从 2 预设白名单改为表驱动任意组合解析器，支持 Ctrl+(Shift+)主键 格式。V21-TEMP harness 文本框用于临时验证。

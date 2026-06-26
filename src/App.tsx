@@ -226,6 +226,7 @@ export default function App() {
   const [hotkeyCombo, setHotkeyCombo] = useState("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
   const [hotkeyInput, setHotkeyInput] = useState("ctrl+space"); // 设置面板输入框编辑态
   const [hotkeyError, setHotkeyError] = useState(""); // 切换失败提示（如被其他应用占用），3s 后自动清
+  const [recording, setRecording] = useState(false); // 录制态：监听物理按键写回 hotkeyInput，不自动应用
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
   const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
   const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
@@ -630,6 +631,41 @@ export default function App() {
       setTimeout(() => setHotkeyError(""), 3000);
     }
   }, [hotkeyCombo, store]);
+  // 录制式快捷键：录制态下捕获阶段监听 keydown（抢在全局 onKey 冒泡 handler 之前），转成 token 串写回
+  // hotkeyInput（不自动应用，用户再点「应用」走 changeHotkey）。token 映射对齐 Rust key_token 的 53 条。
+  useEffect(() => {
+    if (!recording) return;
+    const tokenFromCode = (code: string): string | null => {
+      if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();        // KeyA → a
+      if (/^Digit[0-9]$/.test(code)) return code.slice(5);                     // Digit1 → 1
+      if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();           // F12 → f12
+      if (code === "Space") return "space";
+      if (code === "ArrowUp") return "up";
+      if (code === "ArrowDown") return "down";
+      if (code === "ArrowLeft") return "left";
+      if (code === "ArrowRight") return "right";
+      return null;
+    };
+    const flash = (msg: string) => { setHotkeyError(msg); setTimeout(() => setHotkeyError(""), 2500); };
+    const onKey = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === "Escape") { setRecording(false); return; } // Esc 取消录制（不关窗——已被 stopPropagation 拦下）
+      const mods: string[] = [];
+      if (e.ctrlKey) mods.push("ctrl");
+      if (e.shiftKey) mods.push("shift");
+      if (e.altKey) mods.push("alt"); // Alt 续46 spike 实测可用（RegisterHotKey 消费组合，不触发菜单栏）
+      const isMod = /^(Control|Shift|Alt|Meta)(Left|Right)$/.test(e.code);
+      if (isMod) { setHotkeyInput(mods.length ? mods.join("+") + "+…" : "…"); return; } // 仅修饰键：实时预览等待主键
+      if (e.metaKey) { flash("暂不支持 Win 组合"); return; } // 仅拒 Win（OS 吞键）；Alt+Space/Alt+F4 由 Rust 兜底拒
+      const main = tokenFromCode(e.code); // 修饰键可选（含纯主键）；Alt/Win 仍拒
+      if (!main) { flash("不支持的键"); return; }
+      setHotkeyInput([...mods, main].join("+")); // 定型，写回文本框
+      setRecording(false);
+    };
+    window.addEventListener("keydown", onKey, true); // capture 阶段：抢在全局 onKey（冒泡）之前
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [recording]);
   const clearClipboard = useCallback(async () => {
     setClipboard([]);
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
@@ -1089,12 +1125,14 @@ export default function App() {
                         onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeHotkey(hotkeyInput);}}}
                         placeholder="如 ctrl+shift+f"
                         spellCheck={false}
+                        readOnly={recording}
                       />
+                      <button className={"settings-action"+(recording?" recording":"")} onClick={()=>{setHotkeyError("");setRecording(r=>!r);}}>{recording?"按下快捷键…":"录制"}</button>
                       <button className="settings-action" onClick={()=>changeHotkey(hotkeyInput)}>应用</button>
                     </div>
                   </div>
                   {hotkeyError && <p className="settings-hint settings-hint-error">{hotkeyError}</p>}
-                  <p className="settings-hint">格式：ctrl+x · ctrl+shift+x · ctrl+f12 · ctrl+down（必须含 Ctrl）</p>
+                  <p className="settings-hint">点「录制」后直接按下组合键自动填入；也可手动输入。格式：ctrl+x · alt+q · ctrl+shift+x · f9（修饰键 Ctrl/Shift/Alt 可选；不支持 Win 及 Alt+Space/Alt+F4；纯主键会抢占该键，慎设）</p>
                   {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>恢复默认</button>}
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>

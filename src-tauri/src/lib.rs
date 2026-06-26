@@ -1024,9 +1024,9 @@ fn clear_clip_image_cache() -> Result<(), String> {
 //  自定义热键（V2-1）—— 表驱动任意组合解析 + 运行时原子切换
 //
 //  两层编码：VK 供 GetAsyncKeyState 轮询（HOTKEY_VK_KEYS），Shortcut 供 RegisterHotKey
-//  消费（CURRENT_SHORTCUT）。blocklist: win/super/meta（OS 吞）/ alt 系（WebView2 菜单栏
-//  激活死路，DECISIONS §9）。必须含 Ctrl；可选 Shift；恰一个主键（a-z/0-9/f1-f12/space/
-//  方向键，共 53 条）。三键长短按语义由 start_hotkey_monitor 状态机天然支持——spike B GUI 待实测。
+//  消费（CURRENT_SHORTCUT）。blocklist: win/super/meta（OS 吞）+ 裸 alt+space/alt+f4（OS 占用）。
+//  修饰键 Ctrl/Shift/Alt 均可选（续46 起，含全无 = 纯主键；Alt 经 spike 实测可用，见 §9）；恰一个
+//  主键（a-z/0-9/f1-f12/space/方向键，共 53 条）。三键长短按语义由 start_hotkey_monitor 状态机天然支持。
 // ════════════════════════════════════════════════════════════════════
 
 /// 主键 token（全小写）→ (GetAsyncKeyState VK 码, RegisterHotKey Code)。
@@ -1076,39 +1076,44 @@ fn key_token(tok: &str) -> Option<(u16, Code)> {
 }
 
 /// combo 串解析 → (轮询 VK 列表, RegisterHotKey Shortcut)。
-/// 格式：全小写 '+' 分隔，修饰在前主键在后，如 "ctrl+space" / "ctrl+shift+f" / "ctrl+down"。
+/// 格式：全小写 '+' 分隔，修饰在前主键在后，如 "ctrl+space" / "ctrl+shift+f" / "f9"（纯主键）。修饰键可选。
 fn parse_combo(combo: &str) -> Result<(Vec<u16>, Shortcut), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{VK_CONTROL, VK_SHIFT, VK_MENU};
     let lower = combo.to_lowercase();
     let tokens: Vec<&str> = lower.split('+').map(str::trim).collect();
     if tokens.iter().any(|t| matches!(*t, "win" | "super" | "meta" | "windows")) {
         return Err("不支持 Win 键".into());
     }
-    if tokens.iter().any(|t| matches!(*t, "alt" | "option")) {
-        return Err("暂不支持 Alt 组合".into());
-    }
-    if !tokens.iter().any(|t| matches!(*t, "ctrl" | "control")) {
-        return Err("快捷键必须包含 Ctrl".into());
-    }
+    // 修饰键 Ctrl/Shift/Alt 均可选（含全无 = 纯主键）；Win 仍 blocklist（OS 吞键）。
+    // Alt 续46 spike 实测可用：RegisterHotKey 消费整个组合 → 前台应用收不到 Alt → 不触发菜单栏激活
+    // （推翻 §9 旧「Alt 死路」结论，那来自早期 JS/rdev 录入态路线，与本架构无关）。
+    let has_ctrl = tokens.iter().any(|t| matches!(*t, "ctrl" | "control"));
     let has_shift = tokens.contains(&"shift");
+    let has_alt = tokens.iter().any(|t| matches!(*t, "alt" | "option"));
     let main_keys: Vec<&str> = tokens.iter()
         .copied()
-        .filter(|t| !matches!(*t, "ctrl" | "control" | "shift"))
+        .filter(|t| !matches!(*t, "ctrl" | "control" | "shift" | "alt" | "option"))
         .collect();
     if main_keys.len() != 1 {
         return Err("需要且只能有一个主键".into());
     }
     let main_tok = main_keys[0];
+    // OS 保留的裸 Alt 组合（Alt+Space=系统菜单 / Alt+F4=关窗）——可注册但语义被 OS 占，禁用防脚枪。
+    if has_alt && !has_ctrl && !has_shift && matches!(main_tok, "space" | "f4") {
+        return Err("Alt+Space / Alt+F4 被系统占用".into());
+    }
     let (main_vk, code) = key_token(main_tok)
         .ok_or_else(|| format!("不支持的键：{main_tok}"))?;
-    let mods = if has_shift {
-        Modifiers::CONTROL | Modifiers::SHIFT
-    } else {
-        Modifiers::CONTROL
-    };
-    let mut vk_list = vec![VK_CONTROL.0];
+    let mut mods = Modifiers::empty();
+    if has_ctrl { mods |= Modifiers::CONTROL; }
+    if has_shift { mods |= Modifiers::SHIFT; }
+    if has_alt { mods |= Modifiers::ALT; }
+    let mut vk_list = Vec::new();
+    if has_ctrl { vk_list.push(VK_CONTROL.0); }
     if has_shift { vk_list.push(VK_SHIFT.0); }
-    vk_list.push(main_vk);
+    if has_alt { vk_list.push(VK_MENU.0); } // VK_MENU = 通用 Alt，供 GetAsyncKeyState 轮询
+    vk_list.push(main_vk); // 主键恒在；vk_list 永不为空（防 all() 恒真卡住）
+    // Shortcut::new(Some(empty)) 与 None 等价（global_hotkey 内部 unwrap_or empty），无需分支
     Ok((vk_list, Shortcut::new(Some(mods), code)))
 }
 

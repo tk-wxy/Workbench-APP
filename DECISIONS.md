@@ -278,6 +278,19 @@ Bytes 20+:   UTF-16 路径（\0 分隔，双 \0 结尾）
 
 **未完成（V2-2）**：① 设置 segmented 改文本输入区（删 V21-TEMP harness、删 segmented、加 input+验证提示）；② 底栏 kbd 文案改动态展示 `hotkeyCombo`（当前仍硬编码 "Ctrl+Space"）；③ `set_hotkey` 成功后前端 `setHotkeyCombo` 需接受任意字符串（类型签名由 union→string）。
 
+### 录制式输入 + 放开 Alt + 修饰键全可选（2026-06-26，续46）
+
+**录制式输入**：快捷键 tab 加「录制」按钮——录制态下 capture 阶段挂 `keydown`（`addEventListener(..,true)` + `preventDefault/stopPropagation`，抢在全局冒泡 `onKey` 前，录制时不误触 Esc/Ctrl+K/方向键），`tokenFromCode` 把 `e.code` 映射成 token 写回文本框（不自动应用，再点「应用」走 `changeHotkey`）。
+
+**修饰键全可选**：去掉「必须含 Ctrl」硬要求，`has_ctrl/has_shift/has_alt` 各自可选、动态构建 mods/vk_list（`Shortcut::new(Some(empty))` 与 `None` 等价，无需分支）。⚠️ 纯主键会注册成全局热键抢占该键，前端提示已警示。
+
+**🔑 推翻「Alt 死路」（spike 实测，本节最重要更新）**：§9 表与 V2-1 第 264 条曾把 Alt 系列「永久禁用」，理由是「WebView2 捕获 Alt → 菜单栏激活」。**续46 spike 实测证伪**：
+- **探针（headless）**：`RegisterHotKey` 对 Alt+Q / Alt+Space / Ctrl+Q **全部可注册 OK**——OS 层不拒 Alt（连 Alt+Space 都能注册，故旧说「Alt+Space 谁都抢不到」也不准）。
+- **运行时实测（Alt+Q）**：呼出/关闭无白闪；Esc 能关（焦点到 JS）；light dismiss 正常；**在记事本前台按 Alt+Q，记事本菜单栏未激活、焦点正常回归、无系统提示音**。
+- **根因**：`RegisterHotKey` 消费整个 Alt+Q 组合，前台应用根本收不到那个 Alt 的 `WM_SYSKEYDOWN` → 不触发菜单栏激活；show/hide 由独立物理轮询驱动。旧「Alt 死路」结论来自早期 **JS/rdev 录入态**路线（JS 捕获 Alt 触发 WebView2 菜单语义），与现在「RegisterHotKey 消费 + 轮询驱动」架构无关，**张冠李戴**。
+- **落地**：放开 Alt（`has_alt` → MOD_ALT + VK_MENU）；**仅保留小黑名单**：Win 全系 + 裸 `Alt+Space`（系统菜单）/ 裸 `Alt+F4`（关窗）——这俩可注册但语义被 OS 占，留着是脚枪（Alt+Tab/Esc 不在主键表、天然无法构造）。
+- **教训**：「永久禁用/死胡同」标签也可能因架构演进而失效；存疑时开 spike 用数据验，别让旧结论挡住该走的路。
+
 ---
 
 ## 10. 检测优先级：图片 > 文件 > 文本（截图去重）
