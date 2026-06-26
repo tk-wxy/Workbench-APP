@@ -1274,13 +1274,7 @@ export default function App() {
                     </div>
                   </div>
                   {searchEngine==="everything" && !everythingAvailable && (
-                    <div style={{marginTop:4}}>
-                      <p className="settings-hint settings-hint-error" style={{marginBottom:8}}>
-                        ⚠ Everything 搜索引擎不可用。将自动回退内置引擎。
-                      </p>
-                      <button className="settings-action" onClick={async()=>{changeSearchEngine("everything");try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_search_engine",{engine:"everything"});const st=await invoke<{everythingAvailable:boolean}>("get_search_engine");setEverythingAvailable(st.everythingAvailable);}catch{}}}>🔄 重新检测</button>
-                      <p className="settings-hint" style={{marginTop:4}}>确保 Everything 正在运行。若缺 es.exe 将自动下载。</p>
-                    </div>
+                    <p className="settings-hint settings-hint-error">⚠ Everything 未连接，查询自动回退内置引擎。确保 Everything 正在运行。（<button className="settings-action" style={{fontSize:11,padding:"2px 8px"}} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_search_engine",{engine:"everything"});const st=await invoke<{everythingAvailable:boolean}>("get_search_engine");setEverythingAvailable(st.everythingAvailable);}catch{}}}>重新检测</button>）</p>
                   )}
                   <p className="settings-hint">内置引擎：遍历配置的目录建内存索引，查询 &lt;5ms。Everything：全盘毫秒级搜索，需安装 Everything（voidtools.com）并保持运行。重建周期 10 分钟（仅内置引擎）。</p>
                   <div className="settings-section-label">扫描目录</div>
