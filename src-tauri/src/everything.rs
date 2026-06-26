@@ -46,10 +46,9 @@ impl EverythingClient {
     pub fn search(&self, query: &str, _limit: usize) -> Vec<EverythingResult> {
         let q = query.trim();
         if q.is_empty() { return Vec::new(); }
-        // es.exe 默认匹配全路径，与 Everything 本尊行为一致。
-        // -n 200 让 es.exe 搜到 200 条即停，避免全量遍历（搜"的"可能几万条）
+        // -n 500 让 es.exe 搜到即停，够用且不卡；500 行 ANSI 转换微秒级。
         let output = match Command::new(&self.es_path)
-            .arg("-n").arg("200")
+            .arg("-n").arg("500")
             .arg(q)
             .output()
         {
