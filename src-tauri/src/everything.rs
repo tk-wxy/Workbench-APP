@@ -1,15 +1,44 @@
-// Everything 搜索引擎集成（通过 es.exe 命令行工具）。
+// Everything 搜索引擎集成（IPC 窗口消息协议）。
 //
-// 不依赖 Everything SDK DLL（便携版不含），直接调用 Everything 自带的 es.exe。
-// Everything 未安装 / 未运行时，自动回退内置引擎。
-//
-// es.exe 用法：es.exe -sort name -n 50 <query>
-// 输出每行一个完整路径，按名称排序。
+// 通过 SendMessage(WM_COPYDATA) 直接与 Everything 进程通信。
+// 零外部依赖，适用于所有版本（安装版/便携版），只需 Everything 正在运行。
 
 use std::path::PathBuf;
-use std::process::Command;
 
-/// 匹配结果（与 FileSearchResult 对齐）
+#[link(name = "user32")]
+extern "system" {
+    fn RegisterWindowMessageW(lpString: *const u16) -> u32;
+    fn FindWindowW(lpClassName: *const u16, lpWindowName: *const u16) -> isize;
+    fn SendMessageW(hWnd: isize, Msg: u32, wParam: usize, lParam: isize) -> isize;
+    fn GetWindowThreadProcessId(hWnd: isize, lpdwProcessId: *mut u32) -> u32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> isize;
+    fn CloseHandle(hObject: isize) -> i32;
+    fn VirtualAllocEx(hProcess: isize, lpAddress: isize, dwSize: usize, flAllocationType: u32, flProtect: u32) -> isize;
+    fn VirtualFreeEx(hProcess: isize, lpAddress: isize, dwSize: usize, dwFreeType: u32) -> i32;
+    fn WriteProcessMemory(hProcess: isize, lpBaseAddress: isize, lpBuffer: *const u8, nSize: usize, lpNumberOfBytesWritten: *mut usize) -> i32;
+    fn ReadProcessMemory(hProcess: isize, lpBaseAddress: isize, lpBuffer: *mut u8, nSize: usize, lpNumberOfBytesRead: *mut usize) -> i32;
+    fn QueryFullProcessImageNameW(hProcess: isize, dwFlags: u32, lpExeName: *mut u16, lpdwSize: *mut u32) -> i32;
+}
+
+const WM_COPYDATA: u32 = 0x004A;
+const MEM_COMMIT: u32 = 0x1000;
+const MEM_RELEASE: u32 = 0x8000;
+const PAGE_READWRITE: u32 = 0x04;
+const PROCESS_VM_OPERATION: u32 = 0x0008;
+const PROCESS_VM_READ: u32 = 0x0010;
+const PROCESS_VM_WRITE: u32 = 0x0020;
+
+// Everything IPC 命令码
+const IPC_SET_SEARCH: usize = 1;
+const IPC_GET_NUM_FILES: usize = 0x105;
+const IPC_GET_NUM_FOLDERS: usize = 0x104;
+const IPC_GET_RESULT_PATH: usize = 0x10C;
+const IPC_GET_RESULT_FILENAME: usize = 0x10D;
+
 pub struct EverythingResult {
     pub path: String,
     pub name: String,
@@ -18,221 +47,143 @@ pub struct EverythingResult {
 }
 
 pub struct EverythingClient {
-    es_path: PathBuf,
+    hwnd: isize,
+    pid: u32,
+    hproc: isize,
+    ipc_msg: u32,
 }
 
-// 线程安全（只读 PathBuf + 子进程）
 unsafe impl Send for EverythingClient {}
 unsafe impl Sync for EverythingClient {}
 
 impl EverythingClient {
-    /// 查找 es.exe（同 Everything.exe 目录 → 注册表 → 常见路径 → 进程快照）。
     pub fn try_connect() -> Option<Self> {
-        let es = find_es_exe()?;
-        eprintln!("[everything] es.exe: {}", es.display());
-        // 快速验证 es.exe 可用
-        let output = Command::new(&es)
-            .arg("-n").arg("1")
-            .arg("test_query_workbench_connectivity")
-            .output().ok()?;
-        // 即使无结果，只要进程能跑就行
-        if !output.status.success() {
-            eprintln!("[everything] es.exe returned error status");
+        // 注册 IPC 消息
+        let ipc_name: Vec<u16> = "EVERYTHING_IPC\0".encode_utf16().collect();
+        let ipc_msg = unsafe { RegisterWindowMessageW(ipc_name.as_ptr()) };
+        if ipc_msg == 0 {
+            eprintln!("[everything] RegisterWindowMessage failed");
             return None;
         }
-        eprintln!("[everything] es.exe OK");
-        Some(Self { es_path: es })
+
+        // 找 Everything 窗口
+        let cls: Vec<u16> = "EVERYTHING_TASKBAR_NOTIFICATION\0".encode_utf16().collect();
+        let hwnd = unsafe { FindWindowW(cls.as_ptr(), std::ptr::null()) };
+        if hwnd == 0 {
+            eprintln!("[everything] Everything window not found");
+            return None;
+        }
+
+        let mut pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        let hproc = unsafe { OpenProcess(PROCESS_VM_OPERATION | PROCESS_VM_READ | PROCESS_VM_WRITE, 0, pid) };
+        if hproc == 0 {
+            eprintln!("[everything] OpenProcess failed pid={pid}");
+            return None;
+        }
+
+        eprintln!("[everything] IPC connected hwnd={hwnd} pid={pid} msg={ipc_msg}");
+        Some(Self { hwnd, pid, hproc, ipc_msg })
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Vec<EverythingResult> {
-        let q = query.trim();
-        if q.is_empty() {
-            return Vec::new();
+        if query.trim().is_empty() { return Vec::new(); }
+
+        // 1) 发送搜索查询
+        self.ipc_write_command(IPC_SET_SEARCH, query.as_bytes());
+
+        // 2) 取结果数量
+        let nf = self.ipc_read_u32(IPC_GET_NUM_FILES);
+        let nd = self.ipc_read_u32(IPC_GET_NUM_FOLDERS);
+        let total = (nf + nd) as usize;
+        if total == 0 { return Vec::new(); }
+
+        // 3) 取每条结果
+        let cap = limit.min(total).min(50);
+        let mut out = Vec::with_capacity(cap);
+        for i in 0..total {
+            if out.len() >= limit { break; }
+            let path = self.ipc_read_result_string(IPC_GET_RESULT_PATH, i);
+            let name = self.ipc_read_result_string(IPC_GET_RESULT_FILENAME, i);
+            if path.is_empty() && name.is_empty() { continue; }
+            let full = if path.is_empty() { name.clone() }
+                else if name.is_empty() { path.clone() }
+                else { format!("{}\\{}", path.trim_end_matches('\\'), name) };
+            let ext = std::path::Path::new(&name).extension()
+                .and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+            out.push(EverythingResult { path: full, name, ext, is_dir: false });
         }
-        let n = limit.min(50).to_string();
-        let output = match Command::new(&self.es_path)
-            .arg("-sort").arg("name")
-            .arg("-n").arg(&n)
-            .arg(q)
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("[everything] es.exe spawn failed: {e}");
-                return Vec::new();
-            }
-        };
-        if !output.status.success() {
-            eprintln!("[everything] es.exe exit != 0");
-            return Vec::new();
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .map(|path| {
-                let p = std::path::Path::new(path);
-                let name = p.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path)
-                    .to_string();
-                let ext = p.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                EverythingResult { path: path.to_string(), name, ext, is_dir: false }
-            })
-            .collect()
+        out
+    }
+
+    /// 发送命令（仅写入，无返回值）。
+    fn ipc_write_command(&self, cmd: usize, data: &[u8]) {
+        let remote = self.alloc(data.len().max(1));
+        if remote == 0 { return; }
+        unsafe { WriteProcessMemory(self.hproc, remote, data.as_ptr(), data.len(), std::ptr::null_mut()) };
+        let cds = CopyData { dwData: cmd, cbData: data.len() as u32, lpData: remote };
+        unsafe { SendMessageW(self.hwnd, WM_COPYDATA, 0, &cds as *const _ as isize) };
+        unsafe { VirtualFreeEx(self.hproc, remote, 0, MEM_RELEASE) };
+    }
+
+    /// 查询 u32：Everything 将结果写到远程缓冲区，我们读回。
+    fn ipc_read_u32(&self, cmd: usize) -> u32 {
+        let remote = self.alloc(4);
+        if remote == 0 { return 0; }
+        let zero: [u8; 4] = [0; 4];
+        unsafe { WriteProcessMemory(self.hproc, remote, zero.as_ptr(), 4, std::ptr::null_mut()) };
+        let cds = CopyData { dwData: cmd, cbData: 4, lpData: remote };
+        unsafe { SendMessageW(self.hwnd, WM_COPYDATA, 0, &cds as *const _ as isize) };
+        let mut buf = [0u8; 4];
+        unsafe { ReadProcessMemory(self.hproc, remote, buf.as_mut_ptr(), 4, std::ptr::null_mut()) };
+        unsafe { VirtualFreeEx(self.hproc, remote, 0, MEM_RELEASE) };
+        u32::from_ne_bytes(buf)
+    }
+
+    /// 查询字符串结果：wParam=索引，结果写到远程缓冲区。
+    fn ipc_read_result_string(&self, cmd: usize, index: usize) -> String {
+        let cap = 520 * 2; // 520 wchars
+        let remote = self.alloc(cap);
+        if remote == 0 { return String::new() };
+        // 零填缓冲区
+        let zeros = vec![0u8; cap];
+        unsafe { WriteProcessMemory(self.hproc, remote, zeros.as_ptr(), cap, std::ptr::null_mut()) };
+        let cds = CopyData { dwData: cmd, cbData: cap as u32, lpData: remote };
+        unsafe { SendMessageW(self.hwnd, WM_COPYDATA, index, &cds as *const _ as isize) };
+        let mut buf = vec![0u16; cap / 2];
+        unsafe { ReadProcessMemory(self.hproc, remote, buf.as_mut_ptr() as *mut u8, cap, std::ptr::null_mut()) };
+        unsafe { VirtualFreeEx(self.hproc, remote, 0, MEM_RELEASE) };
+        String::from_utf16_lossy(&buf).trim_end_matches('\0').to_string()
+    }
+
+    fn alloc(&self, size: usize) -> isize {
+        unsafe { VirtualAllocEx(self.hproc, 0, size.max(1), MEM_COMMIT, PAGE_READWRITE) }
     }
 }
 
-/// 查找 es.exe：Everything.exe 同目录 → 注册表 → 常见路径 → 进程快照。
-pub fn find_everything_dll() -> Option<PathBuf> {
-    // 保留此函数兼容外部调用（filesearch 中的 get_search_engine）
-    find_es_exe()
-}
-
-fn find_es_exe() -> Option<PathBuf> {
-    // 1) 从运行中的 Everything.exe 反向查找同目录
-    if let Some(exe_dir) = find_everything_exe_dir() {
-        let es = PathBuf::from(&exe_dir).join("es.exe");
-        if es.exists() {
-            return Some(es);
-        }
+impl Drop for EverythingClient {
+    fn drop(&mut self) {
+        if self.hproc != 0 { unsafe { CloseHandle(self.hproc) }; }
     }
-    // 2) 注册表
-    for hkey in &[HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
-        if let Some(p) = reg_install_path(*hkey) {
-            let es = p.join("es.exe");
-            if es.exists() {
-                return Some(es);
-            }
-        }
-    }
-    // 3) 常见路径
-    for dir in &[
-        r"C:\Program Files\Everything",
-        r"C:\Program Files (x86)\Everything",
-        r"D:\Program Files\Everything",
-        r"D:\Program Files (x86)\Everything",
-    ] {
-        let es = PathBuf::from(dir).join("es.exe");
-        if es.exists() {
-            return Some(es);
-        }
-    }
-    None
-}
-
-// ── 进程快照：找 Everything.exe 所在目录 ──
-
-#[link(name = "kernel32")]
-extern "system" {
-    fn CreateToolhelp32Snapshot(dwFlags: u32, th32ProcessID: u32) -> *mut std::ffi::c_void;
-    fn Process32FirstW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W) -> i32;
-    fn Process32NextW(hSnapshot: *mut std::ffi::c_void, lppe: *mut PROCESSENTRY32W) -> i32;
-    fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
-    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::ffi::c_void;
-    fn QueryFullProcessImageNameW(
-        hProcess: *mut std::ffi::c_void, dwFlags: u32,
-        lpExeName: *mut u16, lpdwSize: *mut u32,
-    ) -> i32;
 }
 
 #[repr(C)]
 #[allow(non_snake_case)]
-struct PROCESSENTRY32W {
-    dwSize: u32,
-    cntUsage: u32,
-    th32ProcessID: u32,
-    th32DefaultHeapID: usize,
-    th32ModuleID: u32,
-    cntThreads: u32,
-    th32ParentProcessID: u32,
-    pcPriClassBase: i32,
-    dwFlags: u32,
-    szExeFile: [u16; 260],
-}
+struct CopyData { dwData: usize, cbData: u32, lpData: isize }
 
-fn find_everything_exe_dir() -> Option<PathBuf> {
-    let snap = unsafe { CreateToolhelp32Snapshot(2, 0) };
-    if snap.is_null() || snap as isize == -1 {
-        return None;
-    }
-    let mut pe = PROCESSENTRY32W {
-        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-        cntUsage: 0, th32ProcessID: 0, th32DefaultHeapID: 0, th32ModuleID: 0,
-        cntThreads: 0, th32ParentProcessID: 0, pcPriClassBase: 0, dwFlags: 0,
-        szExeFile: [0; 260],
-    };
-    let mut found = None;
-    unsafe {
-        if Process32FirstW(snap, &mut pe) != 0 {
-            loop {
-                let name = String::from_utf16_lossy(&pe.szExeFile);
-                let name = name.trim_end_matches('\0');
-                if name.eq_ignore_ascii_case("everything.exe") || name.eq_ignore_ascii_case("everything64.exe") {
-                    let hp = OpenProcess(0x1000, 0, pe.th32ProcessID);
-                    if !hp.is_null() {
-                        let mut buf = vec![0u16; 520];
-                        let mut len = buf.len() as u32;
-                        if QueryFullProcessImageNameW(hp, 0, buf.as_mut_ptr(), &mut len) != 0 {
-                            let exe_path = String::from_utf16_lossy(&buf[..len as usize]);
-                            let exe_path = exe_path.trim_end_matches('\0').to_string();
-                            eprintln!("[everything] Everything.exe at: {}", exe_path);
-                            if let Some(parent) = std::path::Path::new(&exe_path).parent() {
-                                found = Some(parent.to_path_buf());
-                            }
-                        }
-                        CloseHandle(hp);
-                    }
-                    if found.is_some() { break; }
-                }
-                if Process32NextW(snap, &mut pe) == 0 { break; }
-            }
-        }
-        CloseHandle(snap);
-    }
-    found
-}
-
-// ── 注册表 ──
-
-#[link(name = "advapi32")]
-extern "system" {
-    fn RegOpenKeyExW(
-        hKey: isize, lpSubKey: *const u16, ulOptions: u32, samDesired: u32,
-        phkResult: *mut isize,
-    ) -> i32;
-    fn RegQueryValueExW(
-        hKey: isize, lpValueName: *const u16, lpReserved: *mut std::ffi::c_void,
-        lpType: *mut u32, lpData: *mut u8, lpcbData: *mut u32,
-    ) -> i32;
-    fn RegCloseKey(hKey: isize) -> i32;
-}
-
-const HKEY_CURRENT_USER: isize = -0x7FFFFFFF - 1 + 1;
-const HKEY_LOCAL_MACHINE: isize = -0x7FFFFFFF - 1 + 2;
-const KEY_READ: u32 = 0x20019;
-const ERROR_SUCCESS: i32 = 0;
-
-fn reg_install_path(hkey: isize) -> Option<PathBuf> {
-    let mut key: isize = 0;
-    let sub: Vec<u16> = "SOFTWARE\\Everything"
-        .encode_utf16().chain(std::iter::once(0)).collect();
-    let ret = unsafe { RegOpenKeyExW(hkey, sub.as_ptr(), 0, KEY_READ, &mut key) };
-    if ret != ERROR_SUCCESS || key == 0 { return None; }
-    let val: Vec<u16> = "InstallLocation"
-        .encode_utf16().chain(std::iter::once(0)).collect();
+/// 诊断用：返回 Everything.exe 路径。
+pub fn find_everything_dll() -> Option<PathBuf> {
+    let cls: Vec<u16> = "EVERYTHING_TASKBAR_NOTIFICATION\0".encode_utf16().collect();
+    let hwnd = unsafe { FindWindowW(cls.as_ptr(), std::ptr::null()) };
+    if hwnd == 0 { return None; }
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    let hp = unsafe { OpenProcess(0x1000, 0, pid) };
+    if hp == 0 { return None; }
     let mut buf = vec![0u16; 520];
-    let mut buf_len: u32 = (buf.len() * 2) as u32;
-    let ret = unsafe {
-        RegQueryValueExW(key, val.as_ptr(), std::ptr::null_mut(),
-            std::ptr::null_mut(), buf.as_mut_ptr() as *mut u8, &mut buf_len)
-    };
-    unsafe { RegCloseKey(key) };
-    if ret != ERROR_SUCCESS { return None; }
-    let char_len = (buf_len as usize / 2).min(buf.len() - 1);
-    buf.truncate(char_len);
-    String::from_utf16(&buf).ok().map(PathBuf::from)
+    let mut len = buf.len() as u32;
+    let ok = unsafe { QueryFullProcessImageNameW(hp, 0, buf.as_mut_ptr(), &mut len) };
+    unsafe { CloseHandle(hp) };
+    if ok == 0 { return None; }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len as usize]).trim_end_matches('\0')))
 }
