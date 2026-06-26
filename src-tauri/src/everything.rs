@@ -43,12 +43,13 @@ impl EverythingClient {
         }
     }
 
-    pub fn search(&self, query: &str, limit: usize) -> Vec<EverythingResult> {
+    pub fn search(&self, query: &str, _limit: usize) -> Vec<EverythingResult> {
         let q = query.trim();
         if q.is_empty() { return Vec::new(); }
         // es.exe 默认匹配全路径，与 Everything 本尊行为一致。
-        // 不设 -n 限制让 Everything 返回全部结果，前端 search_files 做最终截断。
+        // -n 200 让 es.exe 搜到 200 条即停，避免全量遍历（搜"的"可能几万条）
         let output = match Command::new(&self.es_path)
+            .arg("-n").arg("200")
             .arg(q)
             .output()
         {
@@ -64,14 +65,10 @@ impl EverythingClient {
         }
         // es.exe 输出使用系统 ANSI 编码（中文 Windows = GBK），不能用 from_utf8_lossy
         let text = ansi_to_utf8(&output.stdout);
-        let all_lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-        eprintln!("[everything] query=\"{}\" → {} raw results", q, all_lines.len());
-        if all_lines.len() <= 3 {
-            for l in &all_lines { eprintln!("[everything]   {}", l); }
-        }
-        all_lines
+        let results: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        eprintln!("[everything] query=\"{}\" → {} results", q, results.len());
+        results
             .into_iter()
-            .take(limit.min(200))
             .map(|path| {
                 let p = std::path::Path::new(path);
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or(path).to_string();
