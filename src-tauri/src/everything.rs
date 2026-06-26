@@ -136,6 +136,9 @@ fn find_dll() -> Option<PathBuf> {
             // 开发模式 cargo run：exe 在 target/debug/，resources 在项目根 src-tauri/resources/
             let proj_res = dir.join("../../../src-tauri/resources/Everything64.dll");
             if proj_res.exists() { eprintln!("[everything] DLL (dev): {}", proj_res.display()); return Some(proj_res); }
+            // 兜底：项目根目录
+            let proj_root = dir.join("../../../Everything64.dll");
+            if proj_root.exists() { eprintln!("[everything] DLL (root): {}", proj_root.display()); return Some(proj_root); }
         }
     }
     // 2) Everything 安装目录
