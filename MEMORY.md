@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，待 GUI 实测）
+> **最后更新**：2026-07-01（续52+53 代码已提交；重构抽取 paste_ctrl_v() 消除 Ctrl+V 重复；续53 待 GUI 实测）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -194,6 +194,10 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-07-01 (重构：抽取 paste_ctrl_v() 消除 Ctrl+V 四份重复)
+- **问题**：`set_clipboard_image`（文件夹分支 / 其余 app 分支）、`set_clipboard_files`、`paste_clipboard` 四处各写了一份完全相同的 Ctrl+V 九行代码（GetForegroundWindow→SetForegroundWindow→enigo Ctrl/Press/V/Release）。- **修复**：抽取 `paste_ctrl_v()` 辅助函数（28 行→1 行），四处调用替换；清理三函数中不再需要的 `use enigo`/`SetForegroundWindow`。净 -22 行。**编译/tsc/clippy 零回归**。
+- 文件：`src-tauri/src/lib.rs`。
 
 ### 2026-06-26 (截图粘到文件夹走 CF_HDROP 落地真 PNG + 消除大图卡顿，续53)
 - **git 裁决（取证在先）**：① 文件夹粘截图「失败」**不是回归**——图片粘贴自 `38df8b9`(06-15) 起就一直是 `set_image` 位图 + Ctrl+V，资源管理器文件夹(`CabinetWClass`)从不接受位图;桌面特判 `WorkerW/Progman`(`fefb623` 06-17 引入)从未匹配过文件夹类、也没被收窄;`CabinetWClass`/`ExploreWClass` 在全历史从未出现 → 文件夹落地是**新增能力**。用户「之前能粘」极可能是把「粘*文件*进文件夹」（本就支持，CF_HDROP）记成了「粘*截图*」。② 卡顿**是真回归**——`1d17e8b`(06-23 历史图改原图) 把非桌面分支解码从 base64 缩略图(≤1024px) 换成全分辨率原图(~25MB RGBA)，主线程同步跑堵住热键轮询;且对文件夹是「白解码」(位图收不下)。本次一并解决。
