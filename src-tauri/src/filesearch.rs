@@ -354,18 +354,18 @@ pub fn set_search_engine(engine: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 获取当前搜索引擎（"builtin" 或 "everything"）+ Everything 可用状态 + 诊断信息。
+/// 获取当前搜索引擎 + Everything 可用状态 + 诊断信息。
 #[tauri::command]
 pub fn get_search_engine() -> serde_json::Value {
     let engine = if USE_EVERYTHING.load(Ordering::Relaxed) { "everything" } else { "builtin" };
-    let available = EVERYTHING_CLIENT
+    let connected = EVERYTHING_CLIENT
         .get()
         .and_then(|o| o.as_ref())
         .is_some();
-    let dll = crate::everything::find_everything_dll();
+    let es_found = crate::everything::find_everything_dll().is_some();
     serde_json::json!({
         "engine": engine,
-        "everythingAvailable": available,
-        "everythingDll": dll.map(|p| p.to_string_lossy().to_string()),
+        "everythingAvailable": connected,
+        "everythingEsFound": es_found,
     })
 }
