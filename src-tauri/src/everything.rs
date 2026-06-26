@@ -49,6 +49,7 @@ impl EverythingClient {
         // es.exe 默认匹配全路径，与 Everything 本尊行为一致。
         // 不设 -n 限制让 Everything 返回全部结果，前端 search_files 做最终截断。
         let output = match Command::new(&self.es_path)
+            .arg("-match-path")
             .arg(q)
             .output()
         {
@@ -64,10 +65,13 @@ impl EverythingClient {
         }
         // es.exe 输出使用系统 ANSI 编码（中文 Windows = GBK），不能用 from_utf8_lossy
         let text = ansi_to_utf8(&output.stdout);
-        text
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
+        let all_lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        eprintln!("[everything] query=\"{}\" → {} raw results", q, all_lines.len());
+        if all_lines.len() <= 3 {
+            for l in &all_lines { eprintln!("[everything]   {}", l); }
+        }
+        all_lines
+            .into_iter()
             .take(limit.min(200))
             .map(|path| {
                 let p = std::path::Path::new(path);
