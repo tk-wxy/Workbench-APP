@@ -24,16 +24,33 @@ unsafe impl Sync for EverythingClient {}
 
 impl EverythingClient {
     pub fn try_connect() -> Option<Self> {
-        let es = find_es_exe()?;
-        // 验证 es.exe 可执行（-h 输出帮助，不依赖 Everything 是否运行）
-        match Command::new(&es).arg("-h").output() {
+        // 1) 尝试找 es.exe
+        if let Some(es) = find_es_exe() {
+            if let Some(client) = Self::validate_es(&es) {
+                return Some(client);
+            }
+        }
+        // 2) es.exe 不存在 → 检测 Everything 是否运行，自动下载
+        if let Some(exe_dir) = find_everything_exe_dir() {
+            let dest = exe_dir.join("es.exe");
+            eprintln!("[everything] es.exe missing, auto-downloading to {}", dest.display());
+            if auto_download_es(&dest) {
+                if let Some(client) = Self::validate_es(&dest) {
+                    return Some(client);
+                }
+            }
+        }
+        None
+    }
+
+    fn validate_es(es: &std::path::Path) -> Option<Self> {
+        match Command::new(es).arg("-h").output() {
             Ok(o) if o.status.success() => {
                 eprintln!("[everything] es.exe OK: {}", es.display());
-                Some(Self { es_path: es })
+                Some(Self { es_path: es.to_path_buf() })
             }
             Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                eprintln!("[everything] es.exe -h failed: status={} stderr={}", o.status, stderr.trim());
+                eprintln!("[everything] es.exe -h failed: status={} stderr={}", o.status, String::from_utf8_lossy(&o.stderr).trim());
                 None
             }
             Err(e) => {
@@ -77,9 +94,6 @@ impl EverythingClient {
             .collect()
     }
 }
-
-/// 查找 es.exe：Everything 进程同目录 → 注册表 → 常见路径。
-pub fn find_everything_dll() -> Option<PathBuf> { find_es_exe() }
 
 /// 公开：获取 Everything 安装目录（给前端「打开目录」按钮用）。
 pub fn find_everything_exe_dir_pub() -> Option<PathBuf> { find_everything_exe_dir() }
@@ -193,6 +207,85 @@ fn reg_install_path(hkey: isize) -> Option<PathBuf> {
     let clen = (buf_len as usize / 2).min(buf.len() - 1);
     buf.truncate(clen);
     String::from_utf16(&buf).ok().map(PathBuf::from)
+}
+
+// ── 自动下载 es.exe ──
+
+const ES_DOWNLOAD_URL: &str = "https://www.voidtools.com/ES-1.1.0.28.zip";
+
+/// 自动下载 es.exe 到指定路径。使用系统内置 certutil（Win7+ 均有），零外部依赖。
+fn auto_download_es(dest: &std::path::Path) -> bool {
+    let tmp_zip = std::env::temp_dir().join("wb_es.zip");
+    let tmp_dir = std::env::temp_dir().join("wb_es_tmp");
+    // 清理上次残留
+    let _ = std::fs::remove_file(&tmp_zip);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    // Step 1: 下载 zip
+    eprintln!("[everything] downloading es.exe from {} ...", ES_DOWNLOAD_URL);
+    let dl = std::process::Command::new("certutil")
+        .args(["-urlcache", "-split", "-f", ES_DOWNLOAD_URL])
+        .arg(&tmp_zip)
+        .output();
+    match dl {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            eprintln!("[everything] certutil failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+            return false;
+        }
+        Err(e) => {
+            // certutil 不可用，尝试 PowerShell
+            eprintln!("[everything] certutil not available, trying powershell: {e}");
+            let ps = std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command"])
+                .arg(format!(
+                    "$ProgressPreference='SilentlyContinue';Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+                    ES_DOWNLOAD_URL, tmp_zip.display()
+                ))
+                .output();
+            match ps {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    eprintln!("[everything] powershell download failed: {}", String::from_utf8_lossy(&o.stderr).trim());
+                    return false;
+                }
+                Err(e) => {
+                    eprintln!("[everything] download failed: {e}");
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Step 2: 解压
+    if !tmp_zip.exists() { return false; }
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let ps = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command"])
+        .arg(format!(
+            "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            tmp_zip.display(), tmp_dir.display()
+        ))
+        .output();
+    match ps {
+        Ok(o) if o.status.success() => {}
+        _ => { eprintln!("[everything] unzip failed"); return false; }
+    }
+
+    // Step 3: 复制 es.exe 到 Everything 目录
+    let src = tmp_dir.join("es.exe");
+    if !src.exists() { eprintln!("[everything] es.exe not found in zip"); return false; }
+    if let Err(e) = std::fs::copy(&src, dest) {
+        eprintln!("[everything] copy es.exe failed: {e}");
+        return false;
+    }
+
+    // Step 4: 清理
+    let _ = std::fs::remove_file(&tmp_zip);
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    eprintln!("[everything] es.exe auto-downloaded OK");
+    true
 }
 
 // ── 编码：ANSI（系统代码页，中文 Win=GBK）→ UTF-8 ──

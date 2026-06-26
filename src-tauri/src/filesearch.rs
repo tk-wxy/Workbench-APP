@@ -362,11 +362,9 @@ pub fn get_search_engine() -> serde_json::Value {
         .get()
         .and_then(|o| o.as_ref())
         .is_some();
-    let es_found = crate::everything::find_everything_dll().is_some();
     serde_json::json!({
         "engine": engine,
         "everythingAvailable": connected,
-        "everythingEsFound": es_found,
     })
 }
 
