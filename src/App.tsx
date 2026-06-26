@@ -1118,7 +1118,10 @@ export default function App() {
                   onMouseEnter={()=>setEnhSelIdx(i)}
                   onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
                   <div className="enh-result-icon">{icon}</div>
-                  <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                  <div className="enh-result-text">
+                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                    {r.kind==="fs" && <span className="enh-result-path">{r.path}</span>}
+                  </div>
                   <span className="enh-result-badge">{badge}</span>
                 </div>
               </Fragment>
