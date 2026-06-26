@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-01（续52+53 代码已提交；重构抽取 paste_ctrl_v() 消除 Ctrl+V 重复；续53 待 GUI 实测）
+> **最后更新**：2026-07-01（续52+53 已提交；重构 paste_ctrl_v；增强搜索内置引擎——可配目录+子序列匹配+recency+手动重建）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -194,6 +194,17 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-07-01 (增强搜索内置引擎——可配扫描目录+子序列匹配+recency+手动重建)
+- **引擎增强**（`src-tauri/src/filesearch.rs`）：
+  - 扫描目录：从硬编码 5 个 → 读 store key `scan-dirs`，用户可在设置面板增删，兜底默认 5 个
+  - `IndexEntry` 新增 `mtime_secs`（文件修改时间）
+  - 匹配算法：子串 → 子序列（"rd" 匹配 "README.md"，"vsc" 匹配 "Visual Studio Code.exe"；回退子串兼容短查询）
+  - 排序：匹配质量 + 前缀加分 + recency 加分（今天+50/本周+30/本月+10）
+  - 重建周期 30min→10min；新增 `get_scan_dirs` / `rebuild_index` 命令
+- **设置面板**（`src/App.tsx`）：新增「搜索」tab——引擎状态+条目数 / 立即重建索引 / 扫描目录列表+添加移除 / store key `scan-dirs` 持久化
+- **编译**：cargo check ✅ / clippy 8 基线 ✅ / tsc ✅
+- 文件：`src-tauri/src/filesearch.rs` / `src-tauri/src/lib.rs` / `src/App.tsx` / `src/App.css`
 
 ### 2026-07-01 (重构：抽取 paste_ctrl_v() 消除 Ctrl+V 四份重复)
 - **问题**：`set_clipboard_image`（文件夹分支 / 其余 app 分支）、`set_clipboard_files`、`paste_clipboard` 四处各写了一份完全相同的 Ctrl+V 九行代码（GetForegroundWindow→SetForegroundWindow→enigo Ctrl/Press/V/Release）。- **修复**：抽取 `paste_ctrl_v()` 辅助函数（28 行→1 行），四处调用替换；清理三函数中不再需要的 `use enigo`/`SetForegroundWindow`。净 -22 行。**编译/tsc/clippy 零回归**。
