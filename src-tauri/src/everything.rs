@@ -46,9 +46,10 @@ impl EverythingClient {
     pub fn search(&self, query: &str, limit: usize) -> Vec<EverythingResult> {
         let q = query.trim();
         if q.is_empty() { return Vec::new(); }
-        let n = limit.min(50).to_string();
+        // es.exe 默认匹配全路径并按名称排序，与 Everything 本尊行为一致。
+        // -n 给大上限（500），前端 search_files 还会做最终截断。
+        let n = limit.max(100).min(500).to_string();
         let output = match Command::new(&self.es_path)
-            .arg("-sort").arg("name")
             .arg("-n").arg(&n)
             .arg(q)
             .output()
