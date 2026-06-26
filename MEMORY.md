@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-26（续46：录制式快捷键自定义——「录制」按钮捕获物理按键写回文本框，纯前端）
+> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -15,6 +15,8 @@
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索四区联动**（输入即同时过滤启动台/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）+ **启动器收藏托盘**（手动策展持久化，app picker，.lnk 拖入提取图标存 kind:"app"，S3a/S3b/S3c GUI 实测通过 2026-06-25）+ **增强搜索接入文件系统**（Ctrl+K 分两组 Tier1+Tier2，文件结果分隔线+防抖+未就绪提示，filesearch.rs 后台索引，S4a/S4b/S4c GUI 实测通过 2026-06-25）+ **自定义热键 V2**（V2-1：`parse_combo` 表驱动任意组合，53 条主键，三键 GUI 实测通过；V2-2：正式文本输入 UI + Enter 触发 + 格式提示 + 底栏动态 kbd + `changeHotkey` 类型放宽为 string + 清理 PROBE/V21-TEMP，**全部 GUI 实测通过（2026-06-25）**）
 - **已完成（全部 GUI 实测通过）**：启动器重设计——S3a✓（持久化收藏托盘 + app picker）+ S3b✓（拖入落点双区判定）+ S3c✓（.lnk 拖入提取图标+名称→ kind:"app"）；增强搜索 Tier 2——S4a✓（filesearch.rs 文件系统后台索引）+ S4b✓（前端 Ctrl+K 接入文件结果，分组+分隔线+防抖）+ S4c✓（应用扫描改后台预建，消除首次呼出卡顿）。**所有功能 2026-06-25 GUI 实测通过。**
+- **新增（续48，前端 + Rust）**：**收录 Tab 为主键 + 修 Tab 焦点逃逸 bug**。① **Tab 可录用**——原 token 表无 Tab（53 条），现前端 `tokenFromCode`/`HOTKEY_MAIN_TOKENS`/`comboLabel` + Rust `key_token`（`VK_TAB`/`Code::Tab`）各加一条（54 条）；裸 `Alt+Tab`（OS 窗口切换）进黑名单（同 Alt+Space/Alt+F4）。② **焦点逃逸 bug**——根因：设置打开时 `if(settingsOpen||pickerOpen)return;` 在 Tab 处理前早退 → 浏览器默认 Tab 遍历生效 + 模态无 focus trap → 焦点跳到背景按钮；关设置后旧 `Tab→filteredApps 导航`（S3a 后已不渲染）preventDefault 吃键无可见效果 → "没反应"。修复：删死的 filteredApps Tab 导航，改为 overlay 可见时统一 `if(e.key==="Tab"){preventDefault();return;}`（放在 settingsOpen 守卫**前**、matchComboEvent **后**）——焦点不再逃逸；Tab 作热键仍由 matchComboEvent 先处理。⚠️ 副作用：设置面板内 Tab 不能在输入框间跳（需点击；如要面板内循环再加 focus trap）。**tsc 零错误 + clippy 8 基线✓；GUI 未实测**（需验证：录 Tab/Ctrl+Tab、设置内 Tab 不逃逸、关设置 Tab 无副作用）。文件：`src/App.tsx` / `src-tauri/src/lib.rs`。
+- **新增（续47，纯前端，零 Rust 改动）**：**增强搜索键（Ctrl+K）也可自定义**——原硬编码 `(e.ctrlKey||e.metaKey)&&key==="k"` 改为读 `enhHotkey` state（默认 `ctrl+k`，store key `enh-hotkey` 持久化）。增强搜索是**应用内快捷键**（仅 overlay 可见时生效、纯前端、不经 Rust/RegisterHotKey），与主呼出热键性质不同。复用录制基础设施：`recording` state 由 boolean 改为 `null|"main"|"enh"` 标记录哪个键，录制 useEffect 按 target 写回对应输入框。新增模块级共用工具 `tokenFromCode`（从录制 effect 提升）/ `parseComboStr`（解析+校验，规则同 Rust：禁 Win + 裸 Alt+Space/Alt+F4 + 恰 1 主键）/ `matchComboEvent`（keydown 精确匹配：修饰键全等 + 主键一致 + 无 Win）/ `comboLabel`（展示文案）。`changeEnhHotkey` 纯前端校验（非法/与呼出热键冲突→红字 2.5s）+ 持久化。设置→快捷键 tab 加「增强搜索」行（录制+应用+恢复默认，复用 `.hotkey-input`/`.settings-action`）；底栏改用 `comboLabel` 渲染主键 + 增强键。**tsc 零错误✓；GUI 未实测**（需 `npm run tauri dev` 验证：录制 Ctrl+K 替代键、按新键开关增强搜索、冲突拒绝、重启持久化）。文件：`src/App.tsx`（+4 module helper +3 state +changeEnhHotkey +录制 target 化 +keydown matchComboEvent +设置行 +底栏）。
 - **新增（续46，前端 + Rust）**：**录制式热键 + 修饰键全可选 + 放开 Alt**。三件事：① **录制式输入**——快捷键 tab「应用」前加「录制」按钮，录制态 capture 阶段挂 `keydown`（`addEventListener(..,true)`+preventDefault/stopPropagation，抢在全局冒泡 `onKey` 前）→ `tokenFromCode` 映射 `e.code` 成 token 写回文本框（不自动应用，再点「应用」走 `changeHotkey`）。② **修饰键全可选**——`parse_combo` 去掉「必须含 Ctrl」，`has_ctrl/has_shift/has_alt` 各自可选动态构建 mods/vk_list（含全无=纯主键，会抢占该键、前端已警示）。③ **🔑 放开 Alt（spike 实测推翻 §9「Alt 死路」）**——探针证 RegisterHotKey 对 Alt+Q/Alt+Space 全可注册；运行时实测 Alt+Q：呼出/Esc/light dismiss/记事本菜单栏未激活/焦点回归全正常。根因：RegisterHotKey 消费整个组合，前台收不到 Alt → 不触发菜单栏激活；旧结论来自早期 JS/rdev 录入态、张冠李戴。落地：放开 Alt，**仅留小黑名单 Win + 裸 Alt+Space/Alt+F4**（OS 占用）。**验证**：tsc 零错误 + cargo clippy 8 基线不变；GUI 实测 Alt+Q 通过（2026-06-26，呼出/关闭/Esc/light dismiss/记事本菜单栏不激活全正常）。文件：`src-tauri/src/lib.rs`（parse_combo 重写 + 头注释）/ `src/App.tsx`（+recording state/useEffect/录制按钮，handler 放开 Alt）/ `src/App.css`（+`.settings-action.recording`）/ DECISIONS §9 续46 + CLAUDE.md（Alt 死胡同划掉）。
 - **新增（续45，纯前端清理 + UI 完善）**：**自定义热键 V2-2**——删 PROBE V2-0（CapRow/logCap/probingRef/capLog/probe CSS）和 V21-TEMP harness（v21TempCombo/segmented）。`changeHotkey` 签名放宽为 `string`，输入 normalize toLowercase；新增 `hotkeyInput` state（编辑态与已提交值分离，成功时同步）；store 加载放宽接受任意非空字符串。热键 tab 改文本输入框 + 应用按钮（Enter 触发）+ 格式提示行。底栏 `<kbd>` 改动态渲染（ctrl→Ctrl/shift→Shift/space→Space/方向键→箭头）。`.hotkey-input` CSS 替换 `.probe-*`。**tsc 零错误✓；GUI 实测通过（2026-06-25）。**
 - **新增（续44，Rust `parse_combo` 重写 + 前端 V21-TEMP harness）**：**自定义热键 V2-1**——`key_token` 表驱动任意 combo 替换 V1 白名单 `parse_combo`；blocklist win/alt；必须含 Ctrl；可选 Shift（三键轮询天然支持）；`key_token` 53 条（a-z/0-9/f1-f12/space/方向键）。`set_hotkey` register 错误 → "组合被占用或系统不可用"。单测 11 断言全过后已删。前端 `v21TempCombo` state + 文本框 + 应用按钮（V21-TEMP 标注）。**cargo check/clippy 零新增警告（8 基线不变）；tsc 零错误；单测实测通过已删；三键长短按 GUI 实测通过（2026-06-25，可正常开关，长短按符合预期）。**
@@ -192,6 +194,27 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-26 (收录 Tab 为主键 + 修 Tab 焦点逃逸 bug，续48)
+- **现象 1（Tab 录不进）根因**：token 表（53 条）无 Tab——前端 `tokenFromCode("Tab")` 返 null + `HOTKEY_MAIN_TOKENS` 不含 "tab"，Rust `key_token` 也无 → 录制走 `flash("不支持的键")`。**修**：前端三处（tokenFromCode/HOTKEY_MAIN_TOKENS/comboLabel）+ Rust `key_token`（`VK_TAB`/`Code::Tab`，import 加 VK_TAB）各加 "tab"（54 条）。裸 `Alt+Tab` 加入两侧黑名单（parse_combo + parseComboStr，同 Alt+Space/Alt+F4）。
+- **现象 2（Tab 焦点逃逸）根因**：① 设置打开时 keydown handler 第一段 `if(settingsOpen||pickerOpen)return;` 在任何 Tab 处理**前**早退 → 浏览器默认 Tab 焦点遍历生效，而设置模态**无 focus trap** → 焦点跳到模态背后 overlay 按钮（"切换原界面按钮"）。② 关设置后旧 `if(e.key==="Tab"){preventDefault();...filteredApps 循环...}`——S3a 重设计后启动器面板已不渲染 `filteredApps`，preventDefault 吃掉 Tab 但 selectedIdx 改的是隐藏列表 → "没反应"。
+- **修**：删除死的 filteredApps Tab 导航；在 `matchComboEvent` 后、`settingsOpen` 守卫**前**加 `if(e.key==="Tab"){e.preventDefault();return;}`——overlay 可见时统一中和默认 Tab 遍历，焦点不再逃逸；Tab 作为热键已被 matchComboEvent 先行处理，不受影响。
+- **副作用（已知）**：设置/picker 面板内 Tab 不能在输入框间跳（需点击）。当前"逃逸到背景"更糟，先求正确；若需面板内 Tab 循环再加 focus trap。
+- **不破坏**：录制基础设施/主热键/增强键/show-hide/轮询全未动；Tab 仅在 overlay visible 时被拦（隐藏时不挂 listener，不影响其他应用 Tab）。
+- **验证**：`tsc --noEmit` 零错误✓；`cargo clippy --lib` 8 条基线不变✓。**GUI 未实测**（需验证：录 Tab/Ctrl+Tab 成功并生效；设置打开时 Tab 不再切背景按钮；关设置后 Tab 无副作用；Alt+Tab 被拒）。
+- **文件**：`src/App.tsx`（tokenFromCode/HOTKEY_MAIN_TOKENS/comboLabel/parseComboStr +tab，keydown Tab 中和 + 删死导航）/ `src-tauri/src/lib.rs`（key_token +VK_TAB/tab，parse_combo blocklist +tab，注释 53→54）/ `MEMORY.md`。
+
+### 2026-06-26 (增强搜索键 Ctrl+K 升级为自定义，续47，纯前端零 Rust 改动)
+- **功能**：增强搜索呼出键从硬编码 Ctrl+K 改为可自定义（录制/手输/持久化），与续46 的主呼出热键自定义对齐。
+- **性质区分**：增强搜索是**应用内快捷键**——仅 overlay 可见时由前端全局 keydown handler 处理，纯前端、不经 Rust/RegisterHotKey；与主呼出热键（全局、Rust 轮询+注册驱动）根本不同，故自定义实现完全在前端。
+- **module 级共用工具**（`App.tsx`，从录制 effect 提升 + 新增）：`tokenFromCode`（code→token）/ `parseComboStr`（解析+校验，禁 Win + 裸 Alt+Space/Alt+F4 + 恰 1 主键，对齐 Rust parse_combo）/ `matchComboEvent`（keydown 精确匹配：ctrl/shift/alt 全等 + 无 meta + 主键一致）/ `comboLabel`（展示文案，含 alt）。
+- **state/持久化**：`enhHotkey`（默认 `ctrl+k`）/`enhHotkeyInput`/`enhHotkeyError`；store key `enh-hotkey`，加载时 `parseComboStr` 校验后填入。`recording` 由 `boolean` 改 `null|"main"|"enh"`（录哪个键），录制 useEffect 按 target 写回对应输入框 + 错误 setter。
+- **changeEnhHotkey**：纯前端校验（`parseComboStr` 非法 → "无效组合"；等于 `hotkeyCombo` → "与呼出热键冲突"；红字 2.5s 自清）+ 写 store。**不经 Rust**。
+- **keydown handler**：硬编码 `(e.ctrlKey||e.metaKey)&&key==="k"` → `matchComboEvent(e, enhHotkey)`；deps 加 `enhHotkey`。位置同旧（在 settingsOpen 守卫前，行为一致）。
+- **UI**：设置→快捷键 tab 加「增强搜索」行（input+录制+应用+恢复默认，复用 `.hotkey-input`/`.settings-action`/`.recording`，零新增 CSS）；底栏 `comboLabel(hotkeyCombo)` 切换 + `comboLabel(enhHotkey)` 搜索。
+- **不破坏**：主热键 changeHotkey/parse_combo（Rust）未动；录制基础设施复用、未改语义；show/hide/轮询/光 dismiss 全未碰。
+- **验证**：`tsc --noEmit` 零错误✓。**GUI 未实测**（需 dev 验证：录制替代键、按新键开关增强搜索、与呼出键冲突拒绝、重启持久化、Ctrl+K 默认仍可用）。
+- **文件**：`src/App.tsx`（+module helper +enh state +changeEnhHotkey +录制 target 化 +keydown matchComboEvent +设置「增强搜索」行 +底栏 comboLabel）/ `MEMORY.md`。
 
 ### 2026-06-26 (录制式热键 + 修饰键全可选 + 放开 Alt（spike 推翻 §9 死路），续46)
 本次三件事，递进完成：
