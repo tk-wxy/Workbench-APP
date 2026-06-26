@@ -9,27 +9,32 @@
 
 ## 当前任务 〔快照〕
 
-- **进行中**：Everything 集成（✅ 已修复并 GUI 验证通过）
-- **下一步**：待用户确认后续方向
+- **已完成**：内置引擎增强 ✅ · Everything 集成 ✅（SDK DLL 方案，历经 6 次方案切换）
+- **下一步**：待定
 - **待决策**：无
 
 ---
 
 ## 会话归档
 
-### 2026-07-01 #3 — Everything 搜索引擎集成（es.exe 方案，经 4 次迭代修通）
+### 2026-07-01 #4 — Everything 最终方案：捆绑 SDK DLL + 连接验证 + 在线状态提示
 
-**踩坑记录**：
-1. ~~SDK DLL 方案~~ → 便携版不含 Everything64.dll
-2. ~~第一次 es.exe~~ → QueryFullProcessImageNameW 缓冲区字符数计算 bug（len 多除了 2）
-3. ~~原生 IPC（WM_COPYDATA）~~ → Everything 管理员运行，Workbench 普通用户，UIPI 禁止跨权限 OpenProcess → `OpenProcess failed`
-4. ✅ **es.exe + 清晰错误提示** → 用户下载 es.exe 放到 Everything 目录即可
+**最终方案**：`Everything64.dll` 随源码提交（~200KB），运行时 SDK API 直连 Everything。
 
-**最终方案**：`es.exe -sort name -n 50 <query>` 子进程，解析每行路径输出。
+**全历程**（6→1）：
+1. SDK DLL（初版）→ portable 不含 → ❌
+2. es.exe 路径截断 bug → ❌
+3. 原生 IPC WM_COPYDATA → UIPI 跨权限拒绝 → ❌
+4. es.exe `-match-path` → 4031 vs 157 条 → ❌
+5. es.exe 无 `-n` 全量卡死 → ❌
+6. es.exe 自动下载失败 → ❌
+7. ✅ **捆绑 SDK DLL**：源码自带 DLL，零外部依赖，零手动操作
 
-**最终提交**：`ab9b0eb`
+**关键提交**：`09d5eba`（SDK DLL 方案）→ `c78e9e8`（连接验证 + Mutex 可重连）
 
-**GUI 验证**：✅ 通过
+**GUI 验证**：✅ 在线/离线状态正确，结果数与本尊一致，中文路径正常
+
+### 2026-07-01 #3 — Everything 集成探索（已废弃，见 #4 最终方案）
 
 ---
 
