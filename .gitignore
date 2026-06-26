@@ -24,3 +24,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Reasonix AI coding tool
+.reasonix/
+reasonix.toml
