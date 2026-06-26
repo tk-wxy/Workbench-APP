@@ -540,7 +540,7 @@ export default function App() {
 
   // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件 ≤20）在后；索引连续供 ↑↓/Enter 跨组导航 ──
   const enhResults = useMemo<EnhResult[]>(() => {
-    const tier2: EnhResult[] = fsResults.slice(0, 20).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
+    const tier2: EnhResult[] = fsResults.slice(0, 50).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
     return [...enhTier1, ...tier2];
   }, [enhTier1, fsResults]);
 
