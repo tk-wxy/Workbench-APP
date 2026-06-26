@@ -51,6 +51,12 @@ static CLIP_CACHE_MAX_RUNTIME: std::sync::atomic::AtomicUsize =
 const MAX_THUMB_DIM: u32 = 1024;
 /// 原图落盘上限（最长边超过此值时等比缩放后再存）；开发机截图 ≤ 3200px 不触发
 const MAX_ORIG_DIM: u32 = 4096;
+/// 原图缓存（clip_images/）总量上限（500MB）：解耦 janitor 超过时从最旧删到上限以下，防长期膨胀
+const CLIP_IMAGE_CACHE_MAX_BYTES: u64 = 500 * 1024 * 1024;
+/// 原图缓存 janitor 周期清理间隔（10 分钟）
+const CLIP_IMAGE_SWEEP_MS: u64 = 10 * 60 * 1000;
+/// 原图缓存 janitor 起手延迟（5s）：错开 setup 同步 load_clip_history，防空 referenced 集误删全部
+const CLIP_IMAGE_SWEEP_INITIAL_MS: u64 = 5000;
 /// 图片去重的 aHash 汉明距离阈值
 const AHASH_MAX_HAMMING: u32 = 5;
 /// 图片去重的尺寸近似阈值（px）
@@ -855,6 +861,53 @@ fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>
         return result;
     }
 
+    // 资源管理器文件夹窗口：走 CF_HDROP「落地真 PNG 文件」——文件夹只接受文件(CF_HDROP)、
+    // 收不下位图(CF_DIB)，故不能走下面的 set_image 分支。顺带规避大图转位图的全分辨率 RGBA
+    // 解码卡顿（本分支零解码：大图直接复用已落盘原图，小图仅解一次 base64）。
+    if class1 == "CabinetWClass" || class1 == "ExploreWClass" {
+        // 选 PNG 文件路径：大图(有 orig_path)直接用已落盘原图，零解码、不产临时文件；
+        // 小图(无 orig_path)解一次 base64 写一份 PNG（磁盘 I/O 在 CLIPBOARD_LOCK 之外）。
+        // 小图临时文件落到 clip_images/、命名 workbench_clip_*.png：它不被任何 orig_path 引用，
+        // 由 janitor 当孤儿清理兜底——去掉「固定 5s 延时删」那条脆弱 race（Ctrl+V 异步、CPU 负载下
+        // 可能在 Explorer 读完前删掉损坏粘贴）。clip_images 不可用时退回系统 temp（极少见，交 OS 回收）。
+        let png_path: String = match orig_path.as_deref() {
+            Some(p) if std::path::Path::new(p).exists() => p.to_string(),
+            _ if !base64.is_empty() => {
+                let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+                let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+                let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
+                let tmp = dir.join(format!("workbench_clip_{}.png", now_ms()));
+                std::fs::write(&tmp, &bytes).map_err(|e| format!("写临时文件: {}", e))?;
+                tmp.to_string_lossy().into_owned()
+            }
+            _ => return Err("无图片数据".into()),
+        };
+
+        // CF_HDROP 写回 + Ctrl+V，复用文件粘贴 idiom（与 set_clipboard_files 一致）：
+        // 锁加在【调用方】、不进 write_cf_hdrop（防与 copy 路径重入死锁）；写前 SKIP_CLIP_EVENTS 防自写回流。
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        {
+            // 仅罩 write_cf_hdrop 的 OpenClipboard…CloseClipboard 临界区；绝不跨焦点交还/Ctrl+V 持锁
+            let _g = CLIPBOARD_LOCK.lock().unwrap();
+            write_cf_hdrop(&[png_path])?;
+        }
+        suppress_clip_until_now();
+
+        let target = unsafe { GetForegroundWindow() };
+        unsafe { let _ = SetForegroundWindow(target); }
+        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+        let _ = enigo.key(enigo::Key::Control, Press);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::V, Press);
+        let _ = enigo.key(enigo::Key::V, Release);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::Control, Release);
+
+        // 临时文件不在此删：大图用的是 clip_images/ 原图（缓存管理）；小图也写在 clip_images/、
+        // 由 janitor 孤儿清理（不被任何 orig_path 引用）。无脆弱定时 race，Explorer 读多久都安全。
+        return Ok(());
+    }
+
     // 非桌面：历史图写回剪贴板，再 Ctrl+V
     if !base64.is_empty() {
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
@@ -1016,6 +1069,94 @@ fn clear_clip_image_cache() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 从原图文件名 `{time}.png` 解析出 time（i64 ms），用于「最旧先删」排序；非该格式返回 None。
+fn parse_clip_image_time(name: &str) -> Option<i64> {
+    name.strip_suffix(".png")?.parse::<i64>().ok()
+}
+
+/// 解耦 janitor：清理 clip_images/ 缓存（孤儿清理 + 总量封顶），自包含、零改剪贴板写路径。
+///
+/// 两步：① 删掉文件名未被任何 CLIP_CACHE 条目 orig_path 引用的孤儿；② 剩余被引用文件总和超
+/// CLIP_IMAGE_CACHE_MAX_BYTES 时，从最旧（文件名内嵌 {time} 升序，解析失败兜底 mtime）删到 ≤ 上限
+/// （被删条目优雅降级缩略图，非数据丢失）。
+///
+/// 铁律：**绝不取 CLIPBOARD_LOCK**（磁盘 I/O 与 Win32 剪贴板锁正交）；CLIP_CACHE 锁仅
+/// snapshot-and-release 收集被引用文件名后立即释放、锁块内零 fs 调用，绝不持锁跨文件操作。
+/// 全程 best-effort：任何 fs/锁错误 log + 跳过，绝不 panic、绝不阻塞。
+fn sweep_clip_image_cache() {
+    let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
+    if !dir.exists() { return; }
+
+    // ① 快照被引用文件名集合（snapshot-and-release：锁块内无任何 fs 调用，出锁后才 list/delete）
+    let referenced: std::collections::HashSet<String> = {
+        let cache = match CLIP_CACHE.lock() {
+            Ok(c) => c,
+            Err(e) => { eprintln!("[clip_sweep] CLIP_CACHE 锁失败，跳过本轮: {e}"); return; }
+        };
+        cache.iter()
+            .filter_map(|e| e["orig_path"].as_str())
+            .filter_map(|p| std::path::Path::new(p).file_name()
+                .map(|n| n.to_string_lossy().into_owned()))
+            .collect()
+    }; // CLIP_CACHE 锁在此释放
+
+    // ② 列目录：孤儿（文件名不在 referenced）直接删；被引用的记 (文件名, 大小, 排序键)
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => { eprintln!("[clip_sweep] read_dir 失败，跳过本轮: {e}"); return; }
+    };
+    let mut kept: Vec<(String, u64, i64)> = Vec::new();
+    let mut orphans = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() { continue; }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue; };
+        if !referenced.contains(&name) {
+            if std::fs::remove_file(&path).is_ok() { orphans += 1; }
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        // 排序键：优先文件名内嵌 {time}；解析失败兜底 mtime（再失败兜底 0，视作最旧先删）
+        let sort_key = parse_clip_image_time(&name).unwrap_or_else(|| {
+            meta.as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)
+        });
+        kept.push((name, size, sort_key));
+    }
+    if orphans > 0 { eprintln!("[clip_sweep] 清理孤儿原图 {orphans} 个"); }
+
+    // ③ 总量封顶：被引用文件总和超上限时，从最旧删到 ≤ 上限
+    let total: u64 = kept.iter().map(|(_, s, _)| *s).sum();
+    if total <= CLIP_IMAGE_CACHE_MAX_BYTES { return; }
+    kept.sort_by_key(|(_, _, k)| *k); // 升序：最旧先删
+    let mut remaining = total;
+    for (name, size, _) in &kept {
+        if remaining <= CLIP_IMAGE_CACHE_MAX_BYTES { break; }
+        if std::fs::remove_file(dir.join(name)).is_ok() {
+            remaining = remaining.saturating_sub(*size);
+        }
+    }
+    eprintln!("[clip_sweep] 总量封顶：{total} → {remaining} bytes（上限 {CLIP_IMAGE_CACHE_MAX_BYTES}）");
+}
+
+/// 解耦 janitor 后台线程（仿 start_index_worker idiom）：起手延迟错开 setup，之后周期 sweep。
+/// 解析不到 clip_images 目录 → 降级 no-op、线程不启动。
+fn start_clip_image_janitor() {
+    if CLIP_IMAGE_DIR.get().is_none() { return; } // 目录未初始化：降级 no-op
+    std::thread::spawn(|| {
+        // 首次 sweep 必须在 load_clip_history 填充 CLIP_CACHE 之后（否则空 referenced 集误删全部）
+        std::thread::sleep(std::time::Duration::from_millis(CLIP_IMAGE_SWEEP_INITIAL_MS));
+        loop {
+            sweep_clip_image_cache();
+            std::thread::sleep(std::time::Duration::from_millis(CLIP_IMAGE_SWEEP_MS));
+        }
+    });
 }
 
 // ── 入口 ───────────────────────────────────────────────────
@@ -1348,6 +1489,7 @@ pub fn run() {
             }
             load_clip_history();
             start_clipboard_monitor(app.handle().clone());
+            start_clip_image_janitor(); // 解耦 janitor：周期清理 clip_images/（孤儿 + 总量封顶），不进 CLIPBOARD_LOCK
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
             start_apps_worker(app.handle().clone()); // 应用扫描后台预建：消除首次呼出卡顿（emit apps-ready）
