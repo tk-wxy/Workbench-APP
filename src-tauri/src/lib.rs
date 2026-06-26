@@ -1436,6 +1436,7 @@ pub fn run() {
             filesearch::search_files, filesearch::get_index_status,
             filesearch::get_scan_dirs, filesearch::rebuild_index,
             filesearch::set_search_engine, filesearch::get_search_engine,
+            filesearch::get_everything_dir,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())

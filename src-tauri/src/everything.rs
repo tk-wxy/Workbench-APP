@@ -81,6 +81,9 @@ impl EverythingClient {
 /// 查找 es.exe：Everything 进程同目录 → 注册表 → 常见路径。
 pub fn find_everything_dll() -> Option<PathBuf> { find_es_exe() }
 
+/// 公开：获取 Everything 安装目录（给前端「打开目录」按钮用）。
+pub fn find_everything_exe_dir_pub() -> Option<PathBuf> { find_everything_exe_dir() }
+
 fn find_es_exe() -> Option<PathBuf> {
     // 1) Everything 进程同目录
     if let Some(exe_dir) = find_everything_exe_dir() {

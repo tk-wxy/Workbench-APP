@@ -369,3 +369,10 @@ pub fn get_search_engine() -> serde_json::Value {
         "everythingEsFound": es_found,
     })
 }
+
+/// 获取 Everything 安装目录（用于前端「打开目录」按钮）。
+#[tauri::command]
+pub fn get_everything_dir() -> Option<String> {
+    crate::everything::find_everything_exe_dir_pub()
+        .map(|p| p.to_string_lossy().to_string())
+}

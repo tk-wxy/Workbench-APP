@@ -1276,9 +1276,19 @@ export default function App() {
                     </div>
                   </div>
                   {searchEngine==="everything" && !everythingAvailable && (
-                    everythingEsFound
-                      ? <p className="settings-hint settings-hint-error">⚠ Everything 已检测到但 es.exe 无法运行（可能版本不兼容）。请从 voidtools.com/downloads 下载 "Command-line Interface"，将 es.exe 放到 Everything 安装目录。</p>
-                      : <p className="settings-hint settings-hint-error">⚠ Everything 已运行但未找到 es.exe。请从 voidtools.com/downloads 下载 "Command-line Interface"，将 es.exe 放到 Everything 安装目录后重启 Workbench。</p>
+                    <div style={{marginTop:4}}>
+                      <p className="settings-hint settings-hint-error" style={{marginBottom:8}}>
+                        {everythingEsFound
+                          ? "⚠ es.exe 无法运行（版本不兼容）。"
+                          : "⚠ Everything 已运行，但缺少 es.exe（命令行工具）。"}
+                      </p>
+                      <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                        <button className="settings-action" onClick={()=>{window.open("https://www.voidtools.com/downloads/","_blank")}}>📥 下载 es.exe</button>
+                        <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");const dir=await invoke<string>("get_everything_dir");if(dir){window.open(`file:///${dir.replace(/\\/g,"/")}`,"_blank");}}catch{}}}>📂 打开 Everything 目录</button>
+                        <button className="settings-action" onClick={async()=>{changeSearchEngine("everything");try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_search_engine",{engine:"everything"});const st=await invoke<{everythingAvailable:boolean}>("get_search_engine");setEverythingAvailable(st.everythingAvailable);}catch{}}}>🔄 重新检测</button>
+                      </div>
+                      <p className="settings-hint" style={{marginTop:6}}>下载后把 es.exe 放到 Everything 安装目录，再点「重新检测」。</p>
+                    </div>
                   )}
                   <p className="settings-hint">内置引擎：遍历配置的目录建内存索引，查询 &lt;5ms。Everything：全盘毫秒级搜索，需安装 Everything（voidtools.com）并保持运行。重建周期 10 分钟（仅内置引擎）。</p>
                   <div className="settings-section-label">扫描目录</div>
