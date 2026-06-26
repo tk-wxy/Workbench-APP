@@ -1433,6 +1433,7 @@ pub fn run() {
             get_clip_cache_max, set_clip_cache_max,
             open_clip_image_dir, clear_clip_image_cache,
             filesearch::search_files, filesearch::get_index_status,
+            filesearch::get_scan_dirs, filesearch::rebuild_index,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())

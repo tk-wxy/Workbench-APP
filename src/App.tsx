@@ -126,6 +126,7 @@ const SETTINGS_TABS = [
   { id: "general",   icon: "⚙",  label: "常规" },
   { id: "clipboard", icon: "📋", label: "剪贴板" },
   { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
+  { id: "search",   icon: "🔍", label: "搜索" },
   { id: "about",     icon: "ℹ",  label: "关于" },
 ] as const;
 type SettingsTab = typeof SETTINGS_TABS[number]["id"];
@@ -307,6 +308,10 @@ export default function App() {
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询
   const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean }[]>([]);
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
+  const [scanDirs, setScanDirs] = useState<string[]>([]); // 用户配置的扫描目录
+  const [scanDirInput, setScanDirInput] = useState(""); // 添加目录输入框
+  const [indexCount, setIndexCount] = useState(0); // 索引条目数（设置页显示）
+  const [rebuilding, setRebuilding] = useState(false); // 手动重建中状态
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -335,7 +340,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedScanDirs=await s.get<string[]>("scan-dirs"); if(savedScanDirs&&savedScanDirs.length) setScanDirs(savedScanDirs); } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -742,6 +747,31 @@ export default function App() {
       setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
     } catch {}
   }, [store]);
+  // ── 扫描目录管理 ──
+  const addScanDir = useCallback(async () => {
+    const dir = scanDirInput.trim();
+    if (!dir) return;
+    const next = [...new Set([...scanDirs, dir])];
+    setScanDirs(next); setScanDirInput("");
+    if (store) { await store.set("scan-dirs", next); await store.save(); }
+  }, [scanDirInput, scanDirs, store]);
+  const removeScanDir = useCallback(async (dir: string) => {
+    const next = scanDirs.filter(d => d !== dir);
+    setScanDirs(next);
+    if (store) { await store.set("scan-dirs", next); await store.save(); }
+  }, [scanDirs, store]);
+  const rebuildNow = useCallback(async () => {
+    setRebuilding(true);
+    try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("rebuild_index"); }
+    catch {}
+    // 短暂延迟后取索引状态
+    setTimeout(async () => {
+      try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ready:boolean;count:number}>("get_index_status"); setIndexCount(s.count); setIndexReady(s.ready); } catch {}
+      setRebuilding(false);
+    }, 500);
+  }, []);
+  // 设置页打开时取索引条数
+  useEffect(() => { if (settingsOpen && settingsTab === "search") { (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ready:boolean;count:number}>("get_index_status"); setIndexCount(s.count); setIndexReady(s.ready); } catch {} })(); } }, [settingsOpen, settingsTab]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
     if (launchingRef.current) return; // 与启动共用锁：动画进行中忽略
     // 实际粘贴：hide+交还焦点+Ctrl+V 全在 Rust 命令内（流程不变），此处仅负责调用
@@ -1214,6 +1244,37 @@ export default function App() {
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
                   <p className="settings-hint">长按 = 按住显示松开关闭；短按 = 切换显隐。</p>
+                </>)}
+                {settingsTab==="search" && (<>
+                  <div className="settings-panel-title">文件搜索</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">引擎状态<span className="settings-row-sub">{indexReady ? `${indexCount} 个文件已索引` : "索引建立中…"}</span></span>
+                    <button className={`settings-action${rebuilding?" recording":""}`} onClick={rebuildNow} disabled={rebuilding}>{rebuilding?"重建中…":"立即重建索引"}</button>
+                  </div>
+                  <p className="settings-hint">内置引擎：遍历配置的目录建内存索引，查询 &lt;5ms。重建周期 10 分钟。</p>
+                  <div className="settings-section-label">扫描目录</div>
+                  <div className="settings-dir-list">
+                    {scanDirs.length === 0 && <p className="settings-hint">未自定义目录，使用默认：桌面、下载、文档、图片、Projects</p>}
+                    {scanDirs.map(d => (
+                      <div key={d} className="settings-dir-row">
+                        <span className="settings-dir-path" title={d}>{d}</span>
+                        <button className="settings-action" onClick={() => removeScanDir(d)}>移除</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="settings-row" style={{marginTop: 8}}>
+                    <input
+                      className="hotkey-input"
+                      style={{flex:1}}
+                      value={scanDirInput}
+                      onChange={e => setScanDirInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addScanDir(); } }}
+                      placeholder="粘贴文件夹路径后按 Enter 添加…"
+                      spellCheck={false}
+                    />
+                    <button className="settings-action" onClick={addScanDir} disabled={!scanDirInput.trim()}>添加</button>
+                  </div>
+                  <p className="settings-hint" style={{marginTop: 4}}>从资源管理器复制路径（Ctrl+L → Ctrl+C）粘贴到此处。只扫描存在的目录。</p>
                 </>)}
                 {settingsTab==="about" && (<>
                   <div className="settings-panel-title">关于</div>
