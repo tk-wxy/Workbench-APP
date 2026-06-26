@@ -14,10 +14,13 @@
 // - 重建周期 30min → 10min；新增手动重建命令 rebuild_index
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 use walkdir::WalkDir;
+
+use crate::everything::EverythingClient;
 
 /// 内存索引条目：name_lower 预存小写，mtime_secs 用于 recency 排序。
 #[derive(Clone)]
@@ -40,6 +43,8 @@ pub struct FileSearchResult {
 }
 
 static FILE_INDEX: std::sync::OnceLock<Mutex<Vec<IndexEntry>>> = std::sync::OnceLock::new();
+static EVERYTHING_CLIENT: std::sync::OnceLock<Option<EverythingClient>> = std::sync::OnceLock::new();
+static USE_EVERYTHING: AtomicBool = AtomicBool::new(false); // 用户设置面板切换
 
 const MAX_INDEX_ENTRIES: usize = 200_000;
 const MAX_WALK_DEPTH: usize = 8;
@@ -228,13 +233,36 @@ pub fn start_index_worker(app: AppHandle) {
     });
 }
 
-/// 查询命令：纯内存读，<5ms。子序列匹配 + recency 排序。
+/// 查询命令：优先 Everything（若启用且可用），回退内置引擎。子序列匹配 + recency 排序。
 #[tauri::command]
 pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
     }
+
+    // ── Everything 引擎 ──
+    if USE_EVERYTHING.load(Ordering::Relaxed) {
+        // 懒加载 DLL（首次成功后缓存，后续查询直接复用）
+        EVERYTHING_CLIENT.get_or_init(EverythingClient::try_connect);
+        if let Some(Some(client)) = EVERYTHING_CLIENT.get() {
+            let results = client.search(&q, limit);
+            if !results.is_empty() {
+                return results
+                    .into_iter()
+                    .map(|r| FileSearchResult {
+                        path: r.path,
+                        name: r.name,
+                        ext: r.ext,
+                        is_dir: r.is_dir,
+                    })
+                    .collect();
+            }
+        }
+        // Everything 无结果或不可用 → 回退内置引擎（不吞查询）
+    }
+
+    // ── 内置引擎 ──
     let lock = match FILE_INDEX.get() {
         Some(l) => l,
         None => return Vec::new(),
@@ -303,4 +331,36 @@ pub fn get_scan_dirs(app: AppHandle) -> Vec<String> {
 pub fn rebuild_index(app: AppHandle) -> Result<(), String> {
     do_rebuild(&app);
     Ok(())
+}
+
+/// 切换搜索引擎（"builtin" / "everything"）。Everything 不可用时前端会收到回退提示。
+#[tauri::command]
+pub fn set_search_engine(engine: String) -> Result<(), String> {
+    match engine.as_str() {
+        "everything" => {
+            // 尝试连接 Everything，失败则返回错误（前端可据此显示提示）
+            EVERYTHING_CLIENT.get_or_init(EverythingClient::try_connect);
+            if EVERYTHING_CLIENT.get().and_then(|o| o.as_ref()).is_none() {
+                // 连接失败但不阻止切换——用户可能在 Everything 未运行时选择，
+                // 实际查询时 search_files 会自动回退内置引擎
+            }
+            USE_EVERYTHING.store(true, Ordering::Relaxed);
+        }
+        "builtin" => {
+            USE_EVERYTHING.store(false, Ordering::Relaxed);
+        }
+        _ => return Err(format!("未知搜索引擎: {engine}")),
+    }
+    Ok(())
+}
+
+/// 获取当前搜索引擎（"builtin" 或 "everything"）+ Everything 可用状态。
+#[tauri::command]
+pub fn get_search_engine() -> serde_json::Value {
+    let engine = if USE_EVERYTHING.load(Ordering::Relaxed) { "everything" } else { "builtin" };
+    let available = EVERYTHING_CLIENT
+        .get()
+        .and_then(|o| o.as_ref())
+        .is_some();
+    serde_json::json!({ "engine": engine, "everythingAvailable": available })
 }

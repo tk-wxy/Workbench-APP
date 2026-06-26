@@ -1,5 +1,6 @@
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
+mod everything; // Everything 搜索引擎集成（可选，动态加载 DLL）
 mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
 
 use std::os::windows::process::CommandExt;
@@ -1434,6 +1435,7 @@ pub fn run() {
             open_clip_image_dir, clear_clip_image_cache,
             filesearch::search_files, filesearch::get_index_status,
             filesearch::get_scan_dirs, filesearch::rebuild_index,
+            filesearch::set_search_engine, filesearch::get_search_engine,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())

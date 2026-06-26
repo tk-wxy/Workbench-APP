@@ -312,6 +312,8 @@ export default function App() {
   const [scanDirInput, setScanDirInput] = useState(""); // 添加目录输入框
   const [indexCount, setIndexCount] = useState(0); // 索引条目数（设置页显示）
   const [rebuilding, setRebuilding] = useState(false); // 手动重建中状态
+  const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
+  const [everythingAvailable, setEverythingAvailable] = useState(false);
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -340,7 +342,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedScanDirs=await s.get<string[]>("scan-dirs"); if(savedScanDirs&&savedScanDirs.length) setScanDirs(savedScanDirs); } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedScanDirs=await s.get<string[]>("scan-dirs"); if(savedScanDirs&&savedScanDirs.length) setScanDirs(savedScanDirs); const savedEngine=await s.get<string>("search-engine"); if(savedEngine==="everything"){setSearchEngine("everything");try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_search_engine",{engine:"everything"});const st=await invoke<{everythingAvailable:boolean}>("get_search_engine");setEverythingAvailable(st.everythingAvailable);}catch{}} } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -770,6 +772,16 @@ export default function App() {
       setRebuilding(false);
     }, 500);
   }, []);
+  const changeSearchEngine = useCallback(async (eng: "builtin"|"everything") => {
+    setSearchEngine(eng);
+    if (store) { await store.set("search-engine", eng); await store.save(); }
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_search_engine", { engine: eng });
+      const st = await invoke<{everythingAvailable:boolean}>("get_search_engine");
+      setEverythingAvailable(st.everythingAvailable);
+    } catch {}
+  }, [store]);
   // 设置页打开时取索引条数
   useEffect(() => { if (settingsOpen && settingsTab === "search") { (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ready:boolean;count:number}>("get_index_status"); setIndexCount(s.count); setIndexReady(s.ready); } catch {} })(); } }, [settingsOpen, settingsTab]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
@@ -1251,7 +1263,15 @@ export default function App() {
                     <span className="settings-row-label">引擎状态<span className="settings-row-sub">{indexReady ? `${indexCount} 个文件已索引` : "索引建立中…"}</span></span>
                     <button className={`settings-action${rebuilding?" recording":""}`} onClick={rebuildNow} disabled={rebuilding}>{rebuilding?"重建中…":"立即重建索引"}</button>
                   </div>
-                  <p className="settings-hint">内置引擎：遍历配置的目录建内存索引，查询 &lt;5ms。重建周期 10 分钟。</p>
+                  <div className="settings-row">
+                    <span className="settings-row-label">搜索引擎</span>
+                    <div className="seg">
+                      <button className={`seg-btn${searchEngine==="builtin"?" seg-active":""}`} onClick={()=>changeSearchEngine("builtin")}>内置</button>
+                      <button className={`seg-btn${searchEngine==="everything"?" seg-active":""}`} onClick={()=>changeSearchEngine("everything")}>Everything</button>
+                    </div>
+                  </div>
+                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">⚠ Everything 未检测到或未运行，查询将自动回退内置引擎。</p>}
+                  <p className="settings-hint">内置引擎：遍历配置的目录建内存索引，查询 &lt;5ms。Everything：全盘毫秒级搜索，需安装 Everything（voidtools.com）并保持运行。重建周期 10 分钟（仅内置引擎）。</p>
                   <div className="settings-section-label">扫描目录</div>
                   <div className="settings-dir-list">
                     {scanDirs.length === 0 && <p className="settings-hint">未自定义目录，使用默认：桌面、下载、文档、图片、Projects</p>}
