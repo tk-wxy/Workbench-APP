@@ -80,7 +80,16 @@ impl EverythingClient {
             set_max(500);
         }
 
-        eprintln!("[everything] SDK DLL OK");
+        // 验证 Everything 是否实际在运行（DLL 加载成功 ≠ Everything 在线）
+        let test: Vec<u16> = "wb_connectivity_test_42\0".encode_utf16().collect();
+        unsafe { (set_search)(test.as_ptr()) };
+        if unsafe { (query)(1) } == 0 {
+            eprintln!("[everything] DLL loaded but Everything not running");
+            unsafe { FreeLibrary(dll) };
+            return None;
+        }
+
+        eprintln!("[everything] SDK DLL OK, Everything connected");
         Some(Self { dll, set_search, query, get_num_results, get_result_file_name, get_result_path, clean_up })
     }
 

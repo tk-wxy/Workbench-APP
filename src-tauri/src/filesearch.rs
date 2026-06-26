@@ -43,7 +43,7 @@ pub struct FileSearchResult {
 }
 
 static FILE_INDEX: std::sync::OnceLock<Mutex<Vec<IndexEntry>>> = std::sync::OnceLock::new();
-static EVERYTHING_CLIENT: std::sync::OnceLock<Option<EverythingClient>> = std::sync::OnceLock::new();
+static EVERYTHING_CLIENT: Mutex<Option<EverythingClient>> = Mutex::new(None);
 static USE_EVERYTHING: AtomicBool = AtomicBool::new(false); // 用户设置面板切换
 
 const MAX_INDEX_ENTRIES: usize = 200_000;
@@ -243,10 +243,11 @@ pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
 
     // ── Everything 引擎 ──
     if USE_EVERYTHING.load(Ordering::Relaxed) {
-        // 懒加载 DLL（首次成功后缓存，后续查询直接复用）
-        EVERYTHING_CLIENT.get_or_init(EverythingClient::try_connect);
-        if let Some(Some(client)) = EVERYTHING_CLIENT.get() {
+        let mut guard = EVERYTHING_CLIENT.lock().unwrap();
+        if guard.is_none() { *guard = EverythingClient::try_connect(); }
+        if let Some(ref client) = *guard {
             let results = client.search(&q, limit);
+            drop(guard);
             if !results.is_empty() {
                 return results
                     .into_iter()
@@ -338,8 +339,10 @@ pub fn rebuild_index(app: AppHandle) -> Result<(), String> {
 pub fn set_search_engine(engine: String) -> serde_json::Value {
     match engine.as_str() {
         "everything" => {
-            EVERYTHING_CLIENT.get_or_init(EverythingClient::try_connect);
-            let connected = EVERYTHING_CLIENT.get().and_then(|o| o.as_ref()).is_some();
+            let mut guard = EVERYTHING_CLIENT.lock().unwrap();
+            *guard = EverythingClient::try_connect();
+            let connected = guard.is_some();
+            drop(guard);
             USE_EVERYTHING.store(true, Ordering::Relaxed);
             serde_json::json!({ "ok": true, "connected": connected })
         }
@@ -355,10 +358,7 @@ pub fn set_search_engine(engine: String) -> serde_json::Value {
 #[tauri::command]
 pub fn get_search_engine() -> serde_json::Value {
     let engine = if USE_EVERYTHING.load(Ordering::Relaxed) { "everything" } else { "builtin" };
-    let connected = EVERYTHING_CLIENT
-        .get()
-        .and_then(|o| o.as_ref())
-        .is_some();
+    let connected = EVERYTHING_CLIENT.lock().unwrap().is_some();
     serde_json::json!({
         "engine": engine,
         "everythingAvailable": connected,
