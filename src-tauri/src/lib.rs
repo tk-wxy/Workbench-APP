@@ -1026,11 +1026,11 @@ fn clear_clip_image_cache() -> Result<(), String> {
 //  两层编码：VK 供 GetAsyncKeyState 轮询（HOTKEY_VK_KEYS），Shortcut 供 RegisterHotKey
 //  消费（CURRENT_SHORTCUT）。blocklist: win/super/meta（OS 吞）+ 裸 alt+space/alt+f4（OS 占用）。
 //  修饰键 Ctrl/Shift/Alt 均可选（续46 起，含全无 = 纯主键；Alt 经 spike 实测可用，见 §9）；恰一个
-//  主键（a-z/0-9/f1-f12/space/方向键，共 53 条）。三键长短按语义由 start_hotkey_monitor 状态机天然支持。
+//  主键（a-z/0-9/f1-f12/space/tab/方向键，共 54 条）。三键长短按语义由 start_hotkey_monitor 状态机天然支持。
 // ════════════════════════════════════════════════════════════════════
 
 /// 主键 token（全小写）→ (GetAsyncKeyState VK 码, RegisterHotKey Code)。
-/// 支持 a-z / 0-9 / f1-f12 / space / up/down/left/right（53 条）。
+/// 支持 a-z / 0-9 / f1-f12 / space / tab / up/down/left/right（54 条）。
 fn key_token(tok: &str) -> Option<(u16, Code)> {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         VK_0, VK_1, VK_2, VK_3, VK_4, VK_5, VK_6, VK_7, VK_8, VK_9,
@@ -1039,7 +1039,7 @@ fn key_token(tok: &str) -> Option<(u16, Code)> {
         VK_U, VK_V, VK_W, VK_X, VK_Y, VK_Z,
         VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6,
         VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12,
-        VK_SPACE, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
+        VK_SPACE, VK_TAB, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
     };
     Some(match tok {
         "a" => (VK_A.0, Code::KeyA),   "b" => (VK_B.0, Code::KeyB),
@@ -1067,6 +1067,7 @@ fn key_token(tok: &str) -> Option<(u16, Code)> {
         "f9"    => (VK_F9.0,  Code::F9),  "f10" => (VK_F10.0, Code::F10),
         "f11"   => (VK_F11.0, Code::F11), "f12" => (VK_F12.0, Code::F12),
         "space" => (VK_SPACE.0, Code::Space),
+        "tab"   => (VK_TAB.0,   Code::Tab),
         "up"    => (VK_UP.0,    Code::ArrowUp),
         "down"  => (VK_DOWN.0,  Code::ArrowDown),
         "left"  => (VK_LEFT.0,  Code::ArrowLeft),
@@ -1098,9 +1099,9 @@ fn parse_combo(combo: &str) -> Result<(Vec<u16>, Shortcut), String> {
         return Err("需要且只能有一个主键".into());
     }
     let main_tok = main_keys[0];
-    // OS 保留的裸 Alt 组合（Alt+Space=系统菜单 / Alt+F4=关窗）——可注册但语义被 OS 占，禁用防脚枪。
-    if has_alt && !has_ctrl && !has_shift && matches!(main_tok, "space" | "f4") {
-        return Err("Alt+Space / Alt+F4 被系统占用".into());
+    // OS 保留的裸 Alt 组合（Alt+Space=系统菜单 / Alt+F4=关窗 / Alt+Tab=窗口切换）——可注册但语义被 OS 占，禁用防脚枪。
+    if has_alt && !has_ctrl && !has_shift && matches!(main_tok, "space" | "f4" | "tab") {
+        return Err("Alt+Space / Alt+F4 / Alt+Tab 被系统占用".into());
     }
     let (main_vk, code) = key_token(main_tok)
         .ok_or_else(|| format!("不支持的键：{main_tok}"))?;

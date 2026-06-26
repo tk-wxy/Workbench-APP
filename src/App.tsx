@@ -202,6 +202,49 @@ type EnhResult =
   | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
   | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
 
+// ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
+const HOTKEY_MAIN_TOKENS = new Set<string>([
+  ..."abcdefghijklmnopqrstuvwxyz".split(""),
+  ..."0123456789".split(""),
+  ...Array.from({length:12},(_,i)=>`f${i+1}`),
+  "space","tab","up","down","left","right",
+]);
+// 浏览器 KeyboardEvent.code → token（KeyA→a / Digit1→1 / F12→f12 / Space→space / Arrow*→方向）
+const tokenFromCode = (code: string): string | null => {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();
+  if (code === "Space") return "space";
+  if (code === "Tab") return "tab";
+  if (code === "ArrowUp") return "up";
+  if (code === "ArrowDown") return "down";
+  if (code === "ArrowLeft") return "left";
+  if (code === "ArrowRight") return "right";
+  return null;
+};
+// 解析 combo 串 → {ctrl,shift,alt,main} 或 null（非法）。规则同 Rust parse_combo：禁 Win + 裸 Alt+Space/Alt+F4，恰 1 主键。
+const parseComboStr = (combo: string): {ctrl:boolean;shift:boolean;alt:boolean;main:string} | null => {
+  const toks = combo.toLowerCase().split("+").map(s=>s.trim()).filter(Boolean);
+  if (toks.some(t => ["win","super","meta","windows"].includes(t))) return null;
+  const ctrl = toks.some(t => t==="ctrl"||t==="control");
+  const shift = toks.includes("shift");
+  const alt = toks.some(t => t==="alt"||t==="option");
+  const mains = toks.filter(t => !["ctrl","control","shift","alt","option"].includes(t));
+  if (mains.length !== 1 || !HOTKEY_MAIN_TOKENS.has(mains[0])) return null;
+  if (alt && !ctrl && !shift && (mains[0]==="space"||mains[0]==="f4"||mains[0]==="tab")) return null; // OS 占用（系统菜单/关窗/窗口切换）
+  return {ctrl,shift,alt,main:mains[0]};
+};
+// keydown 事件是否精确匹配 combo（修饰键全等 + 主键一致；Win 键按下则不匹配）
+const matchComboEvent = (e: KeyboardEvent, combo: string): boolean => {
+  const p = parseComboStr(combo);
+  if (!p) return false;
+  if (e.ctrlKey!==p.ctrl || e.shiftKey!==p.shift || e.altKey!==p.alt || e.metaKey) return false;
+  return tokenFromCode(e.code) === p.main;
+};
+// combo 串 → 展示文案（ctrl→Ctrl / 方向→箭头）
+const comboLabel = (combo: string): string =>
+  combo.split("+").map(t=>t==="ctrl"?"Ctrl":t==="shift"?"Shift":t==="alt"?"Alt":t==="space"?"Space":t==="tab"?"Tab":t==="up"?"↑":t==="down"?"↓":t==="left"?"←":t==="right"?"→":t.toUpperCase()).join("+");
+
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
@@ -226,7 +269,10 @@ export default function App() {
   const [hotkeyCombo, setHotkeyCombo] = useState("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
   const [hotkeyInput, setHotkeyInput] = useState("ctrl+space"); // 设置面板输入框编辑态
   const [hotkeyError, setHotkeyError] = useState(""); // 切换失败提示（如被其他应用占用），3s 后自动清
-  const [recording, setRecording] = useState(false); // 录制态：监听物理按键写回 hotkeyInput，不自动应用
+  const [enhHotkey, setEnhHotkey] = useState("ctrl+k"); // 增强搜索呼出键（应用内快捷键，纯前端，不经 Rust）
+  const [enhHotkeyInput, setEnhHotkeyInput] = useState("ctrl+k"); // 增强搜索键输入框编辑态
+  const [enhHotkeyError, setEnhHotkeyError] = useState(""); // 增强搜索键校验提示，2.5s 自清
+  const [recording, setRecording] = useState<null|"main"|"enh">(null); // 录制态：录哪个键（监听物理按键写回对应输入框，不自动应用）
   const [ctxMenu, setCtxMenu] = useState<CtxMenu>(null); // 自定义右键菜单
   const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
   const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
@@ -288,7 +334,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -631,37 +677,40 @@ export default function App() {
       setTimeout(() => setHotkeyError(""), 3000);
     }
   }, [hotkeyCombo, store]);
+  // 切换增强搜索键（纯前端，不经 Rust）：前端校验合法 + 不与呼出热键冲突 → 更新 state + 持久化。
+  const changeEnhHotkey = useCallback(async (next: string) => {
+    const normalized = next.trim().toLowerCase();
+    if (normalized === enhHotkey) return;
+    const fail = (msg:string)=>{ setEnhHotkeyError(msg); setTimeout(()=>setEnhHotkeyError(""), 2500); };
+    if (!parseComboStr(normalized)) { fail("无效组合"); return; }
+    if (normalized === hotkeyCombo) { fail("与呼出热键冲突"); return; }
+    setEnhHotkey(normalized);
+    setEnhHotkeyInput(normalized);
+    setEnhHotkeyError("");
+    if (store) { await store.set("enh-hotkey", normalized); await store.save(); }
+  }, [enhHotkey, hotkeyCombo, store]);
   // 录制式快捷键：录制态下捕获阶段监听 keydown（抢在全局 onKey 冒泡 handler 之前），转成 token 串写回
-  // hotkeyInput（不自动应用，用户再点「应用」走 changeHotkey）。token 映射对齐 Rust key_token 的 53 条。
+  // 对应输入框（不自动应用，用户再点「应用」走 changeHotkey/changeEnhHotkey）。token 映射对齐 Rust key_token 54 条。
   useEffect(() => {
     if (!recording) return;
-    const tokenFromCode = (code: string): string | null => {
-      if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();        // KeyA → a
-      if (/^Digit[0-9]$/.test(code)) return code.slice(5);                     // Digit1 → 1
-      if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();           // F12 → f12
-      if (code === "Space") return "space";
-      if (code === "ArrowUp") return "up";
-      if (code === "ArrowDown") return "down";
-      if (code === "ArrowLeft") return "left";
-      if (code === "ArrowRight") return "right";
-      return null;
-    };
-    const flash = (msg: string) => { setHotkeyError(msg); setTimeout(() => setHotkeyError(""), 2500); };
+    const setInput = recording === "main" ? setHotkeyInput : setEnhHotkeyInput; // 写回哪个输入框
+    const setErr = recording === "main" ? setHotkeyError : setEnhHotkeyError;
+    const flash = (msg: string) => { setErr(msg); setTimeout(() => setErr(""), 2500); };
     const onKey = (e: KeyboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (e.key === "Escape") { setRecording(false); return; } // Esc 取消录制（不关窗——已被 stopPropagation 拦下）
+      if (e.key === "Escape") { setRecording(null); return; } // Esc 取消录制（不关窗——已被 stopPropagation 拦下）
       const mods: string[] = [];
       if (e.ctrlKey) mods.push("ctrl");
       if (e.shiftKey) mods.push("shift");
       if (e.altKey) mods.push("alt"); // Alt 续46 spike 实测可用（RegisterHotKey 消费组合，不触发菜单栏）
       const isMod = /^(Control|Shift|Alt|Meta)(Left|Right)$/.test(e.code);
-      if (isMod) { setHotkeyInput(mods.length ? mods.join("+") + "+…" : "…"); return; } // 仅修饰键：实时预览等待主键
-      if (e.metaKey) { flash("暂不支持 Win 组合"); return; } // 仅拒 Win（OS 吞键）；Alt+Space/Alt+F4 由 Rust 兜底拒
-      const main = tokenFromCode(e.code); // 修饰键可选（含纯主键）；Alt/Win 仍拒
+      if (isMod) { setInput(mods.length ? mods.join("+") + "+…" : "…"); return; } // 仅修饰键：实时预览等待主键
+      if (e.metaKey) { flash("暂不支持 Win 组合"); return; } // 仅拒 Win（OS 吞键）；Alt+Space/Alt+F4 由校验兜底拒
+      const main = tokenFromCode(e.code); // 修饰键可选（含纯主键）；Win 仍拒
       if (!main) { flash("不支持的键"); return; }
-      setHotkeyInput([...mods, main].join("+")); // 定型，写回文本框
-      setRecording(false);
+      setInput([...mods, main].join("+")); // 定型，写回文本框
+      setRecording(null);
     };
     window.addEventListener("keydown", onKey, true); // capture 阶段：抢在全局 onKey（冒泡）之前
     return () => window.removeEventListener("keydown", onKey, true);
@@ -843,7 +892,9 @@ export default function App() {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
       if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
-      if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
+      if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhQuery("");searchRef.current?.focus();}else{setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);setTimeout(()=>enhInputRef.current?.focus(),0);}return;}
+      // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
+      if(e.key==="Tab"){e.preventDefault();return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
       if(enhOpen){ // 增强搜索接管导航，屏蔽下面 launcher 键（字母键不拦截，正常输入到 enhInput）
         if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
@@ -855,13 +906,12 @@ export default function App() {
       if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
       if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
       if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
-      if(e.key==="Tab"){e.preventDefault();const n=filteredApps.length;if(n)setSelectedIdx(i=>e.shiftKey?(i-1+n)%n:(i+1)%n);} // Tab 下一个 / Shift+Tab 上一个（循环）
-      // 启动器面板已不渲染 filteredApps（改渲染 launcher 收藏托盘），方向键无可见目标、Enter 仅在「用户正用顶栏搜应用」(search 非空) 时才启动，避免空 search 下误启动隐藏的 filteredApps[0]。launcher 键盘导航待后续。
+      // 启动器面板已不渲染 filteredApps（改渲染 launcher 收藏托盘），方向键无可见目标、Enter 仅在「用户正用顶栏搜应用」(search 非空) 时才启动，避免空 search 下误启动隐藏的 filteredApps[0]。launcher 键盘导航待后续。（Tab 已上移中和，不再做死 filteredApps 导航。）
       if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, search, filteredApps, selectedIdx, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh]);
+  }, [visible, search, filteredApps, selectedIdx, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey]);
 
   return (
    <>
@@ -1125,15 +1175,33 @@ export default function App() {
                         onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeHotkey(hotkeyInput);}}}
                         placeholder="如 ctrl+shift+f"
                         spellCheck={false}
-                        readOnly={recording}
+                        readOnly={recording==="main"}
                       />
-                      <button className={"settings-action"+(recording?" recording":"")} onClick={()=>{setHotkeyError("");setRecording(r=>!r);}}>{recording?"按下快捷键…":"录制"}</button>
+                      <button className={"settings-action"+(recording==="main"?" recording":"")} onClick={()=>{setHotkeyError("");setRecording(r=>r==="main"?null:"main");}}>{recording==="main"?"按下快捷键…":"录制"}</button>
                       <button className="settings-action" onClick={()=>changeHotkey(hotkeyInput)}>应用</button>
                     </div>
                   </div>
                   {hotkeyError && <p className="settings-hint settings-hint-error">{hotkeyError}</p>}
-                  <p className="settings-hint">点「录制」后直接按下组合键自动填入；也可手动输入。格式：ctrl+x · alt+q · ctrl+shift+x · f9（修饰键 Ctrl/Shift/Alt 可选；不支持 Win 及 Alt+Space/Alt+F4；纯主键会抢占该键，慎设）</p>
                   {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>恢复默认</button>}
+                  <div className="settings-row">
+                    <span className="settings-row-label">增强搜索</span>
+                    <div style={{display:"flex",gap:6}}>
+                      <input
+                        className="hotkey-input"
+                        value={enhHotkeyInput}
+                        onChange={e=>setEnhHotkeyInput(e.target.value)}
+                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeEnhHotkey(enhHotkeyInput);}}}
+                        placeholder="如 ctrl+k"
+                        spellCheck={false}
+                        readOnly={recording==="enh"}
+                      />
+                      <button className={"settings-action"+(recording==="enh"?" recording":"")} onClick={()=>{setEnhHotkeyError("");setRecording(r=>r==="enh"?null:"enh");}}>{recording==="enh"?"按下快捷键…":"录制"}</button>
+                      <button className="settings-action" onClick={()=>changeEnhHotkey(enhHotkeyInput)}>应用</button>
+                    </div>
+                  </div>
+                  {enhHotkeyError && <p className="settings-hint settings-hint-error">{enhHotkeyError}</p>}
+                  {enhHotkey!=="ctrl+k" && <button className="settings-action" onClick={()=>changeEnhHotkey("ctrl+k")}>恢复默认</button>}
+                  <p className="settings-hint">点「录制」后直接按下组合键自动填入；也可手动输入。格式：ctrl+x · alt+q · ctrl+shift+x · f9（修饰键 Ctrl/Shift/Alt 可选；不支持 Win 及 Alt+Space/Alt+F4；纯主键会抢占该键，慎设）</p>
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
@@ -1154,7 +1222,7 @@ export default function App() {
       )}
       <footer className="bottom-bar">
         <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} 核</span></div>
-        <div className="bot-center"><kbd>{hotkeyCombo.split('+').map(t=>t==='ctrl'?'Ctrl':t==='shift'?'Shift':t==='space'?'Space':t==='up'?'↑':t==='down'?'↓':t==='left'?'←':t==='right'?'→':t.toUpperCase()).join('+')}</kbd> 切换 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
+        <div className="bot-center"><kbd>{comboLabel(hotkeyCombo)}</kbd> 切换 · <kbd>{comboLabel(enhHotkey)}</kbd> 搜索 · <kbd>Esc</kbd> 关闭 · <kbd>↑↓</kbd> 导航 · <kbd>Enter</kbd> 启动</div>
         <div className="bot-right"><span>Workbench v0.1.0</span></div>
       </footer>
     </div>
