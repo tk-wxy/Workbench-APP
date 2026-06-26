@@ -256,7 +256,6 @@ export default function App() {
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   const [store, setStore] = useState<any>(null);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
-  const [selectedIdx, setSelectedIdx] = useState(0);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
@@ -297,6 +296,8 @@ export default function App() {
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
+  // 外部文件拖入窗口时的悬停高亮（HTML5 dragenter/dragleave，与 OLE IDropTarget 正交）
+  const [fileDragOver, setFileDragOver] = useState(false);
   // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
   const [enhOpen, setEnhOpen] = useState(false);
   const [enhQuery, setEnhQuery] = useState("");
@@ -346,6 +347,7 @@ export default function App() {
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
     let cleanup: (() => void)[] = [];
+    let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
@@ -413,6 +415,7 @@ export default function App() {
             dropAreaRef.current?.classList.add("drop-flash");
             setTimeout(() => dropAreaRef.current?.classList.remove("drop-flash"), 200);
           }
+          setFileDragOver(false);
           // 拖入后回焦点，让 Esc 可用
           try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().setFocus(); } catch {}
         });
@@ -420,10 +423,18 @@ export default function App() {
         const un5 = await listen("file-index-ready", (e: any) => setIndexReady((e.payload ?? 0) > 0));
         // 应用扫描就绪（S4c）：后台预扫线程扫完一次性推送 apps，呼出前填充、消除首次卡顿
         const un6 = await listen("apps-ready", (e: any) => { const list = (e.payload ?? []) as AppInfo[]; if (list.length) setApps(list); });
-        cleanup = [un1, un2, un3, un4, un5, un6];
+        // 外部文件拖入悬停高亮（S5a）：Rust DragEnter/DragLeave emit，前端 100ms 防抖过滤 HWND 间快速 leave-enter
+        const un7 = await listen("file-drag-enter", () => {
+          if (fileDragLeaveTimer) { clearTimeout(fileDragLeaveTimer); fileDragLeaveTimer = null; }
+          setFileDragOver(true);
+        });
+        const un8 = await listen("file-drag-leave", () => {
+          fileDragLeaveTimer = setTimeout(() => setFileDragOver(false), 100);
+        });
+        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8];
       } catch (e) { console.error("listen error:", e); }
     })();
-    return () => { cleanup.forEach(fn => fn()); };
+    return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
@@ -887,7 +898,6 @@ export default function App() {
   const fi = (ext:string)=>({pdf:"📄",doc:"📝",docx:"📝",xls:"📊",xlsx:"📊",ppt:"📽️",pptx:"📽️",jpg:"🖼️",png:"🖼️",gif:"🖼️",mp4:"🎬",mp3:"🎵",zip:"📦",rar:"📦",exe:"⚙️",txt:"📃"}[ext.toLowerCase()]??"📎");
 
   // ── 键盘 ──
-  const GRID_COLS = 6;
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
@@ -902,27 +912,23 @@ export default function App() {
         else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
         return;
       }
-      if(e.key==="ArrowLeft"){e.preventDefault();setSelectedIdx(i=>Math.max(i-1,0));}
-      if(e.key==="ArrowRight"){e.preventDefault();setSelectedIdx(i=>Math.min(i+1,filteredApps.length-1));}
-      if(e.key==="ArrowUp"){e.preventDefault();setSelectedIdx(i=>Math.max(i-GRID_COLS,0));}
-      if(e.key==="ArrowDown"){e.preventDefault();setSelectedIdx(i=>Math.min(i+GRID_COLS,filteredApps.length-1));}
-      // 启动器面板已不渲染 filteredApps（改渲染 launcher 收藏托盘），方向键无可见目标、Enter 仅在「用户正用顶栏搜应用」(search 非空) 时才启动，避免空 search 下误启动隐藏的 filteredApps[0]。launcher 键盘导航待后续。（Tab 已上移中和，不再做死 filteredApps 导航。）
-      if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[selectedIdx]??filteredApps[0];if(a)launchApp(a.app, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));}
+      // Enter：顶栏搜索非空时启动排名第一的应用（launcher 键盘导航待后续实现）
+      if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[0];if(a)launchApp(a.app, null);}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, search, filteredApps, selectedIdx, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey]);
+  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey]);
 
   return (
    <>
-    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}`} onContextMenu={e=>e.preventDefault()}>
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
         <div className="top-center">
           <div className="global-search">
             <svg className="search-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-            <input ref={searchRef} className="search-field" placeholder="搜索应用、中转、剪贴板…" value={search} onChange={e=>{setSearch(e.target.value);setSelectedIdx(0);}} spellCheck={false} />
+            <input ref={searchRef} className="search-field" placeholder="搜索应用、中转、剪贴板…" value={search} onChange={e=>setSearch(e.target.value)} spellCheck={false} />
           </div>
         </div>
         <div className="top-right">
@@ -1201,7 +1207,9 @@ export default function App() {
                   </div>
                   {enhHotkeyError && <p className="settings-hint settings-hint-error">{enhHotkeyError}</p>}
                   {enhHotkey!=="ctrl+k" && <button className="settings-action" onClick={()=>changeEnhHotkey("ctrl+k")}>恢复默认</button>}
-                  <p className="settings-hint">点「录制」后直接按下组合键自动填入；也可手动输入。格式：ctrl+x · alt+q · ctrl+shift+x · f9（修饰键 Ctrl/Shift/Alt 可选；不支持 Win 及 Alt+Space/Alt+F4；纯主键会抢占该键，慎设）</p>
+                  <p className="settings-hint">点「录制」后直接按下组合键自动填入；也可手动输入。</p>
+                  <p className="settings-hint" style={{marginTop: '4px'}}>格式：ctrl+x · alt+q · ctrl+shift+x · f9</p>
+                  <p className="settings-hint" style={{marginTop: '4px'}}>· 不支持 Win 键及 Alt+Space / Alt+F4（系统保留）<br/>· 修饰键 Ctrl / Shift / Alt 可选；纯主键会全局抢占该键，慎设<br/>· 中文输入法下录制前请先切换到英文输入法</p>
                   <div className="settings-row"><span className="settings-row-label">关闭面板</span><kbd>Esc</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">应用导航</span><kbd>↑↓</kbd></div>
                   <div className="settings-row"><span className="settings-row-label">启动选中应用</span><kbd>Enter</kbd></div>
