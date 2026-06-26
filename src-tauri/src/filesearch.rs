@@ -50,7 +50,7 @@ const MAX_INDEX_ENTRIES: usize = 200_000;
 const MAX_WALK_DEPTH: usize = 8;
 const REBUILD_INTERVAL_SECS: u64 = 10 * 60; // 10 分钟周期重建（原 30min）
 const INITIAL_DELAY_SECS: u64 = 3;
-const QUERY_LIMIT_CAP: usize = 50;
+const QUERY_LIMIT_CAP: usize = 200;
 
 /// 默认扫描目录（当 store 中无用户配置时使用）。
 fn default_scan_dirs() -> Vec<PathBuf> {

@@ -49,7 +49,6 @@ impl EverythingClient {
         // es.exe 默认匹配全路径，与 Everything 本尊行为一致。
         // 不设 -n 限制让 Everything 返回全部结果，前端 search_files 做最终截断。
         let output = match Command::new(&self.es_path)
-            .arg("-match-path")
             .arg(q)
             .output()
         {

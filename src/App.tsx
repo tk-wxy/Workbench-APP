@@ -525,7 +525,7 @@ export default function App() {
     const t = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: 20 });
+        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: 50 });
         setFsResults(r);
       } catch { setFsResults([]); }
     }, 150);
