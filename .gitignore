@@ -28,3 +28,10 @@ Thumbs.db
 # Reasonix AI coding tool
 .reasonix/
 reasonix.toml
+
+# Internal dev docs (local only)
+CLAUDE.md
+claude.md
+DECISIONS.md
+MEMORY.md
+DEVLOG.md
