@@ -25,14 +25,15 @@ unsafe impl Sync for EverythingClient {}
 impl EverythingClient {
     pub fn try_connect() -> Option<Self> {
         let es = find_es_exe()?;
-        // 验证 es.exe 可执行
-        match Command::new(&es).arg("-n").arg("1").arg("test_query_wb").output() {
+        // 验证 es.exe 可执行（-h 输出帮助，不依赖 Everything 是否运行）
+        match Command::new(&es).arg("-h").output() {
             Ok(o) if o.status.success() => {
                 eprintln!("[everything] es.exe OK: {}", es.display());
                 Some(Self { es_path: es })
             }
             Ok(o) => {
-                eprintln!("[everything] es.exe failed: status={}", o.status);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                eprintln!("[everything] es.exe -h failed: status={} stderr={}", o.status, stderr.trim());
                 None
             }
             Err(e) => {
@@ -54,11 +55,14 @@ impl EverythingClient {
         {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("[everything] es.exe search failed: {e}");
+                eprintln!("[everything] es.exe search spawn: {e}");
                 return Vec::new();
             }
         };
-        if !output.status.success() { return Vec::new(); }
+        if !output.status.success() {
+            eprintln!("[everything] es.exe search exit={} stderr={}", output.status, String::from_utf8_lossy(&output.stderr).trim());
+            return Vec::new();
+        }
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .map(|l| l.trim())
