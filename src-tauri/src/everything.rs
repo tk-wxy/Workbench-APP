@@ -231,9 +231,10 @@ pub fn find_everything_dll() -> Option<std::path::PathBuf> {
     }
     // 3) Everything 进程路径：查找 Everything.exe 所在目录
     if let Some(exe_dir) = find_everything_exe_dir() {
-        eprintln!("[everything] found via process: {}", exe_dir.display());
+        eprintln!("[everything] exe dir: {}", exe_dir.display());
         for name in &["Everything64.dll", "Everything.dll"] {
             let dll = PathBuf::from(&exe_dir).join(name);
+            eprintln!("[everything]   try: {}", dll.display());
             if dll.exists() {
                 return Some(dll);
             }
@@ -294,10 +295,12 @@ fn find_everything_exe_dir() -> Option<std::path::PathBuf> {
                     let hp = OpenProcess(0x1000/*PROCESS_QUERY_LIMITED_INFORMATION*/, 0, pe.th32ProcessID);
                     if !hp.is_null() {
                         let mut buf = vec![0u16; 520];
-                        let mut len = (buf.len() * 2) as u32;
+                        let mut len = buf.len() as u32;
                         if QueryFullProcessImageNameW(hp, 0, buf.as_mut_ptr(), &mut len) != 0 {
-                            let exe_path = String::from_utf16_lossy(&buf[..len as usize / 2]);
-                            if let Some(parent) = std::path::Path::new(exe_path.trim_end_matches('\0')).parent() {
+                            let exe_path = String::from_utf16_lossy(&buf[..len as usize]);
+                            let exe_path = exe_path.trim_end_matches('\0').to_string();
+                            eprintln!("[everything] Everything.exe at: {}", exe_path);
+                            if let Some(parent) = std::path::Path::new(&exe_path).parent() {
                                 found = Some(parent.to_path_buf());
                             }
                         }
