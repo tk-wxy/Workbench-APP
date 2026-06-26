@@ -9,40 +9,27 @@
 
 ## 当前任务 〔快照〕
 
-- **进行中**：Everything 集成（✅ 已完成，待 GUI 实测）
-- **下一步**：GUI 实测 Everything 集成后确定后续方向
+- **进行中**：Everything 集成（✅ 已修复并 GUI 验证通过）
+- **下一步**：待用户确认后续方向
 - **待决策**：无
 
 ---
 
 ## 会话归档
 
-### 2026-07-01 #3 — Everything 搜索引擎集成
+### 2026-07-01 #3 — Everything 搜索引擎集成（es.exe 方案，经 4 次迭代修通）
 
-**背景**：内置引擎只覆盖配置的几个目录，全盘搜索需 Everything。
+**踩坑记录**：
+1. ~~SDK DLL 方案~~ → 便携版不含 Everything64.dll
+2. ~~第一次 es.exe~~ → QueryFullProcessImageNameW 缓冲区字符数计算 bug（len 多除了 2）
+3. ~~原生 IPC（WM_COPYDATA）~~ → Everything 管理员运行，Workbench 普通用户，UIPI 禁止跨权限 OpenProcess → `OpenProcess failed`
+4. ✅ **es.exe + 清晰错误提示** → 用户下载 es.exe 放到 Everything 目录即可
 
-**完成**：
+**最终方案**：`es.exe -sort name -n 50 <query>` 子进程，解析每行路径输出。
 
-| 模块 | 改动 | 文件 |
-|------|------|------|
-| Everything 客户端 | raw FFI 动态加载 Everything64.dll，reg 定位 → LoadLibrary → SDK API 查询 | `everything.rs`（新） |
-| 搜索引擎切换 | `set_search_engine` / `get_search_engine` 命令 | `filesearch.rs` |
-| 查询分流 | `search_files` 优先 Everything（若启用且可用），自动回退内置 | `filesearch.rs` |
-| 设置面板 | 「搜索引擎」segmented 控件（内置/Everything）+ Everything 不可用警告 | `App.tsx` |
-| 持久化 | store key `search-engine`，重启保留 | `App.tsx` |
+**最终提交**：`ab9b0eb`
 
-**技术要点**：
-- 纯 raw FFI（`extern "system"`），零 windows-rs 类型依赖——避开本项目的多版本 windows-core 冲突
-- `EverythingClient` 以 `OnceLock<Option<>>` 缓存，首次查询时懒加载 DLL，后续零开销
-- `Send + Sync` 标记（Everything SDK 文档明确线程安全）
-- 注册表查安装路径 → 常见路径兜底 → DLL 不存在则静默回退内置
-- 前端切换后立即检查可用性，Everything 未运行时红字提示
-
-**编译**：cargo check ✅ / clippy 8 基线 ✅ / tsc ✅
-
-**待 GUI 实测**：安装 Everything 后切换引擎 → Ctrl+K 搜索 → 验证全盘结果覆盖
-
-**提交**：`1f17b4c`
+**GUI 验证**：✅ 通过
 
 ---
 
