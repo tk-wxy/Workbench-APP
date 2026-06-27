@@ -228,3 +228,9 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 /* 录制态按钮：高亮 + 呼吸动画提示「正在监听按键」 */
 .settings-action.recording,.settings-action.recording:hover{color:var(--accent);border-color:var(--accent);background:rgba(96,165,250,0.12);animation:hotkey-rec 1.2s ease-in-out infinite;}
 @keyframes hotkey-rec{0%,100%{opacity:1;}50%{opacity:0.55;}}
+/* 搜索：额外扫描目录列表（续57）*/
+.search-dir-list{display:flex;flex-direction:column;gap:4px;margin:6px 0;}
+.search-dir-item{display:flex;align-items:center;gap:8px;padding:4px 8px;background:var(--fill-1);border:1px solid var(--border);border-radius:4px;}
+.search-dir-path{flex:1;font-size:12px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.search-dir-remove{flex-shrink:0;border:none;background:transparent;color:var(--text2);cursor:pointer;font-size:12px;line-height:1;padding:2px 4px;border-radius:4px;transition:all 80ms;}
+.search-dir-remove:hover{color:#ff6b6b;background:rgba(255,80,80,0.15);}
