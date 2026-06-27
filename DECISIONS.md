@@ -173,7 +173,7 @@ window.hide() → sleep(150ms) → GetForegroundWindow → SetForegroundWindow �
 
 - **根因**：`image_to_cache_entry` 采集时只存 1024px 缩略图，原图字节直接 drop；历史图粘贴只能拿到缩略图（当前图因重读系统剪贴板仍是原图）。
 
-- **方案选择（Simple）**：原图 PNG 落盘到 `{data_dir}/clip_images/{time}.png`，用户可见、自行管理（不做自动删除/孤儿 sweep）。理由：自动删除逻辑需要同步 4 个缓存变更点（truncate/delete/clear/set_max），增量复杂度高；Simple 代价是长期积累磁盘占用，但有「清空缓存」按钮兜底，用户可自理。
+- **方案选择（Simple）**：原图 PNG 落盘到 `{data_dir}/clip_images/{time}.png`，用户可见、自行管理（不做自动删除/孤儿 sweep）。理由：自动删除逻辑需要同步 4 个缓存变更点（truncate/delete/clear/set_max），增量复杂度高；Simple 代价是长期积累磁盘占用，但有「清空缓存」按钮兜底，用户可自理。**（2026-06-26 续52 起已补自动管理，但走「解耦 janitor」绕开这 4 个变更点——见本节末「clip_images 缓存上限 + 孤儿清理」。）**
 
 - **detached 写盘**：原图 PNG 编码 + 写文件在 `std::thread::spawn` 内异步执行，监听循环立刻返回继续轮询。理由：同步写盘给图片复制后那个轮询周期凭空增加数百 ms，加宽 §6 采样塌缩窗口（`CLIPBOARD_LOCK` 只防 1418，不防监听循环延迟，二者正交）。
 
@@ -189,6 +189,38 @@ window.hide() → sleep(150ms) → GetForegroundWindow → SetForegroundWindow �
 - **两道降级兜底**：① `paste fallback`：`fs::read` 失败或 `orig_path=None` 时自动降级 base64 缩略图，对用户透明；② `load strip`：重启时 `load_clip_history` 检查 `orig_path` 文件是否存在，缺失则去掉该字段（清空缓存后的自愈机制）。
 
 - **DECISIONS §6 变更点**：`start_clipboard_monitor` 图片分支重构——`CLIPBOARD_LOCK` 只罩 `get_image`；`thumb`/`ahash` 在锁外；dedup 后 `spawn(save_clip_image_to_disk)`。新增 `MAX_ORIG_DIM=4096`、`CLIP_IMAGE_DIR`、`save_clip_image_to_disk`、`open_clip_image_dir`、`clear_clip_image_cache`。前端 `ClipItem` 加 `orig_path?`，两处 invoke 传 `origPath`，设置面板加「打开文件夹」/「清空缓存」按钮。
+
+**clip_images 缓存上限 + 孤儿清理：解耦 janitor（2026-06-26，续52）**：补上落盘原图当初刻意没做的自动管理。
+
+- **根因**：上面「落盘原图」当初按 Simple 选了**不做自动删除/孤儿 sweep**——历史条数有上限（≤100），但单张原图可达数 MB，长会话 / 长期运行下 `clip_images/` 无界增长；长期多用户分发场景是真实磁盘风险。原决策的退路只有「清空缓存」手动按钮，不足以兜底无人值守的长跑。
+
+- **为何选「解耦 janitor」而非「截断时顺手删图」**：截断时删图要在 `set_clip_cache_max` / `delete_clipboard_item` / `clear_clipboard_history` / dedup truncate 等**多条剪贴板写路径**里各插一段删图逻辑——这些全在高危区（§6 锁纪律 / 死循环防御），增量改动多、每处都新增锁与重入风险，且仍漏不掉「手删 json / 进程被杀」产生的孤儿。改为**自包含后台函数 `sweep_clip_image_cache()`**：按需读 `CLIP_CACHE` 快照 + 操作磁盘，**零改现有写路径**，孤儿与超量一并收口。已验证的笨方法（周期全量扫一遍）优于侵入多路径的「聪明」增量删除。
+
+- **两步清理**：① **孤儿清理**——删掉 `clip_images/` 里所有「文件名未被任何 `CLIP_CACHE` 条目 `orig_path` 引用」的文件（覆盖截断 / 手删 / dedup 产生的孤儿，无需追踪来源）；② **总量封顶**——剩余被引用文件总和 > `CLIP_IMAGE_CACHE_MAX_BYTES`（300MB）时，从最旧（文件名内嵌 `{time}` 升序、解析失败兜底 mtime）删到 ≤ 上限。被删条目优雅降级为缩略图（与「清空缓存 → 降级缩略图」一致，非数据丢失）。
+
+- **锁纪律（沿用 §6 / save_clip_history 同源规则）**：janitor **绝不取 `CLIPBOARD_LOCK`**（磁盘 I/O 与 Win32 剪贴板锁正交）；`CLIP_CACHE` 锁仅 **snapshot-and-release** 收集被引用文件名（`{time}.png`）进 `HashSet` 后立即释放，**锁块内零 fs 调用**，绝不持锁跨 list/delete。全程 best-effort：任何 fs / 锁错误 log + 跳过，不 panic、不阻塞。按**文件名**比对（同目录，避开 `canonicalize` 陷阱）。
+
+- **启动时序陷阱**：首次 sweep 必须在 `load_clip_history` 填充 `CLIP_CACHE` **之后**——否则空 referenced 集合会把所有被引用图误判为孤儿全删。`load_clip_history` 在 setup 同步执行，故 janitor 线程起手 `sleep(CLIP_IMAGE_SWEEP_INITIAL_MS=5s)` 即安全错开；之后 `loop { sweep; sleep(CLIP_IMAGE_SWEEP_MS=10min) }`。解析不到 `clip_images` 目录 → 线程直接 return（降级 no-op）。
+
+- **变更点**：`lib.rs` 新增 3 常量（`CLIP_IMAGE_CACHE_MAX_BYTES`，定稿 **500MB** / `CLIP_IMAGE_SWEEP_MS` / `CLIP_IMAGE_SWEEP_INITIAL_MS`）+ `parse_clip_image_time` + `sweep_clip_image_cache` + `start_clip_image_janitor`（setup 内 `start_clipboard_monitor` 后 spawn）。零前端改动、零 `tauri.conf.json` 改动、未碰任何既有剪贴板写路径 / 锁调用点。
+
+**截图粘到资源管理器文件夹：CF_HDROP 落地真文件（2026-06-26，续53）**：补「文件夹粘图」缺口 + 根除大图卡顿。
+
+- **git 裁决（取证在先，commit 级，不凭当前代码推断）**：
+  - **文件夹粘截图失败 = 新增能力缺口，非回归**。图片粘贴自 `38df8b9`(06-15) 起就一直是 `clipboard.set_image`（CF_DIB 位图）+ Ctrl+V，对所有目标;`CabinetWClass`/`ExploreWClass` 在 `lib.rs` 全历史**从未出现**;桌面特判 `class=="WorkerW"||"Progman"`（`fefb623` 06-17 引入 SHFileOperation 落地）**从引入起就只匹配桌面、从未更宽也没被收窄**;图片粘贴**从未用过 CF_HDROP**。故资源管理器文件夹(CF_DIB 收不下)从第一天就粘不进。用户「之前能粘」极可能是把「粘**文件**进文件夹」（本就支持，走 `set_clipboard_files` 的 CF_HDROP）记成了「粘**截图**」。
+  - **卡顿 = 真回归，断点 `1d17e8b`(06-23)**。该 commit 把非桌面分支的解码源从 base64 缩略图(≤1024px) 换成全分辨率原图(`rgba_from_orig`，3200×1998 ≈ 25MB RGBA)，主线程同步解码 + 转 DIB → 堵住热键键态轮询(show/hide 排不进) → 「短时无法呼出」。且对文件夹这次解码是**白做**（位图收不下）。
+- **为何文件夹也走「落地真文件」而非别的**：① **CabinetWClass 不接受 CF_DIB**，要让 Ctrl+V 在文件夹里生效**只能给文件(CF_HDROP)**;② **复用已验证的成熟路径**——`set_clipboard_files` 的 CF_HDROP + Ctrl+V 早已证明「文件粘进文件夹」可靠，照搬其 idiom（锁加调用方 / `SKIP_CLIP_EVENTS` / 焦点交还）零新增风险;③ **顺带根除白解码卡顿**——大图直接拿已落盘的 `clip_images/{time}.png` 路径喂 `write_cf_hdrop`，**全程零图像解码**，主线程不再被 25MB RGBA 堵住。
+- **为何不用 COM 解析文件夹路径 + SHFileOperation（备选 B 否决）**：那条要新写 `IShellWindows` 枚举前台窗口匹配 HWND 取当前目录，复杂度与 COM 风险更高;CF_HDROP + Ctrl+V 无需知道文件夹路径（Explorer 自己粘到聚焦目录），更简更稳。
+- **三分叉**（`set_clipboard_image`，桌面特判之后、位图分支之前插文件夹分叉）：桌面→SHFileOperation;文件夹(`CabinetWClass`/`ExploreWClass`)→CF_HDROP 真 PNG（大图复用原图零解码;小图解 base64 写 temp PNG `workbench_clip_{time}.png` + 后台延迟 5s best-effort 清理，因 Ctrl+V 异步、需等 Explorer 读完）;其余 app→`set_image` 位图（**唯一保留全分辨率解码的分支**，真吃位图的 Paint/聊天框需要，本次不动避免一次多变量）。
+- **锁纪律**：文件夹分支 CF_HDROP 写**锁加调用方**（`{ 锁 CLIPBOARD_LOCK → write_cf_hdrop(&[png]) }`，不进函数体——它被已持锁的 `copy_files_to_clipboard` 共用，进去重入死锁）;锁块**仅罩 OpenClipboard…CloseClipboard**，绝不跨 hide/sleep/焦点交还/Ctrl+V;临时文件 `fs::write` 在锁外（磁盘 I/O 与剪贴板锁正交）;写前 `SKIP_CLIP_EVENTS.store(2)` 防自写回流历史面板。
+- **变更点**：仅 `lib.rs` `set_clipboard_image` 非桌面分支加文件夹分叉 + 常量 500MB 字面量。零前端、零 `tauri.conf.json`;未碰桌面分支 / 位图分支 `set_image` / `rgba_from_orig` / 焦点交还流程 / `write_cf_hdrop` 函数体 / janitor。
+
+- **探针裁决（2026-06-26，续53 后续）——为何文件夹必须自落地真文件、不能简化为「靠 Explorer 落地位图」**：质疑「Win11 文件夹能粘 Win+Shift+S 截图，是否说明 Explorer 通用落地任意位图、我们的 CF_HDROP 分支冗余」。用临时 PROBE（独立程序 `EnumClipboardFormats` 枚举剪贴板格式，验后已删）+ 文档双重取证：
+  - **官方文档**：Win11「截图粘进文件夹」功能（Insider Build 21277）措辞**只绑定 WIN+SHIFT+S snipping**，不提通用位图;MS Learn《Shell Clipboard Formats》：Explorer 粘贴只认 `CF_HDROP → CFSTR_FILEDESCRIPTOR/FILECONTENTS → CFSTR_FILENAME`，**CF_DIB/CF_BITMAP 不在其列**。
+  - **PROBE 实测**：Win+Shift+S 截图的剪贴板含 `CF_HDROP` + `Shell IDList Array` + `FileContents` + `FileGroupDescriptorW`（位图之外另有整套 shell 文件格式）;而纯位图（PrtSc / arboard `set_image`）只有 `CF_BITMAP/CF_DIB/CF_DIBV5`。
+  - **原始 bug 即纯位图实测**：本工具早期 `set_image` 写纯位图 Ctrl+V 进文件夹 = 失败——这本身就是「纯位图→文件夹」的真实否证。
+  - **裁决（情况乙）**：Explorer **不通用落地位图**;Snip 能粘靠的是它额外放的文件格式。纯位图（含我们若简化后写的位图）粘不进文件夹 → **CF_HDROP 自落地分支必要，保留定稿**。简化方案（情况甲）否决。
+- **收尾加固（情况乙）——小图临时文件清理改 janitor 兜底**：原小图分支「写 temp PNG → 固定 `sleep(5s)` 后台删」有脆弱 race（Ctrl+V 异步，CPU 负载下可能在 Explorer 读完前删掉 → 粘贴损坏）。改为：小图也写到 `clip_images/`、命名 `workbench_clip_*.png`，**不自删**——它不被任何 `orig_path` 引用，由 janitor 孤儿清理兜底（10min 内必清，且孤儿在 cap 计算前删、不占额度）。去掉魔法延时与 spawn 线程，Explorer 读多久都安全。`CLIP_IMAGE_DIR` 不可用时退回系统 temp（极少见，交 OS 回收）。
 
 ---
 

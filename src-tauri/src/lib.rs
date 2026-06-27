@@ -861,6 +861,53 @@ fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>
         return result;
     }
 
+    // 资源管理器文件夹窗口：走 CF_HDROP「落地真 PNG 文件」——文件夹只接受文件(CF_HDROP)、
+    // 收不下位图(CF_DIB)，故不能走下面的 set_image 分支。顺带规避大图转位图的全分辨率 RGBA
+    // 解码卡顿（本分支零解码：大图直接复用已落盘原图，小图仅解一次 base64）。
+    if class1 == "CabinetWClass" || class1 == "ExploreWClass" {
+        // 选 PNG 文件路径：大图(有 orig_path)直接用已落盘原图，零解码、不产临时文件；
+        // 小图(无 orig_path)解一次 base64 写一份 PNG（磁盘 I/O 在 CLIPBOARD_LOCK 之外）。
+        // 小图临时文件落到 clip_images/、命名 workbench_clip_*.png：它不被任何 orig_path 引用，
+        // 由 janitor 当孤儿清理兜底——去掉「固定 5s 延时删」那条脆弱 race（Ctrl+V 异步、CPU 负载下
+        // 可能在 Explorer 读完前删掉损坏粘贴）。clip_images 不可用时退回系统 temp（极少见，交 OS 回收）。
+        let png_path: String = match orig_path.as_deref() {
+            Some(p) if std::path::Path::new(p).exists() => p.to_string(),
+            _ if !base64.is_empty() => {
+                let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+                let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+                let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
+                let tmp = dir.join(format!("workbench_clip_{}.png", now_ms()));
+                std::fs::write(&tmp, &bytes).map_err(|e| format!("写临时文件: {}", e))?;
+                tmp.to_string_lossy().into_owned()
+            }
+            _ => return Err("无图片数据".into()),
+        };
+
+        // CF_HDROP 写回 + Ctrl+V，复用文件粘贴 idiom（与 set_clipboard_files 一致）：
+        // 锁加在【调用方】、不进 write_cf_hdrop（防与 copy 路径重入死锁）；写前 SKIP_CLIP_EVENTS 防自写回流。
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        {
+            // 仅罩 write_cf_hdrop 的 OpenClipboard…CloseClipboard 临界区；绝不跨焦点交还/Ctrl+V 持锁
+            let _g = CLIPBOARD_LOCK.lock().unwrap();
+            write_cf_hdrop(&[png_path])?;
+        }
+        suppress_clip_until_now();
+
+        let target = unsafe { GetForegroundWindow() };
+        unsafe { let _ = SetForegroundWindow(target); }
+        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+        let _ = enigo.key(enigo::Key::Control, Press);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::V, Press);
+        let _ = enigo.key(enigo::Key::V, Release);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::Control, Release);
+
+        // 临时文件不在此删：大图用的是 clip_images/ 原图（缓存管理）；小图也写在 clip_images/、
+        // 由 janitor 孤儿清理（不被任何 orig_path 引用）。无脆弱定时 race，Explorer 读多久都安全。
+        return Ok(());
+    }
+
     // 非桌面：历史图写回剪贴板，再 Ctrl+V
     if !base64.is_empty() {
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
