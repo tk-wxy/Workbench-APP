@@ -480,6 +480,7 @@ pub fn run() {
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
             filesearch::search_files, filesearch::get_index_status,
             filesearch::set_search_engine, filesearch::set_search_dirs,
+            everything::reload_everything,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
