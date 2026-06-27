@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，GUI 实测通过）
+> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，GUI 实测通过；续54：lib.rs 拆分——剪贴板子系统迁入 clipboard.rs，纯结构重构零功能改动，lib.rs 1539→530 行，cargo check/clippy 通过，GUI 实测通过）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -37,6 +37,7 @@
 - **新增（续35，纯前端，零 Rust 改动）**：**增强搜索独立页**——Ctrl+K 呼出同一 overlay 内的全屏视图层（`.enh-layer`，靠 `.enh-open` class 切显隐，160ms 淡入上浮）。结果范围=应用（badge「应用」）+ 中转区 `type==="file"` 条目（badge「中转」），剪贴板/文件系统搜索不进（Tier 2 待做）。复用 `fuzzyScore`/`usageScore`/`HighlightText`/`sortedApps`/`launchApp`/`hideWorkbench`。键盘：Esc 链插入 enhOpen（ctxMenu→enhOpen→stageSel→settings→关窗）；enhOpen 时 ↑↓ + Enter 接管、屏蔽 launcher 导航；激活只走 `launchApp`（含动画+hide）或 `open_file`，**不碰粘贴/焦点交还/CLIPBOARD_LOCK**。空查询=常用应用兜底可直接 Enter。**tsc 零错误已验；T1–T11 GUI 实测通过（2026-06-25）**
 - **下一步（候选，无阻塞）**：① 启动器键盘导航（←→↑↓ + Enter）；② 文件结果右键「打开所在目录」(`reveal_in_explorer`) + 高亮区间回传（Rust 回传命中 ranges）；③ 索引目录可配置（设置面板扩项）；④ 增强搜索 Tier 2 剩余（剪贴板条目纳入）；⑤ file/folder 收藏的非拖入入口（如文件选择对话框）；⑥ **拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）；⑦ T9 渲染进程重建后拖入失效（已知罕见限制，低优先级）
 - **新增（2026-06-25，纯前端，零 Rust 改动）**：**顶栏 search 联动启动台过滤**——`filteredLauncher` useMemo（`search` 非空时 `launcher.filter(it => matchItem(q, it.name, []))`，空时直接返回 launcher）；JSX 数据源 `launcher.map` → `filteredLauncher.map`；空态 hint 区分「无收藏：拖入或点添加」vs「有收藏但无匹配：无匹配」。「＋ 添加」卡片不参与过滤（始终在 launcher-add 独立渲染）。**tsc 零错误✓；GUI 实测通过（2026-06-25）**
+- **新增（续54，Rust 结构重构，零功能改动）**：**lib.rs 拆分——剪贴板子系统迁入 clipboard.rs**。lib.rs 1539→530 行；新建 `src-tauri/src/clipboard.rs`（~1038 行）收纳全部剪贴板代码（7 静态量全模块私有、12 可调常量、CF_HDROP FFI、监听/落盘/janitor/13 命令 + 辅助 base64/aHash/窗口类）。**纯搬迁、函数体一字未改**；新增 `clipboard::init(app, data_dir)` 封装 setup 时序（路径→load_clip_history→start_clipboard_monitor→start_clip_image_janitor，顺序不可变）。lib.rs setup 的 4-5 行剪贴板初始化收敛为一句 `clipboard::init(...)`；`generate_handler!` 13 命令加 `clipboard::` 前缀。命令用 `pub(crate)`（零新增 `pub`）。**验证（CC 自验）**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 条基线✓（lint 随代码迁移，集合/数量不变）；lib.rs 中 `CLIP_CACHE`/`CLIPBOARD_LOCK`/`SKIP_CLIP` 引用归零✓；`write_cf_hdrop` 函数体内无锁（锁加调用方铁律保持）✓。**GUI 实测通过（2026-06-27）**：呼出显示历史、文本/图片/文件粘贴、删除+重启持久化、只复制全正常。文件：`src-tauri/src/clipboard.rs`(新)/`src-tauri/src/lib.rs`/`CLAUDE.md`(§项目结构+1行)。
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -77,7 +78,8 @@ src/
 
 ```
 src-tauri/src/
-  lib.rs           # 主逻辑：窗口全屏、热键 handler、剪贴板后台线程、Tauri 命令（~620行）
+  lib.rs           # 主逻辑：窗口全屏、热键监听/焦点 light dismiss、托盘、Tauri setup/命令注册（续54 拆分后 ~530行）
+  clipboard.rs     # 剪贴板子系统：历史/粘贴/复制/janitor/后台监听；clipboard::init 封装 setup 时序（续54 从 lib.rs 拆出，~1038行）
   apps.rs          # 应用扫描：Start Menu .lnk 解析、ExtractIconEx 图标提取、get_file_info、resolve_lnk
   dragdrop.rs      # 中转区原生拖入：自注册 IDropTarget，Drop emit files-dropped
   filesearch.rs    # 文件系统搜索：后台预建内存索引（独立线程，双缓冲原子替换，零前端阻塞）
@@ -194,6 +196,16 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-27 (lib.rs 拆分：剪贴板子系统迁入 clipboard.rs，续54，纯结构重构零功能改动)
+- **目标**：lib.rs 1539 行过长，把高度内聚的剪贴板子系统（~960 行）拆到独立模块。**纯搬迁，函数体一字未改、无重构、无合并/拆分函数。**
+- **新增文件**：`src-tauri/src/clipboard.rs`（~1038 行）。收纳：7 个剪贴板静态量（`SKIP_CLIP_EVENTS`/`SKIP_CLIP_UNTIL_SEQ`/`CLIPBOARD_LOCK`/`CLIP_HISTORY_PATH`/`CLIP_IMAGE_DIR`/`CLIP_CACHE_MAX_RUNTIME`/`CLIP_CACHE`，**全部模块私有**）+ 12 可调常量 + CF_HDROP FFI 块 + 辅助函数（now_ms/get_window_class/base64_*/compute_ahash/has_clipboard_image/read_clipboard_files/write_cf_hdrop/desktop_copy_files/parse_clip_image_time）+ 核心逻辑（image_to_cache_entry/build_clip_entry/save·load_clip_history/save_clip_image_to_disk/suppress_clip_until_now）+ janitor（sweep/start_clip_image_janitor）+ start_clipboard_monitor + 13 个 `#[tauri::command]`（均 `pub(crate)`，**零新增 `pub`**）。
+- **新增 `clipboard::init(app, data_dir)`**：封装 setup 启动时序——路径初始化 → load_clip_history → start_clipboard_monitor → start_clip_image_janitor，**顺序锁进模块内不可变**（load 必先于 monitor 否则空缓存覆盖磁盘历史；janitor 靠起手 5s 软时序错开 load）。
+- **lib.rs 改动**：① 顶部加 `mod clipboard;`（保留 mod 顺序）；② 删除全部迁出的常量/静态量/函数（sed 块删）；③ 删除 `use std::sync::atomic::Ordering` 与 `use std::time::{SystemTime, UNIX_EPOCH}`（迁出后无引用）；④ setup 内 4-5 行剪贴板初始化收敛为一句 `clipboard::init(app.handle(), &data_dir)`；⑤ `generate_handler!` 13 命令加 `clipboard::` 前缀。lib.rs 1539→**530 行**。
+- **验证（CC 自验，全过）**：V1 `cargo check --lib` 零 error✓；V2 `cargo clippy --lib` 仍 8 条基线✓（lint 随代码迁文件，集合/数量不变，非新增）；V3 lib.rs 530 ≤ 640✓；V4 clipboard.rs 被 `mod clipboard` 引用、可编译✓；V5 13 命令均带 `clipboard::` 前缀✓；V6 lib.rs 中 `CLIP_CACHE`/`CLIPBOARD_LOCK`/`SKIP_CLIP` 引用归零✓（含改写一处旧注释）；V7 `write_cf_hdrop` 函数体内无锁（锁加调用方铁律保持）✓。
+- **GUI 实测通过（2026-06-27）**：G1 呼出显示历史 / G2 文本·图片·文件粘贴各一次 / G3 删除+重启持久化 / G4 只复制一条历史面板更新——全部正常。
+- **偏差点**：Prompt 列的常量名 `CLIP_CACHE_MAX_BYTES_DEFAULT`/`AHASH_BITS`/`AHASH_SIMILAR_THRESHOLD`/`DROP_*` 实际代码不存在，按实际名迁移（`CLIP_IMAGE_CACHE_MAX_BYTES`/`AHASH_MAX_HAMMING`/`AHASH_MAX_DIM_DELTA`，无 DROP_ 常量）。Prompt【绝对约束】列 CLAUDE.md「不动」但第四步又要求改 §项目结构——取第四步、只加 1 行结构索引（clipboard.rs），已在报告中标注此冲突。
+- **关联**：CLAUDE.md §项目结构 +1 行；剪贴板铁律（锁序/CF_HDROP/janitor）全部随代码原样保留，未改任何不变量。
 
 ### 2026-06-26 (截图粘到文件夹走 CF_HDROP 落地真 PNG + 消除大图卡顿，续53)
 - **git 裁决（取证在先）**：① 文件夹粘截图「失败」**不是回归**——图片粘贴自 `38df8b9`(06-15) 起就一直是 `set_image` 位图 + Ctrl+V，资源管理器文件夹(`CabinetWClass`)从不接受位图;桌面特判 `WorkerW/Progman`(`fefb623` 06-17 引入)从未匹配过文件夹类、也没被收窄;`CabinetWClass`/`ExploreWClass` 在全历史从未出现 → 文件夹落地是**新增能力**。用户「之前能粘」极可能是把「粘*文件*进文件夹」（本就支持，CF_HDROP）记成了「粘*截图*」。② 卡顿**是真回归**——`1d17e8b`(06-23 历史图改原图) 把非桌面分支解码从 base64 缩略图(≤1024px) 换成全分辨率原图(~25MB RGBA)，主线程同步跑堵住热键轮询;且对文件夹是「白解码」(位图收不下)。本次一并解决。

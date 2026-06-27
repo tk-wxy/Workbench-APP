@@ -18,7 +18,8 @@ npm run tauri build    # 打包
 （脚本名以实际 package.json 为准，不一致时先查再用。）
 
 ## 项目结构
-- `src-tauri/src/lib.rs` — 主逻辑（窗口、热键、剪贴板、Tauri 命令）
+- `src-tauri/src/lib.rs` — 主逻辑（窗口全屏、热键监听/焦点 light dismiss、托盘、Tauri setup/命令注册）
+- `src-tauri/src/clipboard.rs` — 剪贴板子系统（历史/粘贴/复制/janitor/监听；`clipboard::init` 封装 setup 时序）
 - `src-tauri/src/apps.rs` — 应用扫描 / `ExtractIconEx` 图标提取
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
