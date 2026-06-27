@@ -222,6 +222,20 @@ window.hide() → sleep(150ms) → GetForegroundWindow → SetForegroundWindow �
   - **裁决（情况乙）**：Explorer **不通用落地位图**;Snip 能粘靠的是它额外放的文件格式。纯位图（含我们若简化后写的位图）粘不进文件夹 → **CF_HDROP 自落地分支必要，保留定稿**。简化方案（情况甲）否决。
 - **收尾加固（情况乙）——小图临时文件清理改 janitor 兜底**：原小图分支「写 temp PNG → 固定 `sleep(5s)` 后台删」有脆弱 race（Ctrl+V 异步，CPU 负载下可能在 Explorer 读完前删掉 → 粘贴损坏）。改为：小图也写到 `clip_images/`、命名 `workbench_clip_*.png`，**不自删**——它不被任何 `orig_path` 引用，由 janitor 孤儿清理兜底（10min 内必清，且孤儿在 cap 计算前删、不占额度）。去掉魔法延时与 spawn 线程，Explorer 读多久都安全。`CLIP_IMAGE_DIR` 不可用时退回系统 temp（极少见，交 OS 回收）。
 
+**截图大图复粘贴丢分辨率：根因 + 双修 + 已知取舍（2026-06-27，续56）**：
+
+- **现象与诊断**：截图后点历史条目复粘贴，图片降约 3 倍（3200→1024）。**先查真实数据**（`clip_history.json` + `clip_images/`）：大图条目中部分 `orig_path=None`、原图根本没落盘（字面 None，非「文件 missing」→ 排除写晚/被删，确认建 entry 时就没设 orig_path）。
+
+- **根因**：监听有**两条图片构建路径**——① 内联分支（`has_clipboard_image()` 真时走，设 orig_path + detached 落盘原图，正确）；② `image_to_cache_entry`（`build_clip_entry` 回退路径，原**只存缩略图、不设 orig_path**）。而 `has_clipboard_image()` 当时用 `OpenClipboard` 包裹，**截图工具写 DIB+临时 PNG 时占用句柄 → OpenClipboard 失败 → 误报「无图片」→ 大图分流到路径② → 丢原图**。截图比普通复制更易踩（多占一会儿剪贴板）。
+
+- **双修（互补）**：① **根因**——`has_clipboard_image()` 去掉 `OpenClipboard/CloseClipboard` 包裹（`IsClipboardFormatAvailable` 本就无需打开剪贴板，是标准「open 前先 check」用法），消除竞态，大图稳定走内联分支；② **兜底**——`image_to_cache_entry` 与内联分支对齐（保留原图 + 预置 orig_path + detached 落盘），任何残留走到路径②的大图也不丢原图。
+
+- **已知取舍（GUI 实测通过后保留，非待办、非 bug；记此防日后误当回归排查）**：
+  1. **两条图片构建路径仍并存**（内联分支 + `image_to_cache_entry`）：续56 只把二者**对齐**、未合并成单一函数。属可维护性「气味」，非正确性问题。日后若收敛成一个 builder 更干净，但风险收益比低，**有意不在本次做**（避免动监听热路径 + 锁纪律区）。
+  2. **回退路径②不做图片去重**（监听 else 分支只对 text 去重）：极少数走路径②的近似截图可能多落一份原图文件。**有界**——janitor 孤儿清理 + 500MB 总量封顶兜住，无泄漏；且正因不去重、entry 必入缓存 → 落盘文件必被引用、路径②自身不产孤儿。
+  3. **理论极窄竞态仍在**：轮询恰落在源程序 `EmptyClipboard`→`SetClipboardData(DIB)` 之间（微秒级）时 `IsClipboardFormatAvailable` 暂为假。**由修②兜底**（即便此刻误入路径②也落盘原图），不丢分辨率。
+  - **历史局限**：续56 之前产生的坏条目（原图当初未落盘）无法追回，仍只有缩略图；修复仅对之后的新复制生效。
+
 ---
 
 ## 7. CF_HDROP 文件粘贴：DROPFILES 结构体

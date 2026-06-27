@@ -62,24 +62,51 @@ fn now_ms() -> i64 {
 
 static CLIP_CACHE: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 
-/// 将 arboard 图片处理为缓存 entry：>MAX_THUMB_DIM 时缩放(Triangle) → PNG 编码 → aHash。失败返回 None
+/// 将 arboard 图片处理为缓存 entry：>MAX_THUMB_DIM 时缩放(Triangle) → PNG 编码 → aHash。失败返回 None。
+/// 大图（>MAX_THUMB_DIM）与监听内联分支**完全一致**：保留原图、预置 `orig_path`、detached 落盘原图。
+/// 续56 修复：本函数是 build_clip_entry 的回退图片路径（监听外层 has_clipboard_image 偶发误报时走到），
+/// 原先只存缩略图、不设 orig_path → 大图复粘贴丢分辨率。现与内联分支对齐，任何路径都不再丢原图。
 fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
     let w = img.width as u32;
     let h = img.height as u32;
-    let rgba = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())?;
-    let thumb = if w > MAX_THUMB_DIM || h > MAX_THUMB_DIM {
+    let full_img = image::DynamicImage::ImageRgba8(
+        image::RgbaImage::from_raw(w, h, img.bytes.into_owned())?,
+    );
+    let is_large = w > MAX_THUMB_DIM || h > MAX_THUMB_DIM;
+    // resize_exact 取 &self、不消耗 full_img → 大图保留 full_img 供后续落盘
+    let (thumb, large_img_opt) = if is_large {
         let r = MAX_THUMB_DIM as f64 / w.max(h) as f64;
-        image::DynamicImage::ImageRgba8(rgba)
-            .resize_exact((w as f64 * r) as u32, (h as f64 * r) as u32, image::imageops::FilterType::Triangle)
+        let t = full_img.resize_exact(
+            (w as f64 * r) as u32, (h as f64 * r) as u32,
+            image::imageops::FilterType::Triangle,
+        );
+        (t, Some(full_img))
     } else {
-        image::DynamicImage::ImageRgba8(rgba)
+        (full_img, None)
     };
     let mut png = std::io::Cursor::new(Vec::new());
     thumb.write_to(&mut png, image::ImageFormat::Png).ok()?;
     let b64 = base64_encode(&png.into_inner());
     let ah = compute_ahash(&thumb);
-    println!("[clipbg] image {w}×{h} cached");
-    Some(serde_json::json!({"type":"image","content":format!("data:image/png;base64,{b64}"),"time":now_ms(),"w":w,"h":h,"ahash":ah}))
+    let time = now_ms();
+    // 预置 orig_path 路径字符串（仅大图；零 I/O，文件由下面 detached 线程真正写）
+    let orig_path: Option<String> = if is_large {
+        CLIP_IMAGE_DIR.get()
+            .map(|d| d.join(format!("{time}.png")).to_string_lossy().into_owned())
+    } else {
+        None
+    };
+    let mut entry = serde_json::json!({
+        "type":"image","content":format!("data:image/png;base64,{b64}"),
+        "time":time,"w":w,"h":h,"ahash":ah
+    });
+    if let Some(ref p) = orig_path { entry["orig_path"] = serde_json::json!(p); }
+    // 大图 detached 落盘原图（本路径无图片去重、entry 必入缓存 → 不产孤儿；spawn 即返回、不阻塞）
+    if let Some(orig_img) = large_img_opt {
+        std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, time));
+    }
+    println!("[clipbg] image {w}×{h} cached, large={is_large} (build_clip_entry path)");
+    Some(entry)
 }
 
 /// 读取当前剪贴板并构建缓存 entry。
@@ -451,18 +478,18 @@ fn compute_ahash(img: &image::DynamicImage) -> u64 {
     hash
 }
 
-/// 剪贴板当前是否包含图片格式（CF_BITMAP / CF_DIB / CF_DIBV5）
+/// 剪贴板当前是否包含图片格式（CF_BITMAP / CF_DIB / CF_DIBV5）。
+/// 不再用 OpenClipboard 包裹——`IsClipboardFormatAvailable` 本就无需打开剪贴板（Win32 文档），
+/// 而原先的 `OpenClipboard` 在源程序（截图工具写 DIB+临时 PNG 时短暂占用句柄）会失败 → 误报
+/// 「无图片」→ 大图被分流到无 orig_path 的 build_clip_entry 路径 → 复粘贴只剩缩略图（续56 根因修复）。
 fn has_clipboard_image() -> bool {
     const CF_BITMAP: u32 = 2;
     const CF_DIB: u32 = 8;
     const CF_DIBV5: u32 = 17;
     unsafe {
-        if OpenClipboard(0) == 0 { return false; }
-        let has = IsClipboardFormatAvailable(CF_BITMAP) != 0
-               || IsClipboardFormatAvailable(CF_DIB) != 0
-               || IsClipboardFormatAvailable(CF_DIBV5) != 0;
-        CloseClipboard();
-        has
+        IsClipboardFormatAvailable(CF_BITMAP) != 0
+            || IsClipboardFormatAvailable(CF_DIB) != 0
+            || IsClipboardFormatAvailable(CF_DIBV5) != 0
     }
 }
 
@@ -742,45 +769,67 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         return Ok(());
     }
 
-    // 非桌面：历史图写回剪贴板，再 Ctrl+V
-    if !base64.is_empty() {
-        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
-        // 锁外读文件（文件 I/O 绝不进 CLIPBOARD_LOCK）
-        let rgba_from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| image::load_from_memory(&bytes).ok())
-            .map(|img| { let r = img.to_rgba8(); let (w,h) = r.dimensions(); (w,h,r.into_raw()) });
-        let (w, h, raw) = if let Some(data) = rgba_from_orig {
-            println!("[imgpaste] 使用原图 {}×{}", data.0, data.1);
-            data
-        } else {
-            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
-            let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
-            let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            println!("[imgpaste] 降级缩略图 {w}×{h}");
-            (w, h, rgba.into_raw())
-        };
-        {
-            // 仅罩写入临界区；下面焦点交还/Ctrl+V 在锁外
-            let _g = CLIPBOARD_LOCK.lock().unwrap();
-            let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
-            cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(raw) })
-                .map_err(|e| format!("写入: {}", e))?;
+    // ── 分支③：其余 app（Paint / 聊天框等真吃位图的目标）──────────────────────────
+    // 续55：整段「解码 + set_image + 焦点交还 + Ctrl+V」搬入子线程，命令本体 spawn 后立即返回。
+    // 根因：大图全分辨率 RGBA 解码（3200×1998 ≈ 25MB）原在主线程同步跑，堵住热键键态轮询
+    // 线程 → 「短时无法呼出」。分支①②无此问题（①走文件系统、②零解码），仅③需修。
+    // 锁纪律不变：CLIPBOARD_LOCK 只罩 set_image 的 OpenClipboard…CloseClipboard 临界区；
+    // 顶部 hide(主线程，class 检测依赖它，不可移)/sleep/焦点交还/enigo Ctrl+V 全在锁外。
+    // 子线程无调用方可承接 ?，故各错误就地 eprintln + return（detached，仅日志）。
+    std::thread::spawn(move || {
+        // 历史图写回剪贴板（base64 空 = 当前图，已在剪贴板，跳过写入直接 Ctrl+V）
+        if !base64.is_empty() {
+            SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+            // 锁外读文件（文件 I/O 绝不进 CLIPBOARD_LOCK）
+            let rgba_from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
+                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                .map(|img| { let r = img.to_rgba8(); let (w,h) = r.dimensions(); (w,h,r.into_raw()) });
+            let (w, h, raw) = if let Some(data) = rgba_from_orig {
+                println!("[imgpaste] 使用原图 {}×{}", data.0, data.1);
+                data
+            } else {
+                let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+                let bytes = match base64_decode(b64) {
+                    Some(b) => b,
+                    None => { eprintln!("[imgpaste] base64 解码失败"); return; }
+                };
+                let img = match image::load_from_memory(&bytes) {
+                    Ok(i) => i,
+                    Err(e) => { eprintln!("[imgpaste] 图片解析: {e}"); return; }
+                };
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                println!("[imgpaste] 降级缩略图 {w}×{h}");
+                (w, h, rgba.into_raw())
+            };
+            {
+                // 仅罩写入临界区；下面焦点交还/Ctrl+V 在锁外
+                let _g = CLIPBOARD_LOCK.lock().unwrap();
+                let mut cb = match arboard::Clipboard::new() {
+                    Ok(c) => c,
+                    Err(e) => { eprintln!("[imgpaste] 剪贴板: {e}"); return; }
+                };
+                if let Err(e) = cb.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(raw) }) {
+                    eprintln!("[imgpaste] 写入: {e}"); return;
+                }
+            }
+            suppress_clip_until_now();
         }
-        suppress_clip_until_now();
-    }
 
-    let target = unsafe { GetForegroundWindow() };
-    unsafe { let _ = SetForegroundWindow(target); }
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+        let target = unsafe { GetForegroundWindow() };
+        unsafe { let _ = SetForegroundWindow(target); }
+        let mut enigo = match enigo::Enigo::new(&enigo::Settings::default()) {
+            Ok(e) => e,
+            Err(e) => { eprintln!("[imgpaste] enigo: {e}"); return; }
+        };
+        let _ = enigo.key(enigo::Key::Control, Press);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::V, Press);
+        let _ = enigo.key(enigo::Key::V, Release);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::Control, Release);
+    });
     Ok(())
 }
 
