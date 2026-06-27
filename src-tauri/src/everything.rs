@@ -41,13 +41,14 @@ struct EverythingApi {
     get_last_error: FnU32,
 }
 
-// 函数指针 + Library 均为 Send+Sync；并发调用另由 CALL_LOCK 串行化。
+// 函数指针 + Library 均为 Send+Sync；并发调用另由 API 锁串行化（持锁期间调 IPC）。
 unsafe impl Sync for EverythingApi {}
 unsafe impl Send for EverythingApi {}
 
-static API: OnceLock<EverythingApi> = OnceLock::new();
+// 用 Mutex<Option<...>> 而非 OnceLock：既缓存已加载的句柄、又支持运行期丢弃重载（热更新）。
+// 该锁同时充当 IPC 串行化锁（Everything 用进程级全局缓冲，并发调用会串扰）。
+static API: Mutex<Option<EverythingApi>> = Mutex::new(None);
 static DLL_DIR: OnceLock<PathBuf> = OnceLock::new();
-static CALL_LOCK: Mutex<()> = Mutex::new(());
 
 /// setup 阶段调用：登记资源目录，供加载时优先在此找 Everything64.dll。
 pub fn init(app: &tauri::AppHandle) {
@@ -86,13 +87,22 @@ unsafe fn try_load(path: &std::ffi::OsStr) -> Option<EverythingApi> {
     })
 }
 
-// 按候选位置加载：资源目录 → 裸名（OS 默认 DLL 搜索：exe 目录 / 系统 / PATH）。
+// 按候选位置加载：资源目录（打包后 bundle.resources）→ exe 目录 → cwd（dev 时为 src-tauri）→ 裸名（OS 默认搜索）。
 fn load_api() -> Option<EverythingApi> {
+    const DLL: &str = "Everything64.dll";
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(dir) = DLL_DIR.get() {
-        candidates.push(dir.join("Everything64.dll"));
+        candidates.push(dir.join(DLL));
     }
-    candidates.push(PathBuf::from("Everything64.dll"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(p) = exe.parent() {
+            candidates.push(p.join(DLL));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(DLL));
+    }
+    candidates.push(PathBuf::from(DLL)); // 兜底走 OS 默认 DLL 搜索
     for c in candidates {
         if let Some(api) = unsafe { try_load(c.as_os_str()) } {
             return Some(api);
@@ -101,29 +111,32 @@ fn load_api() -> Option<EverythingApi> {
     None
 }
 
-// 取（惰性加载）API。加载失败不缓存 None——允许用户运行期补放 DLL 后下次重试。
-fn get_api() -> Option<&'static EverythingApi> {
-    if let Some(a) = API.get() {
-        return Some(a);
+// 确保 API 已加载（持锁调用）。未加载则尝试一次；失败不写入 Some（下次再试，支持运行期补放 DLL）。
+fn ensure_loaded(guard: &mut Option<EverythingApi>) {
+    if guard.is_none() {
+        *guard = load_api();
     }
-    if let Some(a) = load_api() {
-        let _ = API.set(a); // 竞态下另一线程可能已 set，丢弃本次即可
-        return API.get();
+}
+
+/// 热更新：丢弃已加载的 DLL 句柄（FreeLibrary），下次查询/检测时重新加载。
+/// 持 API 锁期间无任何 in-flight IPC 调用（皆串行化于此锁），故 drop Library 安全。
+pub fn reload() {
+    if let Ok(mut g) = API.lock() {
+        *g = None;
     }
-    None
 }
 
 /// Everything 是否可用：DLL 能加载且 Everything 服务在运行（未运行时 GetMajorVersion()==0）。
 pub fn is_available() -> bool {
-    let api = match get_api() {
-        Some(a) => a,
-        None => return false,
-    };
-    let _guard = match CALL_LOCK.lock() {
+    let mut guard = match API.lock() {
         Ok(g) => g,
         Err(_) => return false,
     };
-    unsafe { (api.get_major_version)() > 0 }
+    ensure_loaded(&mut guard);
+    match guard.as_ref() {
+        Some(api) => unsafe { (api.get_major_version)() > 0 },
+        None => false,
+    }
 }
 
 /// 查询 Everything。失败（DLL 缺失 / 未运行 / 查询出错）返回 Err，调用方降级内置引擎。
@@ -132,8 +145,11 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let api = get_api().ok_or_else(|| "Everything64.dll 未找到或加载失败".to_string())?;
-    let _guard = CALL_LOCK.lock().map_err(|_| "CALL_LOCK poisoned".to_string())?;
+    let mut guard = API.lock().map_err(|_| "API lock poisoned".to_string())?;
+    ensure_loaded(&mut guard);
+    let api = guard
+        .as_ref()
+        .ok_or_else(|| "Everything64.dll 未找到或加载失败".to_string())?;
     unsafe {
         if (api.get_major_version)() == 0 {
             return Err("Everything 未运行".to_string());
@@ -178,4 +194,12 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
         }
         Ok(out)
     }
+}
+
+/// 重新加载 Everything（热更新）：丢弃旧 DLL 句柄，返回重载后是否可用。
+/// 用于运行期替换 DLL / 启动 Everything 后无需重启应用即可生效。
+#[tauri::command]
+pub fn reload_everything() -> bool {
+    reload();
+    is_available()
 }

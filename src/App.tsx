@@ -313,6 +313,7 @@ export default function App() {
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
   const [searchDirInput, setSearchDirInput] = useState(""); // 添加目录输入框
   const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
+  const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -741,8 +742,17 @@ export default function App() {
   const changeSearchEngine = useCallback(async (eng: "builtin"|"everything") => {
     setSearchEngine(eng);
     if (store) { await store.set("search-engine", eng); await store.save(); }
-    try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("set_search_engine", { engine: eng }); const s = await invoke<{ everythingAvailable: boolean }>("get_index_status"); setEverythingAvailable(!!s.everythingAvailable); } catch {}
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_search_engine", { engine: eng });
+      // 切到 Everything 顺带热检测一次（reload 丢弃旧句柄 → 重载 → 返回是否可用）
+      if (eng === "everything") { const avail = await invoke<boolean>("reload_everything"); setEverythingAvailable(!!avail); }
+    } catch {}
   }, [store]);
+  // Everything 热更新：丢弃旧 DLL 句柄重载 + 重新检测（运行期换 DLL / 启动 Everything 后无需重启）
+  const redetectEverything = useCallback(async () => {
+    try { const { invoke } = await import("@tauri-apps/api/core"); const avail = await invoke<boolean>("reload_everything"); setEverythingAvailable(!!avail); setEvtRedetected(true); setTimeout(()=>setEvtRedetected(false), 1500); } catch {}
+  }, []);
   const applySearchDirs = useCallback(async (dirs: string[]) => {
     setSearchDirs(dirs);
     if (store) { await store.set("search-dirs", dirs); await store.save(); }
@@ -1204,7 +1214,13 @@ export default function App() {
                       <button className={`seg-btn${searchEngine==="everything"?" seg-active":""}`} onClick={()=>changeSearchEngine("everything")}>Everything</button>
                     </div>
                   </div>
-                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">未检测到 Everything（需安装 Everything 并放置 Everything64.dll，且保持其后台运行）。查询将自动回退到内置引擎。</p>}
+                  {searchEngine==="everything" && (
+                    <div className="settings-row">
+                      <span className="settings-row-label">连接状态<span className="settings-row-sub">{everythingAvailable?"已连接":"未连接"}</span></span>
+                      <button className={`settings-action${evtRedetected?" copied":""}`} onClick={redetectEverything}>{evtRedetected?"✓ 已检测":"重新检测"}</button>
+                    </div>
+                  )}
+                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">未检测到 Everything（需安装 Everything 并保持其后台运行，DLL 已随应用内置）。查询将自动回退到内置引擎。换 DLL / 启动 Everything 后点「重新检测」即可热更新，无需重启。</p>}
                   {searchEngine==="everything" && everythingAvailable && <p className="settings-hint">已连接 Everything，查询覆盖全盘、即时。</p>}
                   <p className="settings-hint">内置引擎扫描整个用户目录（含下方额外目录），无需任何外部依赖；Everything 覆盖全盘但需另装。</p>
                   {searchEngine==="builtin" && (<>
