@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，待 GUI 实测）
+> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，GUI 实测通过）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -201,7 +201,7 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 - **铁律遵守**：CF_HDROP 锁加在【调用方】（`{ 锁 CLIPBOARD_LOCK → write_cf_hdrop }`，不进函数体，防与 copy 重入死锁）;锁块内仅 `OpenClipboard…CloseClipboard`，**不跨 hide/sleep/焦点交还/Ctrl+V**;临时文件写盘在锁外;写前 `SKIP_CLIP_EVENTS.store(2)` 防自写回流;焦点交还流程复用未改;`fWide=1` 由复用的 `write_cf_hdrop` 保证。
 - **顺带**：`CLIP_IMAGE_CACHE_MAX_BYTES` 300MB → **500MB**（续52 janitor 定稿值，仅改常量字面量）。
 - **验证（静态，CC 自检）**：`cargo check --lib` 零新增警告✓;`cargo clippy --lib` 维持 8 条基线✓;自查文件夹分支锁块内无 hide/sleep/Ctrl+V、临时文件写盘在锁外、`SKIP_CLIP_EVENTS` 已设✓。
-- **待 LIN GUI 实测**（CC 不可假定通过）：T1 大截图粘文件夹→生成 PNG 且**无卡顿**(热键可立即呼出);T2 小截图粘文件夹→生成 PNG;T3 粘桌面行为不变;T4 粘 Paint/聊天框仍位图;T5 粘文件夹后历史面板无自写回流条目;T6 临时文件(小图)粘后清理不残留;T7 连续粘大图热键全程可呼出。
+- **GUI 实测通过**：T1 大截图粘文件夹→生成 PNG 且**无卡顿**(热键可立即呼出);T2 小截图粘文件夹→生成 PNG;T3 粘桌面行为不变;T4 粘 Paint/聊天框仍位图;T5 粘文件夹后历史面板无自写回流条目;T6 临时文件(小图)粘后清理不残留;T7 连续粘大图热键全程可呼出。**小图清理路径复测（2026-06-26）**：T2 小截图(≤1024px)粘文件夹生成 PNG、打开图像完整无损;T6 `clip_images/workbench_clip_*.png` 在下个 janitor sweep 周期被清、真正原图(数字名)不受影响——「落 clip_images 交 janitor 兜底」方案验证有效，无误删、无残留。
 - **探针裁决（续53 后续，PROBE 取证已删）**：质疑「Win11 文件夹能粘 snip = Explorer 通用落地位图，CF_HDROP 分支是否冗余」。临时 PROBE 枚举剪贴板格式 + 官方文档双证：Win+Shift+S 截图剪贴板含 `CF_HDROP`+`Shell IDList Array`+`FileContents`+`FileGroupDescriptorW`（位图外另有整套 shell 文件格式），纯位图只有 CF_DIB/CF_DIBV5;MS Learn 证 Explorer 粘贴只认 CF_HDROP/FileDescriptor/FileContents、不认 CF_DIB;原始 bug（纯位图 set_image 粘文件夹失败）即纯位图否证。**裁决情况乙：纯位图粘不进文件夹，CF_HDROP 自落地分支必要、保留定稿;简化方案否决。** PROBE 程序裁决后已删（不进 master）。
 - **收尾加固（情况乙）**：小图临时文件清理从「固定 5s 后台删」改为「落 `clip_images/workbench_clip_*.png` 交 janitor 孤儿清理」——去掉脆弱定时 race（Ctrl+V 异步，负载下可能删早损坏粘贴）。`cargo check` 零新增警告 + clippy 8 基线✓。⚠️ 复测点变化：T2/T6 小图临时文件现落在 `clip_images/`（非系统 temp），janitor 周期清。
 - **关联**：DECISIONS §6 延伸「截图落地文件夹 + 探针裁决」;CLAUDE.md 剪贴板节三分叉不变式（已注明探针证据 + janitor 兜底）。
