@@ -514,9 +514,9 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 
 **可选 Everything（everything.rs，+`libloading`）**：
 - **接入方式**：`libloading` **运行时动态加载** `Everything64.dll`（SDK 文件，非安装目录里的），通过它向后台 Everything 服务发 IPC 查询（`Everything_SetSearchW`/`SetRequestFlags(FULL_PATH_AND_FILE_NAME)`/`QueryW(wait)`/`GetResultFullPathNameW`/`IsFolderResult`）。**不硬链接**——DLL 缺失/未加载/Everything 未运行（`GetMajorVersion()==0`）时 `is_available()=false`、`query()` 返回 Err，绝不影响启动。
-- **DLL 定位**：`init(app)` 登记 `resource_dir`；加载按「资源目录 → 裸名（OS 默认 DLL 搜索：exe 目录/系统/PATH）」尝试。加载失败**不缓存 None**（允许用户运行期补放 DLL 后下次重试）。⚠️ DLL 需用户自备（无法随源码分发 SDK 二进制）。
-- **线程安全**：Everything IPC 用进程级全局缓冲，并发调用串扰 → 所有调用经独立 `CALL_LOCK` 串行化，与剪贴板/文件索引锁无交集。
+- **DLL 集成（续57b）**：`Everything64.dll`（x86-64，90KB）已落地 `src-tauri/`，`tauri.conf.json` `bundle.resources` 随包发布。`init(app)` 登记 `resource_dir`；加载按「资源目录（打包后）→ exe 目录 → cwd（dev 时为 src-tauri）→ 裸名（OS 默认搜索）」多路径尝试，dev 与打包后均能找到。
+- **热更新（续57b）**：`API` 由 `OnceLock` 改为 `Mutex<Option<EverythingApi>>`——既缓存句柄、又支持运行期 `reload()` 丢弃（`FreeLibrary`）后下次重载。该锁**同时充当 IPC 串行化锁**（Everything 用进程级全局缓冲，并发调用串扰）；drop Library 时持锁、无 in-flight 调用，安全。`reload_everything` 命令暴露给前端「重新检测」按钮 + 切换到 Everything 时自动调用 → 换 DLL / 启动 Everything 后**无需重启应用**即生效。加载失败不写 `Some`（下次再试）。
 
 **引擎抽象 + 切换**：`SEARCH_ENGINE: AtomicU8`（0 内置/1 everything），`set_search_engine`/`set_search_dirs` 命令（**持久化由前端 store 负责**，命令不写 store，同热键 idiom）。`search_files` 按引擎分发，**Everything 失败静默降级回内置**（保证永远有结果）。`get_index_status` 扩展回传 `engine`/`everythingAvailable`，前端据此：设置面板显示可用性提示、Ctrl+K 区分「Everything 未运行已回退」与「索引建立中」。`set_search_dirs` 改目录后 spawn 一次后台重建（不持锁遍历→原子替换），新目录马上可搜。
 - **前端**：设置面板新增「搜索」tab——引擎 seg（内置/Everything）+ 可用性提示 + 内置额外目录增删（文本输入，无 dialog 插件依赖）。store key `search-engine`/`search-dirs`，挂载时读 store→invoke 应用。
-- **验证**：`cargo check`/`clippy`（8 基线不变、零新增）+ `tsc` 零错误 + 内置打分临时单测 5 过。**Everything 引擎真链路（DLL+服务）属 GUI/外部依赖、未实测**——需用户放置 `Everything64.dll` 并运行 Everything 后验证。
+- **验证**：`cargo check`/`clippy`（8 基线不变、零新增）+ `tsc` 零错误 + 内置打分临时单测 5 过。**Everything 真链路已验证（续57b，临时单测，Everything 后台运行中）**：`is_available()=true`、全盘查询返回结果（C:\ 与 D:\ 跨盘）、`reload()` 后仍可用；验后删测。前端设置切换/「重新检测」按钮属 GUI 未单独驱动实测。
