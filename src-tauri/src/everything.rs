@@ -1,0 +1,181 @@
+// 可选 Everything 搜索引擎接入（续57）。
+//
+// 设计：运行时用 libloading 动态加载 Everything 的 SDK 文件 `Everything64.dll`，通过它向后台运行的
+// Everything 服务发 IPC 查询。**不硬链接**——DLL 缺失 / Everything 未运行时优雅降级（is_available()=false，
+// 由 filesearch::search_files 降级回内置引擎），绝不影响应用启动。
+//
+// ⚠️ 前提：`Everything64.dll` 是 Everything **SDK** 的文件（与安装目录里的不是同一个），需用户从官网 SDK
+// 获取后放到下列任一位置；并保持 Everything 在后台运行：
+//   1. 应用资源目录（init 注册的 resource_dir，打包时 bundle.resources 落地）
+//   2. 应用 exe 同目录 / 系统 PATH（按裸名 Everything64.dll 走 OS 默认 DLL 搜索）
+//
+// 线程安全：Everything IPC 用进程级全局缓冲（SetSearch/Query/GetResult 共享状态），多线程并发会串扰，
+// 故所有调用经 CALL_LOCK 串行化。该锁与剪贴板 / 文件索引锁完全独立，无锁序问题。
+
+use crate::filesearch::FileSearchResult;
+use libloading::Library;
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+// Everything SDK 请求标志：要完整路径 + 文件名。
+const EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME: u32 = 0x0000_0004;
+
+type FnSetSearch = unsafe extern "system" fn(*const u16);
+type FnVoidU32 = unsafe extern "system" fn(u32);
+type FnQuery = unsafe extern "system" fn(i32) -> i32;
+type FnU32 = unsafe extern "system" fn() -> u32;
+type FnGetFullPath = unsafe extern "system" fn(u32, *mut u16, u32) -> u32;
+type FnIsFolder = unsafe extern "system" fn(u32) -> i32;
+
+// 已解析的 Everything API。持有 Library 保证加载期内函数指针有效。
+struct EverythingApi {
+    _lib: Library,
+    set_search: FnSetSearch,
+    set_request_flags: FnVoidU32,
+    set_max: FnVoidU32,
+    query: FnQuery,
+    get_num_results: FnU32,
+    get_full_path: FnGetFullPath,
+    is_folder: FnIsFolder,
+    get_major_version: FnU32,
+    get_last_error: FnU32,
+}
+
+// 函数指针 + Library 均为 Send+Sync；并发调用另由 CALL_LOCK 串行化。
+unsafe impl Sync for EverythingApi {}
+unsafe impl Send for EverythingApi {}
+
+static API: OnceLock<EverythingApi> = OnceLock::new();
+static DLL_DIR: OnceLock<PathBuf> = OnceLock::new();
+static CALL_LOCK: Mutex<()> = Mutex::new(());
+
+/// setup 阶段调用：登记资源目录，供加载时优先在此找 Everything64.dll。
+pub fn init(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    if let Ok(dir) = app.path().resource_dir() {
+        let _ = DLL_DIR.set(dir);
+    }
+}
+
+// 从单个路径尝试加载并解析全部所需符号；任一缺失则视为失败。
+unsafe fn try_load(path: &std::ffi::OsStr) -> Option<EverythingApi> {
+    let lib = Library::new(path).ok()?;
+    // 解出函数指针后拷贝出来（Symbol 借用 lib，*sym 得到 Copy 的裸指针；lib 由 struct 持有保活）。
+    let set_search = *lib.get::<FnSetSearch>(b"Everything_SetSearchW\0").ok()?;
+    let set_request_flags = *lib.get::<FnVoidU32>(b"Everything_SetRequestFlags\0").ok()?;
+    let set_max = *lib.get::<FnVoidU32>(b"Everything_SetMax\0").ok()?;
+    let query = *lib.get::<FnQuery>(b"Everything_QueryW\0").ok()?;
+    let get_num_results = *lib.get::<FnU32>(b"Everything_GetNumResults\0").ok()?;
+    let get_full_path = *lib
+        .get::<FnGetFullPath>(b"Everything_GetResultFullPathNameW\0")
+        .ok()?;
+    let is_folder = *lib.get::<FnIsFolder>(b"Everything_IsFolderResult\0").ok()?;
+    let get_major_version = *lib.get::<FnU32>(b"Everything_GetMajorVersion\0").ok()?;
+    let get_last_error = *lib.get::<FnU32>(b"Everything_GetLastError\0").ok()?;
+    Some(EverythingApi {
+        _lib: lib,
+        set_search,
+        set_request_flags,
+        set_max,
+        query,
+        get_num_results,
+        get_full_path,
+        is_folder,
+        get_major_version,
+        get_last_error,
+    })
+}
+
+// 按候选位置加载：资源目录 → 裸名（OS 默认 DLL 搜索：exe 目录 / 系统 / PATH）。
+fn load_api() -> Option<EverythingApi> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(dir) = DLL_DIR.get() {
+        candidates.push(dir.join("Everything64.dll"));
+    }
+    candidates.push(PathBuf::from("Everything64.dll"));
+    for c in candidates {
+        if let Some(api) = unsafe { try_load(c.as_os_str()) } {
+            return Some(api);
+        }
+    }
+    None
+}
+
+// 取（惰性加载）API。加载失败不缓存 None——允许用户运行期补放 DLL 后下次重试。
+fn get_api() -> Option<&'static EverythingApi> {
+    if let Some(a) = API.get() {
+        return Some(a);
+    }
+    if let Some(a) = load_api() {
+        let _ = API.set(a); // 竞态下另一线程可能已 set，丢弃本次即可
+        return API.get();
+    }
+    None
+}
+
+/// Everything 是否可用：DLL 能加载且 Everything 服务在运行（未运行时 GetMajorVersion()==0）。
+pub fn is_available() -> bool {
+    let api = match get_api() {
+        Some(a) => a,
+        None => return false,
+    };
+    let _guard = match CALL_LOCK.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    unsafe { (api.get_major_version)() > 0 }
+}
+
+/// 查询 Everything。失败（DLL 缺失 / 未运行 / 查询出错）返回 Err，调用方降级内置引擎。
+pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
+    let q = q.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let api = get_api().ok_or_else(|| "Everything64.dll 未找到或加载失败".to_string())?;
+    let _guard = CALL_LOCK.lock().map_err(|_| "CALL_LOCK poisoned".to_string())?;
+    unsafe {
+        if (api.get_major_version)() == 0 {
+            return Err("Everything 未运行".to_string());
+        }
+        let wide: Vec<u16> = q.encode_utf16().chain(std::iter::once(0)).collect();
+        (api.set_search)(wide.as_ptr());
+        (api.set_request_flags)(EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME);
+        (api.set_max)(limit as u32);
+        if (api.query)(1) == 0 {
+            return Err(format!(
+                "Everything_Query 失败 (err {})",
+                (api.get_last_error)()
+            ));
+        }
+        let num = (api.get_num_results)();
+        let mut out = Vec::with_capacity(num as usize);
+        let mut buf = [0u16; 1024];
+        for i in 0..num {
+            let n = (api.get_full_path)(i, buf.as_mut_ptr(), buf.len() as u32);
+            if n == 0 {
+                continue;
+            }
+            let path = String::from_utf16_lossy(&buf[..n as usize]);
+            let is_dir = (api.is_folder)(i) != 0;
+            let p = std::path::Path::new(&path);
+            let name = p
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let ext = p
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            out.push(FileSearchResult {
+                path,
+                name,
+                ext,
+                is_dir,
+            });
+        }
+        Ok(out)
+    }
+}
