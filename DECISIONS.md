@@ -503,3 +503,20 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 - **应用扫描同样后台预建（S4c，续42）**：扫开始菜单/桌面几百个 .lnk + 每个 `SHGetFileInfoW` 提图标实测约 **1.5s**——原本绑在「前端首次 `visible` 时 invoke `scan_start_menu`」，正好砸在首次呼出那一刻 → 卡。改为 setup 阶段 `start_apps_worker` 后台线程（仿 `start_index_worker`，延迟 1s 避开启动高峰）调用现有 `scan_start_menu`（**扫描/图标逻辑一字不动**，其 `APP_CACHE` 顺带缓存）→ `emit("apps-ready", apps)` 一次性推前端。前端 `[]`-注册 `apps-ready` 监听填充 `apps`；首次 `visible` 改为**兜底语义**——仅当 `apps` 仍空（事件错过/未到）才 invoke `scan_start_menu`（命中 `APP_CACHE`、实测 **~120µs** 近乎瞬时），否则跳过。`sortedApps`/搜索链 deps 含 `apps`、自动响应，零改动。**与文件索引同一架构原则**：扫描这类耗时预备工作一律挪到后台线程预建、前端只监听就绪事件，绝不在呼出路径同步执行。
 - **前端分组渲染（S4b，续41）**：Ctrl+K 增强搜索结果分两组——Tier 1（应用/中转，有查询时 ≤10）在前，一条 `.enh-divider`「文件」分隔线，Tier 2（`search_files` 文件结果 ≤20）在后，合并列表 ≤30。文件查询 **150ms 防抖**（每次 `search_files` 是 Rust 命令往返，避免逐键 invoke）。索引未就绪（`!indexReady`）且有查询时显示「文件索引建立中…」一行小字，**不阻塞 Tier 1 显示**（应用/中转照常出）。`indexReady` 双来源：监听 `file-index-ready` 事件 + 打开时主动 `get_index_status` 兜底（防错过 emit）。↑↓/Enter 跨 Tier1+Tier2 整个列表连续导航（分隔线只是视觉、不占 result 索引——用 `Fragment` 把 divider 与结果项并列渲染）。文件结果激活走 `open_file`（不碰粘贴/焦点交还/`CLIPBOARD_LOCK`）。
 - **验证**：临时单测（`build_index` + `search_files` 对临时目录树）实测——遍历 5 条目 390µs、跳过 node_modules 子树与隐藏文件正确、查询 `report` 7.4µs 返回且短名前缀优先排序正确、limit/空查询守卫正确；验证后已删临时单测，保留正式日志 `[fileindex] ready: N entries (elapsed)`。GUI 层（Ctrl+K 看到文件结果）属 S4b 未验。
+
+### 17.1 双引擎：内置扩面 + 可选 Everything，设置可切换（2026-06-27 续57）
+
+**背景**：S4a 内置索引只覆盖 5 个白名单子目录（Desktop/Downloads/Documents/Pictures/Projects），「范围广」不足；当时**路线 B（Everything）被弃**，理由是「要求另装 + 违背零外部依赖」。续57 用户明确要「内置尽量覆盖 + 可选 Everything、设置可切换」，故**推翻该弃用结论**——不是改默认依赖，而是把 Everything 做成**可选增强**：默认仍纯内置零依赖，用户自愿装 Everything 时才接入。两引擎分工：内置 = 用户目录全覆盖、轻量、零依赖、够用；Everything = 全盘即时、需另装。
+
+**内置引擎扩面（filesearch.rs）**：
+- **范围**：`scan_dirs()` 从 5 子目录改为「整个 `%USERPROFILE%` + 用户可配置额外根目录（`EXTRA_DIRS`，如 D:\）」。`appdata`/`node_modules`/`.git`/`target`/`$recycle.bin`/`__pycache__`/`system volume information` 及隐藏目录整子树剪枝（扫整个 profile 时 appdata 剪枝尤其关键）。`MAX_WALK_DEPTH` 8→10（从 profile 根算更浅）、`MAX_INDEX_ENTRIES` 200k→300k。
+- **打分升级**：原「单词子串」改为**多词 AND**（查询按空白拆词，每词都须命中，总分求和）+ **分层**：子串命中（强，基线 ≥1500，前缀 +400 / 词首 +200）**恒高于**子序列模糊（弱，≤1000），保证「直接含」永远排在「拆字母」前；短名轻微加权。多词 AND 让「report pdf」精确命中 `report final.pdf`。临时单测 5 条（子串>子序列分层 / 前缀>中段 / 词首加权 / 非子序列返回 None / 多词 AND）全过后已删。
+
+**可选 Everything（everything.rs，+`libloading`）**：
+- **接入方式**：`libloading` **运行时动态加载** `Everything64.dll`（SDK 文件，非安装目录里的），通过它向后台 Everything 服务发 IPC 查询（`Everything_SetSearchW`/`SetRequestFlags(FULL_PATH_AND_FILE_NAME)`/`QueryW(wait)`/`GetResultFullPathNameW`/`IsFolderResult`）。**不硬链接**——DLL 缺失/未加载/Everything 未运行（`GetMajorVersion()==0`）时 `is_available()=false`、`query()` 返回 Err，绝不影响启动。
+- **DLL 定位**：`init(app)` 登记 `resource_dir`；加载按「资源目录 → 裸名（OS 默认 DLL 搜索：exe 目录/系统/PATH）」尝试。加载失败**不缓存 None**（允许用户运行期补放 DLL 后下次重试）。⚠️ DLL 需用户自备（无法随源码分发 SDK 二进制）。
+- **线程安全**：Everything IPC 用进程级全局缓冲，并发调用串扰 → 所有调用经独立 `CALL_LOCK` 串行化，与剪贴板/文件索引锁无交集。
+
+**引擎抽象 + 切换**：`SEARCH_ENGINE: AtomicU8`（0 内置/1 everything），`set_search_engine`/`set_search_dirs` 命令（**持久化由前端 store 负责**，命令不写 store，同热键 idiom）。`search_files` 按引擎分发，**Everything 失败静默降级回内置**（保证永远有结果）。`get_index_status` 扩展回传 `engine`/`everythingAvailable`，前端据此：设置面板显示可用性提示、Ctrl+K 区分「Everything 未运行已回退」与「索引建立中」。`set_search_dirs` 改目录后 spawn 一次后台重建（不持锁遍历→原子替换），新目录马上可搜。
+- **前端**：设置面板新增「搜索」tab——引擎 seg（内置/Everything）+ 可用性提示 + 内置额外目录增删（文本输入，无 dialog 插件依赖）。store key `search-engine`/`search-dirs`，挂载时读 store→invoke 应用。
+- **验证**：`cargo check`/`clippy`（8 基线不变、零新增）+ `tsc` 零错误 + 内置打分临时单测 5 过。**Everything 引擎真链路（DLL+服务）属 GUI/外部依赖、未实测**——需用户放置 `Everything64.dll` 并运行 Everything 后验证。
