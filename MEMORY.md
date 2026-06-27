@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，GUI 实测通过；续54：lib.rs 拆分——剪贴板子系统迁入 clipboard.rs，纯结构重构零功能改动，lib.rs 1539→530 行，cargo check/clippy 通过，GUI 实测通过）
+> **最后更新**：2026-06-26（续48：收录 Tab 为主键 + 修 Tab 焦点逃逸 bug；续49：设置面板热键说明文字拆分 + 中文 IME 提示；续50：设置面板增大 + 外部文件拖入悬停双区高亮 + timer cleanup 补齐；续51：A1/A2/A3 全部 GUI 实测通过 + 死代码清理（selectedIdx/GRID_COLS/filteredApps 方向键导航）；续52：clip_images 缓存解耦 janitor——孤儿清理 + 总量封顶（定稿 500MB），纯 Rust 后端零前端改动，GUI 实测通过；续53：截图粘到资源管理器文件夹走 CF_HDROP 落地真 PNG + 消除大图粘贴卡顿，GUI 实测通过；续54：lib.rs 拆分——剪贴板子系统迁入 clipboard.rs，纯结构重构零功能改动，lib.rs 1539→530 行，cargo check/clippy 通过，GUI 实测通过；续55：set_clipboard_image 分支③大图解码移出主线程消除粘 Paint 时热键卡顿，GUI 实测通过；续56：修复截图大图复粘贴丢分辨率——has_clipboard_image 去 OpenClipboard 包裹根治竞态 + image_to_cache_entry 对齐内联分支落盘原图，已知取舍归档 DECISIONS §6，GUI 实测通过）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -38,6 +38,8 @@
 - **下一步（候选，无阻塞）**：① 启动器键盘导航（←→↑↓ + Enter）；② 文件结果右键「打开所在目录」(`reveal_in_explorer`) + 高亮区间回传（Rust 回传命中 ranges）；③ 索引目录可配置（设置面板扩项）；④ 增强搜索 Tier 2 剩余（剪贴板条目纳入）；⑤ file/folder 收藏的非拖入入口（如文件选择对话框）；⑥ **拖出（drag-out）未做**（需 `DoDragDrop`/`IDataObject` FFI，优先级低）；⑦ T9 渲染进程重建后拖入失效（已知罕见限制，低优先级）
 - **新增（2026-06-25，纯前端，零 Rust 改动）**：**顶栏 search 联动启动台过滤**——`filteredLauncher` useMemo（`search` 非空时 `launcher.filter(it => matchItem(q, it.name, []))`，空时直接返回 launcher）；JSX 数据源 `launcher.map` → `filteredLauncher.map`；空态 hint 区分「无收藏：拖入或点添加」vs「有收藏但无匹配：无匹配」。「＋ 添加」卡片不参与过滤（始终在 launcher-add 独立渲染）。**tsc 零错误✓；GUI 实测通过（2026-06-25）**
 - **新增（续54，Rust 结构重构，零功能改动）**：**lib.rs 拆分——剪贴板子系统迁入 clipboard.rs**。lib.rs 1539→530 行；新建 `src-tauri/src/clipboard.rs`（~1038 行）收纳全部剪贴板代码（7 静态量全模块私有、12 可调常量、CF_HDROP FFI、监听/落盘/janitor/13 命令 + 辅助 base64/aHash/窗口类）。**纯搬迁、函数体一字未改**；新增 `clipboard::init(app, data_dir)` 封装 setup 时序（路径→load_clip_history→start_clipboard_monitor→start_clip_image_janitor，顺序不可变）。lib.rs setup 的 4-5 行剪贴板初始化收敛为一句 `clipboard::init(...)`；`generate_handler!` 13 命令加 `clipboard::` 前缀。命令用 `pub(crate)`（零新增 `pub`）。**验证（CC 自验）**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 条基线✓（lint 随代码迁移，集合/数量不变）；lib.rs 中 `CLIP_CACHE`/`CLIPBOARD_LOCK`/`SKIP_CLIP` 引用归零✓；`write_cf_hdrop` 函数体内无锁（锁加调用方铁律保持）✓。**GUI 实测通过（2026-06-27）**：呼出显示历史、文本/图片/文件粘贴、删除+重启持久化、只复制全正常。文件：`src-tauri/src/clipboard.rs`(新)/`src-tauri/src/lib.rs`/`CLAUDE.md`(§项目结构+1行)。
+- **新增（续55，仅 Rust，零前端改动）**：**set_clipboard_image 分支③大图解码移出主线程**。`clipboard.rs` `set_clipboard_image` 第③分支（其余 app：Paint/聊天框等真吃位图的目标）原在主线程做全分辨率 RGBA 解码（3200×1998 ≈ 25MB）+ `set_image`，堵住热键键态轮询线程 → 「短时无法呼出」。本次把该分支「解码 + set_image + 焦点交还 + enigo Ctrl+V」整段搬入 `std::thread::spawn`，命令本体 spawn 后立即 `Ok(())` 返回。**主线程仍执行**：顶部 `hide()`+`sleep(150ms)`（class 检测依赖，不可移）、`GetForegroundWindow` 取 class1、分支路由。**子线程执行**：`SKIP_CLIP_EVENTS.store(2)` → 解码 → `{锁 CLIPBOARD_LOCK→set_image}` → `suppress_clip_until_now` → 焦点交还(GetForegroundWindow→SetForegroundWindow)→ Ctrl+V。锁纪律不变（CLIPBOARD_LOCK 只罩 set_image 临界区，hide/sleep/Ctrl+V 全在锁外）；防自写回流（store(2)+水位）顺序不变、仍在写前。子线程 detached 无调用方承接 `?` → 各错误就地 `eprintln`+return。**分支①(桌面 SHFileOperation)/②(文件夹 CF_HDROP) 及其他命令一字未动**。**验证**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 条基线✓；**GUI 实测通过（2026-06-27）**（粘 Paint 期间热键可呼出、内容正确、四路径回归正常）。文件：`src-tauri/src/clipboard.rs`。
+- **新增（续56，仅 Rust，零前端改动）——修复截图大图复粘贴丢分辨率**：**根因**（先诊断后修，证据来自真实 `clip_history.json`）：大图条目偶发 `orig_path=None`（实测 3196×1997 / 3105×1162 两条无 orig_path、原图根本没落盘），复粘贴 `set_clipboard_image` 分支③ 找不到原图 → 降级 1024px 缩略图 → 大幅降分辨率。机制：监听有两条图片构建路径——内联分支（设 orig_path+落盘原图，正确）与 `image_to_cache_entry`（**只存缩略图、不设 orig_path**，被 `build_clip_entry` 回退路径调用）；而 `has_clipboard_image()` 用 `OpenClipboard` 包裹，截图工具写 DIB+临时 PNG 时短暂占用句柄 → `OpenClipboard` 失败 → 误报「无图片」→ 大图分流到 `image_to_cache_entry` → 丢原图。截图比普通复制更易触发（多占一会儿剪贴板）。**修复（两处）**：① 根因——`has_clipboard_image()` 去掉 `OpenClipboard/CloseClipboard` 包裹（`IsClipboardFormatAvailable` 本就无需打开剪贴板，Win32 文档），消除「忙→误报无图」竞态，大图稳定走内联分支；② 兜底——`image_to_cache_entry` 与内联分支对齐（大图保留原图、预置 orig_path、detached 落盘），任何残留走到该路径的大图也不再丢原图。**验证（CC 自验）**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 基线✓（OpenClipboard/CloseClipboard 仍被 read_clipboard_files/write_cf_hdrop 使用、无 unused）。**GUI 实测通过（2026-06-27）**：截图→点历史条目粘到 Paint 为全分辨率；连续多张截图复粘贴均全分辨率。已知取舍（两路径并存/回退路径无去重/极窄竞态，均非 bug）已归档 DECISIONS §6 延伸「续56」。⚠️ 已存在的旧坏条目（[1]/[18] 原图当初没存）无法追回、仍是缩略图，只对续56 之后的新复制生效。文件：`src-tauri/src/clipboard.rs`。
 - **阻塞 / 待决策**：← 无
 
 ---
@@ -196,6 +198,27 @@ npm run tauri build    # → src-tauri/target/release/workbench-app.exe
 ---
 
 ## 九、变更记录 〔追加〕
+
+### 2026-06-27 (修复截图大图复粘贴丢分辨率，续56，仅 Rust)
+- **现象**：截图后点剪贴板历史条目复粘贴，图片大幅降低分辨率（约 3 倍，3200→1024）。
+- **诊断（先不改代码、查真实数据）**：解析 `%APPDATA%\com.workbench.app\clip_history.json` + `clip_images/`——image 条目中 [2]3200×1994/[17]1609×713 有 orig_path 且原图存在；但 **[1]3196×1997、[18]3105×1162 是大图却 `orig_path=None`、原图根本没落盘**。`orig_path` 字面为 None（非「文件 missing」）→ 排除「detached 写晚了/被 janitor 删」，确认是**构建 entry 时就没设 orig_path**。
+- **根因**：监听有两条图片构建路径——① 内联分支（`has_clipboard_image()` 真时走，设 orig_path + detached 落盘原图，正确）；② `image_to_cache_entry`（`build_clip_entry` 回退路径调用，**只存 1024px 缩略图、从不设 orig_path**）。而 `has_clipboard_image()` 用 `OpenClipboard` 包裹，**截图工具写 DIB+临时 PNG(CF_HDROP) 时短暂占用剪贴板句柄 → `OpenClipboard` 返回 0 → 误报「无图片」→ 落入 else 分支 → build_clip_entry → image_to_cache_entry → 大图丢原图**。外层检测成功的次数走内联分支（正常），故时好时坏；截图比普通 Ctrl+C 更易踩（多占一会儿剪贴板）。复粘贴时 `set_clipboard_image` 分支③ 见 `orig_path=None` → 降级缩略图。
+- **修复（`src-tauri/src/clipboard.rs`，两处互补）**：
+  - **① 根因**：`has_clipboard_image()` 去掉 `OpenClipboard/CloseClipboard` 包裹——`IsClipboardFormatAvailable` 无需打开剪贴板（Win32 文档，标准「open 前先 check」用法），消除「剪贴板忙→误报无图」竞态，大图稳定走内联分支。
+  - **② 兜底**：`image_to_cache_entry` 与内联分支完全对齐（大图保留 full_img、预置 orig_path、`std::thread::spawn(save_clip_image_to_disk)` detached 落盘）。即使残留竞态再走到该路径，大图也不再丢原图。本路径无图片去重、entry 必入缓存 → 落盘文件必被引用、不产孤儿。
+- **锁纪律**：未碰 CLIPBOARD_LOCK 任何调用点；image_to_cache_entry 的 spawn 仅即时返回（原图 PNG 重编码在 detached 线程、不在锁内）。`OpenClipboard/CloseClipboard` 仍被 `read_clipboard_files`/`write_cf_hdrop` 使用，无 unused。
+- **验证**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 条基线✓。**GUI 实测通过（2026-06-27）**：截图→点历史条目粘 Paint 为全分辨率；连续多张截图复粘贴均全分辨率；四路径回归正常。
+- **已知局限**：续56 之前产生的坏条目（[1]/[18] 原图当初未落盘）无法追回、仍只有缩略图；修复仅对之后的新复制生效。
+- **关联**：续53「落地原图」机制的缺陷补丁；DECISIONS §6 图片缓存架构。
+
+### 2026-06-27 (set_clipboard_image 分支③大图解码移出主线程，续55，仅 Rust)
+- **根因**：`clipboard.rs` `set_clipboard_image` 第③分支（其余 app：Paint/聊天框等真吃位图的目标）在**主线程**做全分辨率 RGBA 解码（3200×1998 ≈ 25MB）+ `set_image`，堵住热键键态轮询线程 → 「短时无法呼出」。分支①(桌面 SHFileOperation)/②(文件夹 CF_HDROP 零解码) 无此问题，仅③需修。
+- **修复**：把分支③「解码 + set_image + 焦点交还 + enigo Ctrl+V」整段搬入 `std::thread::spawn(move || {...})`，命令本体 spawn 后立即 `Ok(())` 返回，主线程不再被解码阻塞。`base64`/`orig_path` move 入子线程（此时分支①②已 return、二者完全 owned）；`app` 不被③使用、不 move（无 unused 警告）。
+- **主/子线程划分**：① **主线程**——顶部 `hide()`+`sleep(150ms)`（class 检测依赖、不可移）、`GetForegroundWindow`+`get_window_class` 取 class1、三分叉路由；② **子线程**——`SKIP_CLIP_EVENTS.store(2)` → 解码(rgba_from_orig 或 base64) → `{锁 CLIPBOARD_LOCK → arboard set_image}` → `suppress_clip_until_now()` → `GetForegroundWindow`→`SetForegroundWindow` → enigo Ctrl+V。
+- **铁律遵守**：CLIPBOARD_LOCK 只罩 set_image 的 OpenClipboard…CloseClipboard 临界区，hide/sleep/焦点交还/Ctrl+V 全在锁外（与分支①②锁纪律一致）；`SKIP_CLIP_EVENTS.store(2)`+`suppress_clip_until_now()` 仍在 set_image 写之前、顺序不变（防自写回流）；焦点交还流程一字未改。子线程 detached、无调用方承接 `?` → 4 处 `?`(base64_decode/load_from_memory/Clipboard::new/Enigo::new + set_image) 改为就地 `eprintln`+`return`。
+- **未动**：分支①②、其他命令、clipboard.rs 其余代码、lib.rs、前端、tauri.conf.json。
+- **验证**：`cargo check --lib` 零 error✓；`cargo clippy --lib` 维持 8 条基线✓。**GUI 实测通过（2026-06-27）**：G1 大截图(3200×1998)粘 Paint 期间 Ctrl+Space 仍可呼出（不卡）/ G2 粘完图片内容正确 / G3 文本·文件·图片粘桌面·图片粘文件夹四路径回归无异常。
+- **关联**：DECISIONS §6 三分叉说明（分支③现为异步解码，①②不变）；CLAUDE.md 剪贴板节锁纪律不变。
 
 ### 2026-06-27 (lib.rs 拆分：剪贴板子系统迁入 clipboard.rs，续54，纯结构重构零功能改动)
 - **目标**：lib.rs 1539 行过长，把高度内聚的剪贴板子系统（~960 行）拆到独立模块。**纯搬迁，函数体一字未改、无重构、无合并/拆分函数。**
