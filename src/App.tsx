@@ -125,6 +125,7 @@ type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
 const SETTINGS_TABS = [
   { id: "general",   icon: "⚙",  label: "常规" },
   { id: "clipboard", icon: "📋", label: "剪贴板" },
+  { id: "search",    icon: "🔍", label: "搜索" },
   { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
   { id: "about",     icon: "ℹ",  label: "关于" },
 ] as const;
@@ -307,6 +308,11 @@ export default function App() {
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询
   const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean }[]>([]);
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
+  // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
+  const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
+  const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
+  const [searchDirInput, setSearchDirInput] = useState(""); // 添加目录输入框
+  const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerQuery, setPickerQuery] = useState("");
@@ -335,7 +341,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_search_dirs",{dirs:savedDirs}); await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -524,11 +530,11 @@ export default function App() {
     return () => clearTimeout(t);
   }, [enhQuery, enhOpen]);
 
-  // 增强搜索打开时主动查一次索引状态（事件 file-index-ready 之外的兜底，防错过 emit）
+  // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
   useEffect(() => {
-    if (!enhOpen) return;
-    (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number }>("get_index_status"); setIndexReady(s.ready); } catch {} })();
-  }, [enhOpen]);
+    if (!enhOpen && !settingsOpen) return;
+    (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number; everythingAvailable: boolean }>("get_index_status"); setIndexReady(s.ready); setEverythingAvailable(!!s.everythingAvailable); } catch {} })();
+  }, [enhOpen, settingsOpen, searchEngine]);
 
   // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件 ≤20）在后；索引连续供 ↑↓/Enter 跨组导航 ──
   const enhResults = useMemo<EnhResult[]>(() => {
@@ -731,6 +737,26 @@ export default function App() {
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
   }, []);
   const clearStage = useCallback(async () => { await saveStage([]); }, [saveStage]);
+  // ── 搜索引擎切换 + 额外目录配置（续57）：持久化 store + 运行时 invoke 应用 ──
+  const changeSearchEngine = useCallback(async (eng: "builtin"|"everything") => {
+    setSearchEngine(eng);
+    if (store) { await store.set("search-engine", eng); await store.save(); }
+    try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("set_search_engine", { engine: eng }); const s = await invoke<{ everythingAvailable: boolean }>("get_index_status"); setEverythingAvailable(!!s.everythingAvailable); } catch {}
+  }, [store]);
+  const applySearchDirs = useCallback(async (dirs: string[]) => {
+    setSearchDirs(dirs);
+    if (store) { await store.set("search-dirs", dirs); await store.save(); }
+    try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("set_search_dirs", { dirs }); } catch {}
+  }, [store]);
+  const addSearchDir = useCallback(async () => {
+    const d = searchDirInput.trim();
+    if (!d || searchDirs.includes(d)) { setSearchDirInput(""); return; }
+    await applySearchDirs([...searchDirs, d]);
+    setSearchDirInput("");
+  }, [searchDirInput, searchDirs, applySearchDirs]);
+  const removeSearchDir = useCallback(async (d: string) => {
+    await applySearchDirs(searchDirs.filter(x => x !== d));
+  }, [searchDirs, applySearchDirs]);
   const changeClipCacheMax = useCallback(async (n: number) => {
     setClipCacheMax(n);
     if (store) { await store.set("clip-cache-max", n); await store.save(); }
@@ -1055,7 +1081,7 @@ export default function App() {
           <span className="enh-hint"><kbd>Esc</kbd> 返回</span>
         </div>
         {/* 索引未就绪提示：不阻塞 Tier 1（应用/中转）结果显示 */}
-        {!indexReady && enhQuery.trim() ? <div className="enh-index-hint">文件索引建立中…</div> : null}
+        {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">Everything 未运行，已回退内置搜索</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">文件索引建立中…</div> : null)}
         <div className="enh-results">
           {enhResults.length ? enhResults.map((r,i)=>{
             const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : "fs:"+r.path;
@@ -1168,6 +1194,39 @@ export default function App() {
                     <button className="settings-action" onClick={clearStage} disabled={!stage.length}>清空</button>
                   </div>
                   <p className="settings-hint">手动钉入或拖入的文件、文本、图片条目。</p>
+                </>)}
+                {settingsTab==="search" && (<>
+                  <div className="settings-panel-title">搜索</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">搜索引擎</span>
+                    <div className="seg">
+                      <button className={`seg-btn${searchEngine==="builtin"?" seg-active":""}`} onClick={()=>changeSearchEngine("builtin")}>内置</button>
+                      <button className={`seg-btn${searchEngine==="everything"?" seg-active":""}`} onClick={()=>changeSearchEngine("everything")}>Everything</button>
+                    </div>
+                  </div>
+                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">未检测到 Everything（需安装 Everything 并放置 Everything64.dll，且保持其后台运行）。查询将自动回退到内置引擎。</p>}
+                  {searchEngine==="everything" && everythingAvailable && <p className="settings-hint">已连接 Everything，查询覆盖全盘、即时。</p>}
+                  <p className="settings-hint">内置引擎扫描整个用户目录（含下方额外目录），无需任何外部依赖；Everything 覆盖全盘但需另装。</p>
+                  {searchEngine==="builtin" && (<>
+                    <div className="settings-row">
+                      <span className="settings-row-label">额外扫描目录</span>
+                      <div style={{display:"flex",gap:6}}>
+                        <input
+                          className="hotkey-input"
+                          value={searchDirInput}
+                          onChange={e=>setSearchDirInput(e.target.value)}
+                          onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addSearchDir();}}}
+                          placeholder="如 D:\\Work"
+                          spellCheck={false}
+                        />
+                        <button className="settings-action" onClick={addSearchDir}>添加</button>
+                      </div>
+                    </div>
+                    {searchDirs.length>0 ? <div className="search-dir-list">{searchDirs.map(d=>(
+                      <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title="移除">✕</button></div>
+                    ))}</div> : <p className="settings-hint">默认仅扫描用户目录（桌面/下载/文档…）。如需搜其他盘符，在此添加根目录。</p>}
+                    <p className="settings-hint">添加目录后约几秒完成后台重建即可搜到；node_modules / .git 等噪音目录自动跳过。</p>
+                  </>)}
                 </>)}
                 {settingsTab==="hotkeys" && (<>
                   <div className="settings-panel-title">快捷键</div>
