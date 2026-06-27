@@ -38,6 +38,7 @@ windows = { version = "0.58", features = [
 # #[implement] 宏生成 windows_core:: 路径，用 umbrella windows crate 时需把它列为直接依赖
 windows-core = "0.58"
 walkdir = "2.5"
+libloading = "0.8" # 运行时动态加载 Everything64.dll（可选 Everything 搜索引擎）
 flate2 = "1.1"
 tauri-plugin-store = "2"
 enigo = "0.2"

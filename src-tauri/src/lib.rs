@@ -1,6 +1,7 @@
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
 mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
+mod everything; // 可选 Everything 搜索引擎（libloading 动态加载 SDK DLL）
 mod clipboard; // 剪贴板子系统（历史/粘贴/复制/janitor/监听）
 
 use std::os::windows::process::CommandExt;
@@ -478,6 +479,7 @@ pub fn run() {
             clipboard::get_clip_cache_max, clipboard::set_clip_cache_max,
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
             filesearch::search_files, filesearch::get_index_status,
+            filesearch::set_search_engine, filesearch::set_search_dirs,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -506,6 +508,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
             clipboard::init(app.handle(), &data_dir);
             dragdrop::register_drag_drop(app); // 中转区原生拖入
+            everything::init(app.handle()); // 可选 Everything：登记资源目录供加载 SDK DLL
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
             start_apps_worker(app.handle().clone()); // 应用扫描后台预建：消除首次呼出卡顿（emit apps-ready）
 
