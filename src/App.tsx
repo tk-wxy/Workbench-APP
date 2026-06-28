@@ -1104,15 +1104,13 @@ export default function App() {
                     : (isAnyDir ? "文件夹" : (rawExt ? `.${rawExt}` : "文件"));
                   return (
                   <div key={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
-                    {/* ── 缩略图区（按类型三分支）── */}
+                    {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         <div className="stage-card-dot type-image"/>
-                        <div className="stage-card-thumb-inner">
-                          {s.content
-                            ? <img className="cover" src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
-                            : <span style={{fontSize:32}}>🖼️</span>}
-                        </div>
+                        {s.content
+                          ? <img className="cover" src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
+                          : <span style={{fontSize:28}}>🖼️</span>}
                       </div>
                     )}
                     {s.type==="text" && (
@@ -1124,12 +1122,10 @@ export default function App() {
                     {s.type==="file" && (
                       <div className="stage-card-thumb">
                         <div className="stage-card-dot type-file"/>
-                        <div className="stage-card-thumb-inner">
-                          <div className="stage-card-icon-wrap">
-                            {s.items?.[0]?.icon
-                              ? <img src={s.items[0].icon} alt="" style={{width:40,height:40,objectFit:"contain"}}/>
-                              : <span style={{fontSize:32}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
-                          </div>
+                        <div className="stage-card-icon-wrap">
+                          {s.items?.[0]?.icon
+                            ? <img src={s.items[0].icon} alt="" style={{width:28,height:28,objectFit:"contain"}}/>
+                            : <span style={{fontSize:22}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
                         </div>
                       </div>
                     )}
