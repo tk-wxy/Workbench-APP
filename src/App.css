@@ -229,6 +229,9 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
   padding-top:8vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
   opacity:0;transform:translateY(10px) scale(0.985);pointer-events:none;transition:opacity 160ms ease,transform 160ms ease;}
 .enh-layer.enh-open{opacity:1;transform:none;pointer-events:auto;}
+/* pinned 模式：顶栏下方展示结果，顶栏本身作为搜索输入框（增强搜索默认模式下打字触发） */
+.enh-layer.enh-pinned{top:64px;padding-top:12px;}
+.enh-layer.enh-pinned .enh-search-box{display:none;}
 .enh-search-box{display:flex;align-items:center;gap:10px;width:min(640px,80%);background:var(--hover);
   border:1px solid var(--border);border-radius:12px;padding:14px 18px;}
 .enh-search-input{flex:1;background:none;border:none;outline:none;color:var(--text);font-size:18px;font-family:var(--font);}
