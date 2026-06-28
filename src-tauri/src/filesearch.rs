@@ -30,7 +30,9 @@ pub struct IndexEntry {
 }
 
 /// 返回给前端的查询结果（不含 name_lower 内部字段）。内置与 Everything 共用此结构。
+/// camelCase：前端读 `isDir`（Tauri 不会自动转换 serde 字段名，否则前端拿到 undefined→全显示为文件）。
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileSearchResult {
     pub path: String,
     pub name: String,
