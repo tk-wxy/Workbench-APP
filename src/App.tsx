@@ -150,24 +150,34 @@ const LAUNCH_ANIM_MS = 200;
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 interface LaunchAnim { icon: string | null; name: string; rect: { top: number; left: number; width: number; height: number }; }
 
+// 按扩展名映射文件类型图标（搜索结果 + 剪贴板卡片共用，单一真相源）。
+function extIcon(ext: string): string {
+  const e = ext.toLowerCase().replace(/^\./, "");
+  if (["png","jpg","jpeg","gif","webp","bmp","svg","ico","tif","tiff","heic","heif","avif","psd"].includes(e)) return "🖼️";
+  if (["mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpeg","mpg","ts","3gp"].includes(e)) return "🎬";
+  if (["mp3","wav","flac","ogg","aac","m4a","wma","opus","aiff","mid"].includes(e)) return "🎵";
+  if (["zip","rar","7z","tar","gz","bz2","xz","zst","tgz"].includes(e)) return "🗜️";
+  if (e === "pdf") return "📕";
+  if (["doc","docx","odt","rtf","pages"].includes(e)) return "📝";
+  if (["xls","xlsx","csv","ods","tsv"].includes(e)) return "📊";
+  if (["ppt","pptx","odp","key"].includes(e)) return "📽️";
+  if (["epub","mobi","azw","azw3","fb2"].includes(e)) return "📚";
+  if (["iso","img","dmg","vhd","vhdx"].includes(e)) return "💿";
+  if (["ttf","otf","woff","woff2","fon"].includes(e)) return "🔤";
+  if (["js","mjs","cjs","ts","jsx","tsx","py","rs","go","cpp","cc","cxx","c","h","hpp","java","cs","php","rb","swift","kt","scala","html","htm","css","scss","sass","less","vue","json","yaml","yml","xml","toml","sql","lua","r","dart"].includes(e)) return "💻";
+  if (["exe","msi","bat","cmd","ps1","sh","appx","apk","deb","rpm"].includes(e)) return "⚙️";
+  if (["txt","md","markdown","log","ini","cfg","conf","env","properties"].includes(e)) return "📃";
+  return "📎";
+}
+
 function getFileIcon(item: ClipItem): string {
   const items = item.items ?? [];
   if (items.length > 1) return "📦";
   const first = items[0];
   if (!first) return "📎";
-  const ext = (first.ext || first.path.split(".").pop() || "").toLowerCase();
-  if (["png","jpg","jpeg","gif","webp","bmp","svg","ico"].includes(ext) || first.isImage) return "🖼️";
-  if (["mp4","mkv","avi","mov","wmv"].includes(ext)) return "🎬";
-  if (["mp3","wav","flac","ogg","aac","m4a"].includes(ext)) return "🎵";
-  if (["zip","rar","7z","tar","gz","bz2","xz"].includes(ext)) return "🗜️";
-  if (ext === "pdf") return "📄";
-  if (["doc","docx","odt"].includes(ext)) return "📝";
-  if (["xls","xlsx","csv"].includes(ext)) return "📊";
-  if (["ppt","pptx"].includes(ext)) return "📊";
-  if (["js","ts","jsx","tsx","py","rs","go","cpp","c","h","java","cs","html","css","json","yaml","yml","xml","toml"].includes(ext)) return "💻";
-  if (["exe","msi","bat","cmd","ps1","sh"].includes(ext)) return "⚙️";
-  if (["txt","md","log","ini","cfg","conf"].includes(ext)) return "📃";
-  return "📎";
+  if (first.isImage) return "🖼️"; // 剪贴板图片（可能无扩展名）
+  const ext = first.ext || first.path.split(".").pop() || "";
+  return extIcon(ext);
 }
 
 // 给条目算"类型词"，让"图片/文本/txt/pdf"等查询能命中对应类型条目（与名称/内容搜索并存）
@@ -942,7 +952,7 @@ export default function App() {
     } catch {}
   }, []);
 
-  const fi = (ext:string)=>({pdf:"📄",doc:"📝",docx:"📝",xls:"📊",xlsx:"📊",ppt:"📽️",pptx:"📽️",jpg:"🖼️",png:"🖼️",gif:"🖼️",mp4:"🎬",mp3:"🎵",zip:"📦",rar:"📦",exe:"⚙️",txt:"📃"}[ext.toLowerCase()]??"📎");
+  const fi = extIcon; // 文件类型图标统一走模块级 extIcon（搜索结果 + 中转条目共用）
 
   // ── 键盘 ──
   useEffect(() => {
