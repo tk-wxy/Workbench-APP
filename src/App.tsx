@@ -4,8 +4,8 @@ import "./App.css";
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
-interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; }
-interface FileItem { path: string; name: string; ext: string; isImage: boolean; }
+interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; }
+interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
@@ -50,7 +50,7 @@ const IMG_EXTS = ["jpg","jpeg","png","gif","bmp","webp","svg","ico"];
 const stageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // 稳定唯一 id（key/去重）
 function fileEntryToStage(f: FileEntry): StageItem {
   const isImage = IMG_EXTS.includes(f.ext.toLowerCase());
-  return { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
+  return { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage, icon: f.icon }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
 }
 function clipToStage(c: ClipItem): StageItem {
   return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name };
@@ -180,6 +180,9 @@ function getFileIcon(item: ClipItem): string {
   return extIcon(ext);
 }
 
+// 从绝对路径提取父目录（用于搜索结果目录串展示）
+const dirOf = (p: string) => { const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")); return i > 0 ? p.slice(0, i) : p; };
+
 // 给条目算"类型词"，让"图片/文本/txt/pdf"等查询能命中对应类型条目（与名称/内容搜索并存）
 function typeKeywords(opts: { type: "text" | "image" | "file"; ext?: string; isImage?: boolean }): string[] {
   const { type, ext, isImage } = opts;
@@ -299,6 +302,7 @@ export default function App() {
   const storeRef = useRef<any>(null); storeRef.current = store;
   const [stageSel, setStageSel] = useState<Set<number>>(new Set<number>()); // 中转区多选（选中的 StageItem.id）
   const [stageMultiselect, setStageMultiselect] = useState(false); // 多选模式开关（显式进入，非按住修饰键）
+  const [stageLayout, setStageLayout] = useState<"list"|"grid">("list"); // 中转区布局：列表 / 方格
   const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
   const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
@@ -316,6 +320,7 @@ export default function App() {
   const [enhOpen, setEnhOpen] = useState(false);
   const [enhQuery, setEnhQuery] = useState("");
   const [enhSelIdx, setEnhSelIdx] = useState(0);
+  const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询
@@ -355,13 +360,14 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
 
   const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
+  const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
@@ -639,15 +645,41 @@ export default function App() {
     if (launcher.some(x=>x.kind==="app" && x.path===app.path)) return;
     saveLauncher([...launcher, { id:launcherId(), kind:"app" as const, name:app.name, icon:app.icon, path:app.path }].slice(0,LAUNCHER_MAX));
   }, [launcher, saveLauncher]);
+  // 增强搜索 fs 结果加入中转区（按 path 去重，置顶）
+  const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}) => {
+    if (stage.some(s => s.items?.[0]?.path === r.path)) return;
+    const isImage = IMG_EXTS.includes((r.ext||"").toLowerCase());
+    let icon: string | null = null;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const info = await invoke<FileEntry>("get_file_info", { path: r.path });
+      icon = info.icon ?? null;
+    } catch {}
+    const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
+    saveStage([item, ...stage].slice(0, STAGE_MAX));
+  }, [stage, saveStage]);
+  // 增强搜索 fs 结果加入启动台（按 path 去重）
+  const addFsToLauncher = useCallback((r:{path:string;name:string;ext?:string;isDir:boolean}) => {
+    if (launcher.some(x => x.path === r.path)) return;
+    saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon:null, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
+  }, [launcher, saveLauncher]);
   // 从启动器移除（右键）
   const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
 
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
-  // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶
-  const addToStage = useCallback((c:ClipItem) => {
+  // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
+  const addToStage = useCallback(async (c:ClipItem) => {
     const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
     if (exists) return;
-    saveStage([clipToStage(c), ...stage].slice(0,STAGE_MAX));
+    let item = clipToStage(c);
+    if (c.type==="file" && (c.count??0)<=1 && c.items?.[0]?.path && item.items?.[0]) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const info = await invoke<FileEntry>("get_file_info", { path: c.items[0].path });
+        if (info.icon) item = { ...item, items: [{ ...item.items![0], icon: info.icon }] };
+      } catch {}
+    }
+    saveStage([item, ...stage].slice(0,STAGE_MAX));
   }, [stage,saveStage]);
   // 拖拽：按下记录起点（不立刻激活，等移动超阈值），但跳过 .clip-actions 内的按钮区，且仅左键
   const handleClipPointerDown = useCallback((e: React.PointerEvent, c: ClipItem) => {
@@ -1045,26 +1077,61 @@ export default function App() {
             )}
           </div>
           <div className="drop-area" ref={dropAreaRef}>
-            {filteredStage.length? <div className="stage-list">{filteredStage.map((s,idx)=>{
-              const label = s.type==="text" ? (s.content?.slice(0,60)||"文本") : s.type==="image" ? "图片" : (s.count!==1? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
-              return (
-              <div key={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
-                {s.type==="image"
-                  ? <img className="stage-thumb" src={s.content} alt=""/>
-                  : <span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
-                <span className="stage-title">{label}</span>
-                {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
-                <div className="stage-actions">
-                  <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?"已复制":"复制到剪贴板"}>
-                    {copiedStageId===s.id
-                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
-                  </button>
-                  {s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
-                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="移除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
-                </div>
-              </div>);
-            })}</div>: <p className="empty-hint">{search.trim()?"无匹配":"拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入"}</p>}
+            {filteredStage.length ? (stageLayout==="grid"
+              ? <div className="stage-grid">{filteredStage.map((s,idx)=>(
+                  <div key={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                    {s.type==="text" ? (
+                      /* 文本卡片：内嵌预览 + PASTED 徽标，无图标 */
+                      <>
+                        <div className="stage-card-text-preview">{s.content||""}</div>
+                        <span className="stage-card-pasted">PASTED</span>
+                      </>
+                    ) : (
+                      /* 文件/图片卡片：对齐 app-tile */
+                      <>
+                        <div className="stage-card-icon">
+                          {s.type==="image"
+                            ?<img className="stage-card-thumb" src={s.content} alt=""/>
+                            :s.items?.[0]?.icon
+                              ?<img className="stage-card-file-icon" src={s.items[0].icon} alt=""/>
+                              :<span>{s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                        </div>
+                        <span className="stage-card-name">{s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"))}</span>
+                      </>
+                    )}
+                    <div className="stage-card-actions">
+                      {/* 取走粘贴（→） */}
+                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();copyAndPaste(s);}} title="取走粘贴"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
+                      {/* 打开文件（仅 file 类型）*/}
+                      {s.type==="file"&&<button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
+                      {/* 删除 */}
+                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                    </div>
+                  </div>
+                ))}</div>
+              : <div className="stage-list">{filteredStage.map((s,idx)=>{
+                  const label = s.type==="text"?(s.content?.slice(0,60)||"文本"):s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"));
+                  return (
+                  <div key={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                    {s.type==="image"
+                      ?<img className="stage-thumb" src={s.content} alt=""/>
+                      :s.type==="file" && s.items?.[0]?.icon
+                        ?<img className="stage-thumb" src={s.items[0].icon} alt=""/>
+                        :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
+                    <span className="stage-title">{label}</span>
+                    {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
+                    <div className="stage-actions">
+                      <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?"已复制":"复制到剪贴板"}>
+                        {copiedStageId===s.id
+                          ?<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                          :<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                      </button>
+                      {s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
+                      <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="移除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                    </div>
+                  </div>);
+                })}</div>
+            ) : <p className="empty-hint">{search.trim()?"无匹配":"拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入"}</p>}
           </div>
           <div className="section-label" style={{marginTop:16}}>快捷入口</div>
           <div className="shortcut-row">
@@ -1122,6 +1189,7 @@ export default function App() {
             const label = r.kind==="app" ? r.app.name : r.name;
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
             const badge = r.kind==="app" ? "应用" : r.kind==="stage" ? "中转" : (r.isDir?"文件夹":"文件");
+            const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
             // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
             const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">文件 / 文件夹</div> : null;
             return (
@@ -1131,8 +1199,17 @@ export default function App() {
                   onMouseEnter={()=>setEnhSelIdx(i)}
                   onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
                   <div className="enh-result-icon">{icon}</div>
-                  <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                  <div className="enh-result-meta">
+                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                    {r.kind==="fs" && <span className="enh-result-dir">{dirOf(r.path)}</span>}
+                  </div>
                   <span className="enh-result-badge">{badge}</span>
+                  {(r.kind==="fs" || r.kind==="app") && (
+                    <div className="enh-result-actions">
+                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();addFsToStage(r);setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}} title="加入中转区">{enhAdded?.path===rPath&&enhAdded?.target==="stage"?"✓":"中转"}</button>}
+                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();r.kind==="app"?addAppToLauncher(r.app):addFsToLauncher(r);setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}} title="加入启动台">{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?"✓":"启动台"}</button>
+                    </div>
+                  )}
                 </div>
               </Fragment>
             );
@@ -1194,6 +1271,13 @@ export default function App() {
                     <div className="seg">
                       <button className={`seg-btn${autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(true)}>开启</button>
                       <button className={`seg-btn${!autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(false)}>关闭</button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">中转区布局</span>
+                    <div className="seg">
+                      <button className={`seg-btn${stageLayout==="list"?" seg-active":""}`} onClick={()=>changeStageLayout("list")}>列表</button>
+                      <button className={`seg-btn${stageLayout==="grid"?" seg-active":""}`} onClick={()=>changeStageLayout("grid")}>方格</button>
                     </div>
                   </div>
                 </>)}

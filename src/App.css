@@ -95,6 +95,27 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
+/* ── 中转区方格布局（卡片尺寸对齐 app-tile）── */
+.stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:4px;align-content:start;}
+.stage-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;background:var(--fill-1);border-radius:8px;padding:8px 4px 6px;cursor:pointer;transition:background 80ms;overflow:hidden;}
+.stage-card:hover{background:var(--fill-2);}
+.stage-card.selected{background:rgba(0,120,212,0.16);box-shadow:inset 0 0 0 1px var(--accent);}
+/* 图标区（对齐 app-tile-icon：48×48，圆角 10px）*/
+.stage-card-icon{width:48px;height:48px;border-radius:10px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
+.stage-card-icon span{font-size:22px;line-height:1;}
+.stage-card-thumb{width:36px;height:36px;object-fit:cover;border-radius:6px;}
+/* Windows 系统图标（PNG base64，填满图标区，无圆角）*/
+.stage-card-file-icon{width:36px;height:36px;object-fit:contain;image-rendering:auto;}
+/* 文件/图片名称（对齐 app-tile-label：11px 双行截断）*/
+.stage-card-name{font-size:11px;color:var(--text);text-align:center;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all;width:100%;}
+/* 文本卡片：内嵌预览框（Claude 粘贴卡片风格，与图标区同高）*/
+.stage-card-text-preview{width:100%;height:48px;flex-shrink:0;background:var(--fill-2);border-radius:8px;padding:6px 7px;font-size:9px;color:var(--text3);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;word-break:break-all;text-align:left;}
+.stage-card-pasted{font-size:9px;color:var(--text3);letter-spacing:0.07em;font-weight:500;}
+/* 悬浮操作栏：深色半透明遮罩 + 白色图标按钮 */
+.stage-card-actions{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:rgba(0,0,0,0.55);border-radius:0 0 8px 8px;padding:5px 4px;opacity:0;transition:opacity 100ms;pointer-events:none;}
+.stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
+.stage-card-act-btn{width:22px;height:22px;border:none;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.88);cursor:pointer;border-radius:5px;display:flex;align-items:center;justify-content:center;padding:0;transition:background 80ms;}
+.stage-card-act-btn:hover{background:rgba(255,255,255,0.26);}
 
 /* 快捷入口芯片 */
 .shortcut-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 4px 8px;}
@@ -205,7 +226,7 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 
 /* ── 增强搜索层（Ctrl+K）：同 overlay 内的视图层，靠 .enh-open class 丝滑淡入上浮 ── */
 .enh-layer{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;
-  padding-top:14vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  padding-top:8vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
   opacity:0;transform:translateY(10px) scale(0.985);pointer-events:none;transition:opacity 160ms ease,transform 160ms ease;}
 .enh-layer.enh-open{opacity:1;transform:none;pointer-events:auto;}
 .enh-search-box{display:flex;align-items:center;gap:10px;width:min(640px,80%);background:var(--hover);
@@ -214,13 +235,22 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-search-input::placeholder{color:var(--text3);}
 .enh-hint{font-size:11px;color:var(--text3);flex-shrink:0;}
 .enh-results{width:min(640px,80%);margin-top:12px;flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
-.enh-result{display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;}
+.enh-result{position:relative;display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;}
 .enh-result:hover,.enh-result.selected{background:var(--hover);}
 .enh-result-icon{width:32px;height:32px;border-radius:7px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
 .enh-result-icon img{width:24px;height:24px;object-fit:contain;}
 .enh-result-icon span{font-size:15px;}
-.enh-result-label{flex:1;min-width:0;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;}
+.enh-result-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.enh-result-label{font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.enh-result-dir{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;transition:opacity 120ms;}
+/* 悬浮时右侧操作按钮替代 badge（绝对叠覆，双方 transition 交叉淡入淡出）*/
+.enh-result-actions{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:4px;opacity:0;pointer-events:none;transition:opacity 120ms;}
+.enh-result:hover .enh-result-badge{opacity:0;pointer-events:none;}
+.enh-result:hover .enh-result-actions{opacity:1;pointer-events:auto;}
+.enh-action-btn{font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;background:var(--fill-2);cursor:pointer;white-space:nowrap;line-height:1.4;transition:color 100ms,border-color 100ms,background 100ms;}
+.enh-action-btn:hover{color:var(--text);border-color:var(--accent);background:rgba(99,102,241,0.1);}
+.enh-action-btn.enh-action-added,.enh-action-btn.enh-action-added:hover{color:#4ade80;border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08);}
 .enh-divider{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 12px 4px;}
 .enh-index-hint{width:min(640px,80%);font-size:11px;color:var(--text3);padding:6px 12px;font-style:italic;}
 .hotkey-input{width:140px;padding:4px 8px;background:var(--fill-2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--font);}
