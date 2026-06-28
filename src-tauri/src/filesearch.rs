@@ -51,7 +51,7 @@ const MAX_INDEX_ENTRIES: usize = 300_000; // 整个用户目录可能很大，�
 const MAX_WALK_DEPTH: usize = 10; // 从 %USERPROFILE% 根算起，比旧 5 子目录方案需更深
 const REBUILD_INTERVAL_SECS: u64 = 30 * 60; // 30 分钟周期重建
 const INITIAL_DELAY_SECS: u64 = 3; // 避开开机高峰后再首次建索引
-const QUERY_LIMIT_CAP: usize = 50; // 查询返回上限硬顶
+const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全盘可返回大量结果，前端按引擎传不同 limit）
 
 // 默认扫描根 = 整个用户目录；额外根目录由前端配置注入 EXTRA_DIRS。不存在的目录跳过。
 fn scan_dirs() -> Vec<PathBuf> {

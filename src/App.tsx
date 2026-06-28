@@ -13,6 +13,9 @@ interface StageItem { id: number; type: "text" | "image" | "file"; content?: str
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX = 20; // 中转区上限
+// 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
+const ENH_FILE_LIMIT_BUILTIN = 50;
+const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 
 
@@ -521,15 +524,17 @@ export default function App() {
     if (!enhOpen) return;
     const q = enhQuery.trim();
     if (!q) { setFsResults([]); return; }
+    // Everything 覆盖全盘、结果量大，给更高 limit；内置仅用户目录，50 足够
+    const lim = searchEngine==="everything" ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
     const t = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: 20 });
+        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: lim });
         setFsResults(r);
       } catch { setFsResults([]); }
     }, 150);
     return () => clearTimeout(t);
-  }, [enhQuery, enhOpen]);
+  }, [enhQuery, enhOpen, searchEngine]);
 
   // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
   useEffect(() => {
@@ -537,9 +542,15 @@ export default function App() {
     (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number; everythingAvailable: boolean }>("get_index_status"); setIndexReady(s.ready); setEverythingAvailable(!!s.everythingAvailable); } catch {} })();
   }, [enhOpen, settingsOpen, searchEngine]);
 
-  // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件 ≤20）在后；索引连续供 ↑↓/Enter 跨组导航 ──
+  // 长结果列表下让键盘选中项滚入视野（否则 ↑↓ 导航会移出可视区）
+  useEffect(() => {
+    if (!enhOpen) return;
+    document.querySelector(".enh-result.selected")?.scrollIntoView({ block: "nearest" });
+  }, [enhSelIdx, enhOpen]);
+
+  // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件，量由引擎决定）在后；索引连续供 ↑↓/Enter 跨组导航 ──
   const enhResults = useMemo<EnhResult[]>(() => {
-    const tier2: EnhResult[] = fsResults.slice(0, 20).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
+    const tier2: EnhResult[] = fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
     return [...enhTier1, ...tier2];
   }, [enhTier1, fsResults]);
 
