@@ -111,12 +111,12 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-card{position:relative;width:80px;min-width:80px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
 .stage-card:hover{border-color:var(--card-border-hover-c);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
-/* 缩略图区：固定 80×48，接近正方形 */
-.stage-card-thumb{width:80px;height:48px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
+/* 缩略图区：固定 80×60（内容区加高，使卡片总高对齐启动台 hover 轮廓 ≈96px；信息栏不变）*/
+.stage-card-thumb{width:80px;height:60px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
 /* 图片 cover：固定同尺寸，object-fit:cover 从顶部裁 */
-.stage-card-thumb img.cover{width:80px;height:48px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
+.stage-card-thumb img.cover{width:80px;height:60px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
 /* 文本预览：固定尺寸 + -webkit-line-clamp（有固定高时可靠）*/
-.stage-card-text-preview{width:80px;height:48px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
+.stage-card-text-preview{width:80px;height:60px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
 /* 文件图标容器：32×32 居中方块 */
 .stage-card-icon-wrap{width:32px;height:32px;border-radius:7px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 /* 类型指示点（thumb 右上角，相对 thumb position:relative 定位）*/
