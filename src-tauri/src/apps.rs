@@ -462,6 +462,8 @@ pub struct FileInfo {
     pub is_dir: bool,
     pub size: u64,
     pub ext: String,
+    /// Windows 系统图标，base64 PNG data URL（SHGetFileInfoW 提取，可为 None）
+    pub icon: Option<String>,
 }
 
 #[tauri::command]
@@ -473,7 +475,11 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let meta = p.metadata().map_err(|e| format!("{}", e))?;
     let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = p.extension().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    Ok(FileInfo { path, name, is_dir: meta.is_dir(), size: meta.len(), ext })
+    // 提取 Windows 系统图标；COM 仅在本次调用线程上临时初始化
+    let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+    let icon = extract_icon_base64(&path);
+    if com_hr == 0 { unsafe { CoUninitialize(); } } // 仅 S_OK 时配对反初始化
+    Ok(FileInfo { path, name, is_dir: meta.is_dir(), size: meta.len(), ext, icon })
 }
 
 fn str_to_wide(s: &str) -> Vec<u16> {
