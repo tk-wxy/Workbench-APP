@@ -14,6 +14,11 @@
   --accent: #0078D4;
   --radius: 8px;
   --font: 'Segoe UI Variable','Segoe UI',system-ui,'Microsoft YaHei',sans-serif;
+  /* 中转卡片专用颜色（暗色主题） */
+  --card-bg: rgba(255,255,255,0.07);
+  --card-thumb-bg: rgba(255,255,255,0.035);
+  --card-border-c: rgba(255,255,255,0.10);
+  --card-border-hover-c: rgba(255,255,255,0.22);
 }
 /* 浅色主题：覆盖配色变量（由 data-theme="light" 触发，置于 :root 之后取胜） */
 [data-theme="light"] {
@@ -25,6 +30,11 @@
   --text: #1a1a1c;
   --text2: rgba(0,0,0,0.60);
   --text3: rgba(0,0,0,0.40);
+  /* 中转卡片专用颜色（浅色主题） */
+  --card-bg: #ffffff;
+  --card-thumb-bg: #f3f3f4;
+  --card-border-c: rgba(0,0,0,0.09);
+  --card-border-hover-c: rgba(0,0,0,0.20);
 }
 html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:var(--font);color:var(--text);}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
@@ -96,23 +106,29 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
 /* ── 中转区方格布局（卡片尺寸对齐 app-tile）── */
-.stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:4px;align-content:start;}
-.stage-card{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;background:var(--fill-1);border-radius:8px;padding:8px 4px 6px;cursor:pointer;transition:background 80ms;overflow:hidden;}
-.stage-card:hover{background:var(--fill-2);}
-.stage-card.selected{background:rgba(0,120,212,0.16);box-shadow:inset 0 0 0 1px var(--accent);}
-/* 图标区（对齐 app-tile-icon：48×48，圆角 10px）*/
-.stage-card-icon{width:48px;height:48px;border-radius:10px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
-.stage-card-icon span{font-size:22px;line-height:1;}
-.stage-card-thumb{width:36px;height:36px;object-fit:cover;border-radius:6px;}
-/* Windows 系统图标（PNG base64，填满图标区，无圆角）*/
-.stage-card-file-icon{width:36px;height:36px;object-fit:contain;image-rendering:auto;}
-/* 文件/图片名称（对齐 app-tile-label：11px 双行截断）*/
-.stage-card-name{font-size:11px;color:var(--text);text-align:center;line-height:1.3;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-all;width:100%;}
-/* 文本卡片：内嵌预览框（Claude 粘贴卡片风格，与图标区同高）*/
-.stage-card-text-preview{width:100%;height:48px;flex-shrink:0;background:var(--fill-2);border-radius:8px;padding:6px 7px;font-size:9px;color:var(--text3);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;word-break:break-all;text-align:left;}
-.stage-card-pasted{font-size:9px;color:var(--text3);letter-spacing:0.07em;font-weight:500;}
-/* 悬浮操作栏：深色半透明遮罩 + 白色图标按钮 */
-.stage-card-actions{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:rgba(0,0,0,0.55);border-radius:0 0 8px 8px;padding:5px 4px;opacity:0;transition:opacity 100ms;pointer-events:none;}
+/* ── 中转区方格卡片（重设计：外壳 + 1:1缩略图区 + 标签区，按类型差异化） ── */
+.stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;align-content:start;}
+.stage-card{position:relative;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;flex-shrink:0;}
+.stage-card:hover{border-color:var(--card-border-hover-c);}
+.stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+/* 缩略图区：1:1 正方形，背景与外壳分层 */
+.stage-card-thumb{width:100%;aspect-ratio:1;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
+.stage-card-thumb img.cover{width:100%;height:100%;object-fit:cover;display:block;}
+/* 文本预览：4行截断 */
+.stage-card-text-preview{font-size:11px;line-height:1.45;color:var(--text2);padding:10px;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;text-align:left;width:100%;box-sizing:border-box;word-break:break-all;}
+/* 文件图标容器：居中圆角方块 */
+.stage-card-icon-wrap{width:52px;height:52px;border-radius:11px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
+/* 类型指示点（右上角） */
+.stage-card-dot{position:absolute;top:7px;right:7px;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:1;}
+.stage-card-dot.type-file{background:#378ADD;}
+.stage-card-dot.type-text{background:#639922;}
+.stage-card-dot.type-image{background:#D4537E;}
+/* 标签区：name + meta 两行 */
+.stage-card-label{padding:6px 8px 8px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:2px;min-width:0;}
+.stage-card-name{font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-card-meta{font-size:10.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+/* 悬浮操作栏 */
+.stage-card-actions{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:rgba(0,0,0,0.55);border-radius:0 0 14px 14px;padding:5px 4px;opacity:0;transition:opacity 100ms;pointer-events:none;}
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
 .stage-card-act-btn{width:22px;height:22px;border:none;background:rgba(255,255,255,0.12);color:rgba(255,255,255,0.88);cursor:pointer;border-radius:5px;display:flex;align-items:center;justify-content:center;padding:0;transition:background 80ms;}
 .stage-card-act-btn:hover{background:rgba(255,255,255,0.26);}
