@@ -1125,7 +1125,9 @@ export default function App() {
                         <div className="stage-card-icon-wrap">
                           {s.items?.[0]?.icon
                             ? <img src={s.items[0].icon} alt="" style={{width:28,height:28,objectFit:"contain"}}/>
-                            : <span style={{fontSize:22}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                            : isAnyDir
+                              ? <svg width="26" height="26" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
+                              : <span style={{fontSize:22}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
                         </div>
                       </div>
                     )}
