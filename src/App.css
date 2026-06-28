@@ -105,29 +105,29 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
-/* ── 中转区方格卡片（固定 110px 绝对尺寸，避免 flex/grid 撑开失控）── */
+/* ── 中转区方格卡片（固定 80px 绝对尺寸，对齐启动台节奏，预留设置可配置）── */
 .stage-grid{display:flex;flex-wrap:wrap;gap:8px;align-content:start;}
 /* 卡片壳：固定宽度 + flex-shrink:0 防压缩 */
-.stage-card{position:relative;width:110px;min-width:110px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
+.stage-card{position:relative;width:80px;min-width:80px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
 .stage-card:hover{border-color:var(--card-border-hover-c);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
-/* 缩略图区：固定 110×90，不用 aspect-ratio/padding-top */
-.stage-card-thumb{width:110px;height:90px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
+/* 缩略图区：固定 80×68，不用 aspect-ratio/padding-top */
+.stage-card-thumb{width:80px;height:68px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
 /* 图片 cover：固定同尺寸，object-fit:cover 从顶部裁 */
-.stage-card-thumb img.cover{width:110px;height:90px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
+.stage-card-thumb img.cover{width:80px;height:68px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
 /* 文本预览：固定尺寸 + -webkit-line-clamp（有固定高时可靠）*/
-.stage-card-text-preview{width:110px;height:90px;padding:9px 10px;box-sizing:border-box;font-size:10.5px;line-height:1.5;color:var(--text2);display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
-/* 文件图标容器：48×48 居中方块 */
-.stage-card-icon-wrap{width:48px;height:48px;border-radius:10px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.stage-card-text-preview{width:80px;height:68px;padding:7px 8px;box-sizing:border-box;font-size:9.5px;line-height:1.5;color:var(--text2);display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
+/* 文件图标容器：36×36 居中方块 */
+.stage-card-icon-wrap{width:36px;height:36px;border-radius:8px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 /* 类型指示点（thumb 右上角，相对 thumb position:relative 定位）*/
-.stage-card-dot{position:absolute;top:7px;right:7px;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:1;flex-shrink:0;}
+.stage-card-dot{position:absolute;top:5px;right:5px;width:5px;height:5px;border-radius:50%;pointer-events:none;z-index:1;flex-shrink:0;}
 .stage-card-dot.type-file{background:#378ADD;}
 .stage-card-dot.type-text{background:#639922;}
 .stage-card-dot.type-image{background:#D4537E;}
 /* 标签区 */
-.stage-card-label{padding:5px 8px 7px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:1px;min-width:0;flex-shrink:0;}
-.stage-card-name{font-size:11.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.stage-card-meta{font-size:10px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-card-label{padding:4px 6px 6px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:1px;min-width:0;flex-shrink:0;}
+.stage-card-name{font-size:10.5px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-card-meta{font-size:9.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* 悬浮操作栏 */
 .stage-card-actions{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:rgba(0,0,0,0.55);border-radius:0 0 14px 14px;padding:5px 4px;opacity:0;transition:opacity 100ms;pointer-events:none;}
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
