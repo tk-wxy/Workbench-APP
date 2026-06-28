@@ -1110,7 +1110,7 @@ export default function App() {
                         <div className="stage-card-dot type-image"/>
                         <div className="stage-card-thumb-inner">
                           {s.content
-                            ? <img className="cover" src={`data:image/png;base64,${s.content}`} alt=""/>
+                            ? <img className="cover" src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
                             : <span style={{fontSize:32}}>🖼️</span>}
                         </div>
                       </div>
@@ -1127,8 +1127,8 @@ export default function App() {
                         <div className="stage-card-thumb-inner">
                           <div className="stage-card-icon-wrap">
                             {s.items?.[0]?.icon
-                              ? <img src={s.items[0].icon} alt="" style={{width:32,height:32,objectFit:"contain"}}/>
-                              : <span style={{fontSize:26}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                              ? <img src={s.items[0].icon} alt="" style={{width:40,height:40,objectFit:"contain"}}/>
+                              : <span style={{fontSize:32}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
                           </div>
                         </div>
                       </div>
