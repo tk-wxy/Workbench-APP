@@ -1108,9 +1108,11 @@ export default function App() {
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         <div className="stage-card-dot type-image"/>
-                        {s.content
-                          ? <img className="cover" src={`data:image/png;base64,${s.content}`} alt=""/>
-                          : <span style={{fontSize:32}}>🖼️</span>}
+                        <div className="stage-card-thumb-inner">
+                          {s.content
+                            ? <img className="cover" src={`data:image/png;base64,${s.content}`} alt=""/>
+                            : <span style={{fontSize:32}}>🖼️</span>}
+                        </div>
                       </div>
                     )}
                     {s.type==="text" && (
@@ -1122,10 +1124,12 @@ export default function App() {
                     {s.type==="file" && (
                       <div className="stage-card-thumb">
                         <div className="stage-card-dot type-file"/>
-                        <div className="stage-card-icon-wrap">
-                          {s.items?.[0]?.icon
-                            ? <img src={s.items[0].icon} alt="" style={{width:32,height:32,objectFit:"contain"}}/>
-                            : <span style={{fontSize:26}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                        <div className="stage-card-thumb-inner">
+                          <div className="stage-card-icon-wrap">
+                            {s.items?.[0]?.icon
+                              ? <img src={s.items[0].icon} alt="" style={{width:32,height:32,objectFit:"contain"}}/>
+                              : <span style={{fontSize:26}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                          </div>
                         </div>
                       </div>
                     )}
