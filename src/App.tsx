@@ -1111,9 +1111,9 @@ export default function App() {
                                           : <span>{r.isDir?"📁":fi(r.ext)}</span>;
             const label = r.kind==="app" ? r.app.name : r.name;
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
-            const badge = r.kind==="app" ? "应用" : r.kind==="stage" ? "中转" : "文件";
+            const badge = r.kind==="app" ? "应用" : r.kind==="stage" ? "中转" : (r.isDir?"文件夹":"文件");
             // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
-            const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">文件</div> : null;
+            const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">文件 / 文件夹</div> : null;
             return (
               <Fragment key={key}>
                 {divider}
