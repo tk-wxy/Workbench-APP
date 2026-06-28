@@ -1136,9 +1136,8 @@ export default function App() {
                       <span className="stage-card-name">{cardName}</span>
                       <span className="stage-card-meta">{cardMeta}</span>
                     </div>
-                    {/* ── 悬浮操作栏（逻辑不变）── */}
+                    {/* ── 悬浮操作栏：左键本体已=取走粘贴，故只留「打开(file)/删除」，去掉冗余取走按钮以免溢出 ── */}
                     <div className="stage-card-actions">
-                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();copyAndPaste(s);}} title="取走粘贴"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
                       {s.type==="file"&&<button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
                       <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
                     </div>
