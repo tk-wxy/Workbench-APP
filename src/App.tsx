@@ -1093,37 +1093,55 @@ export default function App() {
           </div>
           <div className="drop-area" ref={dropAreaRef}>
             {filteredStage.length ? (stageLayout==="grid"
-              ? <div className="stage-grid">{filteredStage.map((s,idx)=>(
+              ? <div className="stage-grid">{filteredStage.map((s,idx)=>{
+                  const rawExt = (s.ext||s.items?.[0]?.ext||"").replace(/^\./,"");
+                  const isAnyDir = !!s.isDir;
+                  const cardName = s.type==="image" ? "图片"
+                    : s.type==="text" ? (s.content?.slice(0,12)||"文本")
+                    : (s.count!==1 ? `${s.count} 个文件` : (s.name||s.items?.[0]?.name||"文件"));
+                  const cardMeta = s.type==="image" ? "图片"
+                    : s.type==="text" ? "文本"
+                    : (isAnyDir ? "文件夹" : (rawExt ? `.${rawExt}` : "文件"));
+                  return (
                   <div key={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
-                    {s.type==="text" ? (
-                      /* 文本卡片：内嵌预览 + PASTED 徽标，无图标 */
-                      <>
-                        <div className="stage-card-text-preview">{s.content||""}</div>
-                        <span className="stage-card-pasted">PASTED</span>
-                      </>
-                    ) : (
-                      /* 文件/图片卡片：对齐 app-tile */
-                      <>
-                        <div className="stage-card-icon">
-                          {s.type==="image"
-                            ?<img className="stage-card-thumb" src={s.content} alt=""/>
-                            :s.items?.[0]?.icon
-                              ?<img className="stage-card-file-icon" src={s.items[0].icon} alt=""/>
-                              :<span>{s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
-                        </div>
-                        <span className="stage-card-name">{s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"))}</span>
-                      </>
+                    {/* ── 缩略图区（按类型三分支）── */}
+                    {s.type==="image" && (
+                      <div className="stage-card-thumb">
+                        <div className="stage-card-dot type-image"/>
+                        {s.content
+                          ? <img className="cover" src={`data:image/png;base64,${s.content}`} alt=""/>
+                          : <span style={{fontSize:32}}>🖼️</span>}
+                      </div>
                     )}
+                    {s.type==="text" && (
+                      <div className="stage-card-thumb">
+                        <div className="stage-card-dot type-text"/>
+                        <div className="stage-card-text-preview">{s.content||""}</div>
+                      </div>
+                    )}
+                    {s.type==="file" && (
+                      <div className="stage-card-thumb">
+                        <div className="stage-card-dot type-file"/>
+                        <div className="stage-card-icon-wrap">
+                          {s.items?.[0]?.icon
+                            ? <img src={s.items[0].icon} alt="" style={{width:32,height:32,objectFit:"contain"}}/>
+                            : <span style={{fontSize:26}}>{s.items?.[0]?.isImage?"🖼️":(isAnyDir?"📁":fi(s.ext??s.items?.[0]?.ext??""))}</span>}
+                        </div>
+                      </div>
+                    )}
+                    {/* ── 标签区 ── */}
+                    <div className="stage-card-label">
+                      <span className="stage-card-name">{cardName}</span>
+                      <span className="stage-card-meta">{cardMeta}</span>
+                    </div>
+                    {/* ── 悬浮操作栏（逻辑不变）── */}
                     <div className="stage-card-actions">
-                      {/* 取走粘贴（→） */}
                       <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();copyAndPaste(s);}} title="取走粘贴"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
-                      {/* 打开文件（仅 file 类型）*/}
                       {s.type==="file"&&<button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title="打开"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
-                      {/* 删除 */}
                       <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title="删除"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
                     </div>
                   </div>
-                ))}</div>
+                );})}</div>
               : <div className="stage-list">{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||"文本"):s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"));
                   return (
