@@ -106,7 +106,8 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
 /* ── 中转区方格卡片（重设计：外壳 + 1:1缩略图区 + 标签区，按类型差异化） ── */
-.stage-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:8px;align-content:start;}
+/* 列宽对齐启动台 repeat(4,1fr)，保持视觉统一 */
+.stage-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;align-content:start;}
 .stage-card{position:relative;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
 .stage-card:hover{border-color:var(--card-border-hover-c);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
@@ -115,19 +116,19 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 /* 内容层：绝对定位填满 padding-top 撑开的正方形空间 */
 .stage-card-thumb-inner{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;}
 .stage-card-thumb-inner img.cover{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;}
-/* 文本预览：绝对定位填满缩略图区，4行截断（从左上角开始，不居中浮空）*/
-.stage-card-text-preview{position:absolute;inset:0;font-size:11px;line-height:1.45;color:var(--text2);padding:10px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;text-align:left;word-break:break-all;box-sizing:border-box;}
-/* 文件图标容器：居中圆角方块 */
-.stage-card-icon-wrap{width:52px;height:52px;border-radius:11px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
+/* 文本预览：绝对定位填满缩略图区；直接用 overflow:hidden 裁边（webkit-line-clamp 在 position:absolute 下不可靠）*/
+.stage-card-text-preview{position:absolute;inset:0;font-size:11px;line-height:1.5;color:var(--text2);padding:10px;overflow:hidden;text-align:left;word-break:break-all;box-sizing:border-box;}
+/* 文件图标容器：白色/浅色浮起方块 + 微阴影，对齐目标设计 */
+.stage-card-icon-wrap{width:64px;height:64px;border-radius:13px;background:var(--card-bg);box-shadow:0 1px 4px rgba(0,0,0,0.13),0 0 0 0.5px var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
 /* 类型指示点（右上角） */
 .stage-card-dot{position:absolute;top:7px;right:7px;width:6px;height:6px;border-radius:50%;pointer-events:none;z-index:1;}
 .stage-card-dot.type-file{background:#378ADD;}
 .stage-card-dot.type-text{background:#639922;}
 .stage-card-dot.type-image{background:#D4537E;}
 /* 标签区：name + meta 两行 */
-.stage-card-label{padding:6px 8px 8px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:2px;min-width:0;}
-.stage-card-name{font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.stage-card-meta{font-size:10.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-card-label{padding:7px 9px 9px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:2px;min-width:0;}
+.stage-card-name{font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-card-meta{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 /* 悬浮操作栏 */
 .stage-card-actions{position:absolute;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:4px;background:rgba(0,0,0,0.55);border-radius:0 0 14px 14px;padding:5px 4px;opacity:0;transition:opacity 100ms;pointer-events:none;}
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
