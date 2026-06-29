@@ -1,5 +1,6 @@
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
+mod dragout; // 中转区拖出（DoDragDrop：IDataObject + IDropSource，独立 STA 线程）
 mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
 mod everything; // 可选 Everything 搜索引擎（libloading 动态加载 SDK DLL）
 mod clipboard; // 剪贴板子系统（历史/粘贴/复制/janitor/监听）
@@ -481,6 +482,7 @@ pub fn run() {
             filesearch::search_files, filesearch::get_index_status,
             filesearch::set_search_engine, filesearch::set_search_dirs,
             everything::reload_everything,
+            dragout::start_drag_out,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
