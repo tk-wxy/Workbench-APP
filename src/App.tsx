@@ -217,7 +217,7 @@ function matchItem(query: string, name: string, keywords: string[]): boolean {
 type EnhResult =
   | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
   | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
-  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
+  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
 
 // ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
 const HOTKEY_MAIN_TOKENS = new Set<string>([
@@ -325,8 +325,8 @@ export default function App() {
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
-  // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询
-  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean }[]>([]);
+  // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
+  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null }[]>([]);
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
   // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
@@ -573,7 +573,7 @@ export default function App() {
 
   // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件，量由引擎决定）在后；索引连续供 ↑↓/Enter 跨组导航 ──
   const enhResults = useMemo<EnhResult[]>(() => {
-    const tier2: EnhResult[] = fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir }));
+    const tier2: EnhResult[] = fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon }));
     return [...enhTier1, ...tier2];
   }, [enhTier1, fsResults]);
 
@@ -1223,7 +1223,8 @@ export default function App() {
             const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : "fs:"+r.path;
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
                        : r.kind==="stage" ? <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>
-                                          : <span>{r.isDir?"📁":fi(r.ext)}</span>;
+                       : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
+                                                 : <span>{r.kind==="fs" && r.isDir?"📁":fi(r.kind==="fs"?r.ext:"")}</span>;
             const label = r.kind==="app" ? r.app.name : r.name;
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
             const badge = r.kind==="app" ? "应用" : r.kind==="stage" ? "中转" : (r.isDir?"文件夹":"文件");

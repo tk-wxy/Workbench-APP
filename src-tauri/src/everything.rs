@@ -190,6 +190,7 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
                 name,
                 ext,
                 is_dir,
+                icon: None, // 由 filesearch::enrich_with_icons 统一填充
             });
         }
         Ok(out)
