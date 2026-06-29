@@ -324,6 +324,7 @@ export default function App() {
   const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
+  const enhPinnedRef = useRef(false); enhPinnedRef.current = enhPinned; // 供 onChange 闭包读最新 pinned 状态
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
   const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null }[]>([]);
@@ -998,7 +999,7 @@ export default function App() {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
       if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
-      if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery("");setEnhSelIdx(0);setEnhOpen(true);if(searchDefaultModeRef.current==="enhanced"){setEnhPinned(true);}else{setEnhPinned(false);setTimeout(()=>enhInputRef.current?.focus(),0);}}return;}
+      if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
@@ -1027,8 +1028,8 @@ export default function App() {
             <input ref={searchRef} className="search-field" placeholder="搜索应用、中转、剪贴板…" value={search}
               onChange={e=>{
                 const v=e.target.value;
-                if(searchDefaultModeRef.current==="enhanced"&&!pageSearchForcedRef.current){
-                  // 增强搜索模式：顶栏输入同步到 enhQuery，不移焦点（避免打断 IME 组字），enh-layer 自动打开
+                if((searchDefaultModeRef.current==="enhanced"&&!pageSearchForcedRef.current)||enhPinnedRef.current){
+                  // enhanced 模式自动打开 / 或 enh 已以 pinned 方式打开（page 模式手动呼出时）：顶栏输入同步到 enhQuery
                   setSearch(v);setEnhQuery(v);setEnhSelIdx(0);
                   if(v&&!enhOpenRef.current){setEnhOpen(true);setEnhPinned(true);}
                 }else{setSearch(v);}
@@ -1326,7 +1327,7 @@ export default function App() {
                       <button className={`seg-btn${searchDefaultMode==="enhanced"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("enhanced")}>增强搜索</button>
                     </div>
                   </div>
-                  <p className="settings-hint">{searchDefaultMode==="enhanced"?"呼出时直接进入增强搜索；"+comboLabel(enhHotkey)+"切换为界面搜索。":"呼出时顶栏搜索过滤界面内容；"+comboLabel(enhHotkey)+"进入增强搜索。"}</p>
+                  <p className="settings-hint">{searchDefaultMode==="enhanced"?"呼出后顶栏输入直接进入增强搜索；"+comboLabel(enhHotkey)+"切换为界面搜索。":"呼出后顶栏搜索过滤界面内容；"+comboLabel(enhHotkey)+"进入增强搜索（共用顶栏）。"}</p>
                 </>)}
                 {settingsTab==="clipboard" && (<>
                   <div className="settings-panel-title">剪贴板</div>
