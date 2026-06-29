@@ -90,7 +90,10 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 
 /* ── 中：文件中转区 + 快捷入口 ── */
 .center-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:0 16px 16px;min-width:200px;}
-.drop-area{flex:1;min-height:80px;overflow-y:auto;border-radius:var(--radius);padding:4px;}
+.drop-area{position:relative;flex:1;min-height:80px;overflow-y:auto;border-radius:var(--radius);padding:4px;}
+/* 框选多选（续70）*/
+.lasso-active{user-select:none;cursor:crosshair;}
+.stage-lasso{position:absolute;pointer-events:none;border:1px dashed var(--accent,#60a5fa);background:color-mix(in srgb,var(--accent,#60a5fa) 10%,transparent);border-radius:3px;z-index:10;}
 /* ── 文件中转区：混合条目（文件/文本/图片）── */
 .stage-list{display:flex;flex-direction:column;gap:6px;}
 .stage-item{position:relative;display:flex;align-items:center;gap:8px;background:var(--fill-1);border-radius:6px;padding:7px 10px;cursor:pointer;transition:background 80ms;}

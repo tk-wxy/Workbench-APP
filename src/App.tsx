@@ -17,6 +17,7 @@ const STAGE_MAX = 20; // 中转区上限
 const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
+const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
@@ -314,6 +315,11 @@ export default function App() {
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
+  // 中转区鼠标框选多选（续70，纯前端）：在 .drop-area 空白处按下拖拽，扫过的条目实时选中
+  type LassoState = { active: boolean; origin: { x: number; y: number }; current: { x: number; y: number } };
+  const [lassoState, setLassoState] = useState<LassoState>({ active: false, origin: { x: 0, y: 0 }, current: { x: 0, y: 0 } });
+  const lassoStateRef = useRef(lassoState); lassoStateRef.current = lassoState; // 供 move/up 闭包读最新值（仿 stageSelRef 渲染时同步）
+  const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
   // 外部文件拖入窗口时的悬停高亮（HTML5 dragenter/dragleave，与 OLE IDropTarget 正交）
   const [fileDragOver, setFileDragOver] = useState(false);
   // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
@@ -386,7 +392,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; }); // 复位
+        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; }); // 复位
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -723,6 +729,69 @@ export default function App() {
     const rect = dropAreaRef.current?.getBoundingClientRect();
     if (rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) addToStage(ds.item);
   }, [addToStage]);
+  // ── 中转区框选多选（续70）──
+  // 实时计算选区矩形与各条目 DOM 的相交，命中者写入 stageSel；与显式多选共用同一套状态。
+  const computeLassoSelection = useCallback((origin:{x:number;y:number}, current:{x:number;y:number}) => {
+    const l = Math.min(origin.x, current.x), r = Math.max(origin.x, current.x);
+    const t = Math.min(origin.y, current.y), b = Math.max(origin.y, current.y);
+    const sel = new Set<number>();
+    // 列表/方格两种布局分别查不同选择器（move 时按当前 stageLayout 决定）
+    dropAreaRef.current?.querySelectorAll<HTMLElement>(stageLayout==="grid"?".stage-card":".stage-item").forEach(el => {
+      const rc = el.getBoundingClientRect();
+      if (rc.left <= r && rc.right >= l && rc.top <= b && rc.bottom >= t) { // 矩形相交
+        const id = Number(el.dataset.stageId);
+        if (!Number.isNaN(id)) sel.add(id);
+      }
+    });
+    setStageSel(sel);
+  }, [stageLayout]);
+  const handleLassoPointerDown = useCallback((e: React.PointerEvent) => {
+    lassoArmedRef.current = false;
+    if (e.button !== 0) return; // 仅左键
+    if (dragStateRef.current?.active) return; // 剪贴板卡片拖拽进行中不框选（复用现有 dragState 检查）
+    // 命中条目 / 操作按钮 / 工具栏则交给原有点击逻辑，不框选
+    if ((e.target as Element).closest(".stage-item,.stage-card,.stage-multi-toolbar,.stage-batch-bar,button")) return;
+    lassoArmedRef.current = true;
+    setLassoState({ active: false, origin: { x: e.clientX, y: e.clientY }, current: { x: e.clientX, y: e.clientY } });
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    // 不立即激活——等 move 超阈值
+  }, []);
+  const handleLassoPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!lassoArmedRef.current) return; // 未布防（如在条目上按下拖拽）
+    if (e.buttons === 0) return; // 未按下
+    const ls = lassoStateRef.current;
+    const cur = { x: e.clientX, y: e.clientY };
+    if (!ls.active) {
+      if (Math.hypot(cur.x - ls.origin.x, cur.y - ls.origin.y) <= LASSO_THRESHOLD_PX) return; // 未超阈值不激活
+      dropAreaRef.current?.classList.add("lasso-active"); // user-select:none + crosshair
+      setLassoState({ ...ls, active: true, current: cur });
+      setStageMultiselect(true);
+      computeLassoSelection(ls.origin, cur);
+      return;
+    }
+    setLassoState({ ...ls, current: cur }); // 触发重渲染刷新选区矩形
+    computeLassoSelection(ls.origin, cur);
+  }, [computeLassoSelection]);
+  const handleLassoPointerUp = useCallback((e: React.PointerEvent) => {
+    if (!lassoArmedRef.current) return;
+    lassoArmedRef.current = false;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    const ls = lassoStateRef.current;
+    if (!ls.active) {
+      // 未激活=纯点击空白（未拖出框选）：若当前有选择则取消（点空白处取消选择）。
+      // armed 已保证点的是空白区——条目/按钮在 down 阶段被排除、不会 armed，故不影响条目自身的 toggle/取走。
+      if (stageSelRef.current.size || stageMultiselectRef.current) {
+        setStageSel(new Set<number>());
+        setStageMultiselect(false);
+        stageAnchorRef.current = null;
+      }
+      return;
+    }
+    dropAreaRef.current?.classList.remove("lasso-active");
+    setLassoState(s => ({ ...s, active: false }));
+    // 框中条目 → 保持多选；框中空白（选区为空）→ 退出多选
+    if (stageSelRef.current.size === 0) setStageMultiselect(false);
+  }, []);
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
@@ -998,7 +1067,7 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
-      if(e.key==="Escape"){e.preventDefault();if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
@@ -1092,7 +1161,19 @@ export default function App() {
                 onClick={()=>setStageMultiselect(true)} title="进入多选模式">多选</button>
             )}
           </div>
-          <div className="drop-area" ref={dropAreaRef}>
+          <div className="drop-area" ref={dropAreaRef}
+            onPointerDown={handleLassoPointerDown} onPointerMove={handleLassoPointerMove}
+            onPointerUp={handleLassoPointerUp} onPointerCancel={handleLassoPointerUp}>
+            {lassoState.active && (() => {
+              const rect = dropAreaRef.current?.getBoundingClientRect();
+              if (!rect) return null;
+              return <div className="stage-lasso" style={{
+                left:   Math.min(lassoState.origin.x, lassoState.current.x) - rect.left + dropAreaRef.current!.scrollLeft,
+                top:    Math.min(lassoState.origin.y, lassoState.current.y) - rect.top + dropAreaRef.current!.scrollTop,
+                width:  Math.abs(lassoState.current.x - lassoState.origin.x),
+                height: Math.abs(lassoState.current.y - lassoState.origin.y),
+              }}/>;
+            })()}
             {filteredStage.length ? (stageLayout==="grid"
               ? <div className="stage-grid">{filteredStage.map((s,idx)=>{
                   const rawExt = (s.ext||s.items?.[0]?.ext||"").replace(/^\./,"");
@@ -1104,7 +1185,7 @@ export default function App() {
                     : s.type==="text" ? "文本"
                     : (isAnyDir ? "文件夹" : (rawExt ? `.${rawExt}` : "文件"));
                   return (
-                  <div key={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
@@ -1151,7 +1232,7 @@ export default function App() {
               : <div className="stage-list">{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||"文本"):s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"));
                   return (
-                  <div key={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
                     {s.type==="image"
                       ?<img className="stage-thumb" src={s.content} alt=""/>
                       :s.type==="file" && s.items?.[0]?.icon
