@@ -9,7 +9,7 @@ interface FileItem { path: string; name: string; ext: string; isImage: boolean; 
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
-interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; }
+interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX = 20; // 中转区上限
@@ -18,6 +18,7 @@ const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
+const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
 
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
@@ -54,7 +55,7 @@ function fileEntryToStage(f: FileEntry): StageItem {
   return { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage, icon: f.icon }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
 }
 function clipToStage(c: ClipItem): StageItem {
-  return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name };
+  return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path };
 }
 // 只写当前系统剪贴板（不粘贴、不隐藏 overlay），复用现成 copy_* 命令；剪贴板卡片与中转条目共用
 async function writeItemToClipboard(item: Pasteable) {
@@ -320,6 +321,9 @@ export default function App() {
   const [lassoState, setLassoState] = useState<LassoState>({ active: false, origin: { x: 0, y: 0 }, current: { x: 0, y: 0 } });
   const lassoStateRef = useRef(lassoState); lassoStateRef.current = lassoState; // 供 move/up 闭包读最新值（仿 stageSelRef 渲染时同步）
   const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
+  // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
+  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[] }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [] });
+  const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
   // 外部文件拖入窗口时的悬停高亮（HTML5 dragenter/dragleave，与 OLE IDropTarget 正交）
   const [fileDragOver, setFileDragOver] = useState(false);
   // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
@@ -471,7 +475,21 @@ export default function App() {
         const un8 = await listen("file-drag-leave", () => {
           fileDragLeaveTimer = setTimeout(() => setFileDragOver(false), 100);
         });
-        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8];
+        // 拖出完成（续71）：effect==="move" → 从中转区移除被拖出的条目（draggedIds 在拖出触发时已快照）；
+        // copy/取消(Esc)/none → 保留。overlay 已被 Rust 隐藏，此处只改状态 + 落盘，用户重按热键再呼出。
+        const un9 = await listen<string>("drag-out-done", async (event) => {
+          const dr = dragOutRef.current;
+          if (event.payload === "move" && dr.draggedIds.length) {
+            const ids = new Set(dr.draggedIds);
+            const next = stageRef.current.filter(s => !ids.has(s.id));
+            setStage(next);
+            setStageSel(new Set<number>());
+            setStageMultiselect(false);
+            if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+          }
+          dr.draggedIds = [];
+        });
+        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
@@ -792,6 +810,41 @@ export default function App() {
     // 框中条目 → 保持多选；框中空白（选区为空）→ 退出多选
     if (stageSelRef.current.size === 0) setStageMultiselect(false);
   }, []);
+  // ── 中转条目拖出（续71）──
+  // 条目上按下→拖动超阈值→emit drag-out-begin，Rust 侧 STA 线程跑 DoDragDrop（hide overlay 后接管鼠标）。
+  // 与框选互斥：down 在条目上时 .drop-area 的 lasso 不布防（closest 排除）；与左键取走互斥：未超阈值=普通点击。
+  const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button")) return; // 悬浮操作按钮区不触发拖出
+    suppressStageClickRef.current = false; // 每次新交互复位
+    const id = Number((e.currentTarget as HTMLElement).dataset.stageId);
+    if (Number.isNaN(id)) return;
+    // 多选状态下按下选中项 → 拖全部选中（ids 在 move 时按 stageSel 决定）；未超阈值松手仍走 onClick 点选
+    dragOutRef.current = { pressing: true, itemId: id, origin: { x: e.clientX, y: e.clientY }, draggedIds: [] };
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+  }, []);
+  const handleStagePointerMove = useCallback((e: React.PointerEvent) => {
+    const dr = dragOutRef.current;
+    if (!dr.pressing || dr.itemId === null) return;
+    if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < DRAG_OUT_THRESHOLD_PX) return;
+    dr.pressing = false; // 一次性触发
+    suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴
+    // 多选且按下项在选区内 → 拖全部选中项；否则 → 拖当前单项
+    const sel = stageSelRef.current;
+    const ids = (sel.size > 0 && sel.has(dr.itemId)) ? Array.from(sel) : [dr.itemId];
+    dr.draggedIds = ids;
+    const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
+      type: s.type,
+      content: s.content ?? null,
+      items: s.items?.map(f => f.path) ?? null,
+      orig_path: s.orig_path ?? null,
+    }));
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("start_drag_out", { items: dragItems })).catch(() => {});
+  }, []);
+  const handleStagePointerUp = useCallback((e: React.PointerEvent) => {
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    dragOutRef.current.pressing = false; // 未超阈值=普通点击，交给 onClick（取走/选中）
+  }, []);
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
@@ -952,6 +1005,7 @@ export default function App() {
   // plain（多选模式）：切换单项 + 更新锚点
   // plain（非多选模式）：取走粘贴（原行为）
   const handleStageClick = useCallback((e: React.MouseEvent, s: StageItem, idx: number) => {
+    if (suppressStageClickRef.current) { suppressStageClickRef.current = false; return; } // 拖出触发后抑制本次点击
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       if (!stageMultiselect) setStageMultiselect(true);
@@ -1185,13 +1239,13 @@ export default function App() {
                     : s.type==="text" ? "文本"
                     : (isAnyDir ? "文件夹" : (rawExt ? `.${rawExt}` : "文件"));
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴），拖出可拖到其他应用":"单击取走（粘贴到上个窗口），拖出可拖到其他应用")}>
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         <div className="stage-card-dot type-image"/>
                         {s.content
-                          ? <img className="cover" src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
+                          ? <img className="cover" draggable={false} src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
                           : <span style={{fontSize:28}}>🖼️</span>}
                       </div>
                     )}
@@ -1206,7 +1260,7 @@ export default function App() {
                         <div className="stage-card-dot type-file"/>
                         <div className="stage-card-icon-wrap">
                           {s.items?.[0]?.icon
-                            ? <img src={s.items[0].icon} alt="" style={{width:28,height:28,objectFit:"contain"}}/>
+                            ? <img src={s.items[0].icon} alt="" draggable={false} style={{width:28,height:28,objectFit:"contain"}}/>
                             : isAnyDir
                               ? <svg width="26" height="26" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
                               : <span style={{fontSize:22}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
@@ -1232,11 +1286,11 @@ export default function App() {
               : <div className="stage-list">{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||"文本"):s.type==="image"?"图片":(s.count!==1?`${s.count} 个文件`:(s.name||s.items?.[0]?.name||"文件"));
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} title={stageMultiselect?"单击选中 / 取消":(s.type==="file"?"单击取走（写回剪贴板并粘贴）":"单击取走（粘贴到上个窗口）")}>
                     {s.type==="image"
-                      ?<img className="stage-thumb" src={s.content} alt=""/>
+                      ?<img className="stage-thumb" draggable={false} src={s.content} alt=""/>
                       :s.type==="file" && s.items?.[0]?.icon
-                        ?<img className="stage-thumb" src={s.items[0].icon} alt=""/>
+                        ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
                         :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
                     <span className="stage-title">{label}</span>
                     {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}

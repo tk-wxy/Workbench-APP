@@ -21,6 +21,7 @@ npm run tauri build    # 打包
 - `src-tauri/src/lib.rs` — 主逻辑（窗口全屏、热键监听/焦点 light dismiss、托盘、Tauri setup/命令注册）
 - `src-tauri/src/clipboard.rs` — 剪贴板子系统（历史/粘贴/复制/janitor/监听；`clipboard::init` 封装 setup 时序）
 - `src-tauri/src/apps.rs` — 应用扫描 / `ExtractIconEx` 图标提取
+- `src-tauri/src/dragout.rs` — 中转区拖出（`DoDragDrop`：IDataObject + IDropSource；**主线程**跑 DoDragDrop[持鼠标 capture]、hide-after；source 侧，与 dragdrop.rs 拖入正交。详见 DECISIONS §18 含三条死胡同：「hide-before 丢 capture」/「WebView2 原生 `<img>` 拖拽抢手势 → 落地 download.png」/「裸 ShowWindow 绕过 tao 可见性缓存 → 下次 show 被 diff 成 no-op → 卡死」。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
 - `DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，本文件只放结论）
@@ -100,6 +101,8 @@ npm run tauri build    # 打包
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
 | 窗口底部细蓝缝 / 透明窗边异常 | `NCRENDERING_POLICY=DISABLED` 破坏透明边自画的；去阴影改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
 | WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后 WebView 填满外框、底边越过任务栏顶；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
+| 拖出后窗口呼不出 / 卡死须重启 | 裸 `ShowWindow` 改了可见性却没同步 tao 缓存 → 下次 `window.show()` 被 diff 成 no-op；收尾改走 Tauri `hide()`；见 DECISIONS §18 续71b |
+| 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢了手势（且无 `[dragout]` 日志）；卡片 + img 需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
 
 ---
 

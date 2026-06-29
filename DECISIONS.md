@@ -521,3 +521,33 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 **引擎抽象 + 切换**：`SEARCH_ENGINE: AtomicU8`（0 内置/1 everything），`set_search_engine`/`set_search_dirs` 命令（**持久化由前端 store 负责**，命令不写 store，同热键 idiom）。`search_files` 按引擎分发，**Everything 失败静默降级回内置**（保证永远有结果）。`get_index_status` 扩展回传 `engine`/`everythingAvailable`，前端据此：设置面板显示可用性提示、Ctrl+K 区分「Everything 未运行已回退」与「索引建立中」。`set_search_dirs` 改目录后 spawn 一次后台重建（不持锁遍历→原子替换），新目录马上可搜。
 - **前端**：设置面板新增「搜索」tab——引擎 seg（内置/Everything）+ 可用性提示 + 内置额外目录增删（文本输入，无 dialog 插件依赖）。store key `search-engine`/`search-dirs`，挂载时读 store→invoke 应用。
 - **验证**：`cargo check`/`clippy`（8 基线不变、零新增）+ `tsc` 零错误 + 内置打分临时单测 5 过。**Everything 真链路已验证（续57b，临时单测，Everything 后台运行中）**：`is_available()=true`、全盘查询返回结果（C:\ 与 D:\ 跨盘）、`reload()` 后仍可用；验后删测。前端设置切换/「重新检测」按钮属 GUI 未单独驱动实测。
+
+---
+
+## §18 drag-out：IDataObject + IDropSource + DoDragDrop STA 线程模型（续71）
+
+中转区「拖出」：用户在中转条目上按下并拖动超 `DRAG_OUT_THRESHOLD_PX=12` 后，overlay 隐藏、系统 OLE `DoDragDrop` 接管鼠标，用户拖到目标应用（Explorer/桌面/记事本/Paint…）松手完成传递。新模块 `src-tauri/src/dragout.rs`（source 侧），与 `dragdrop.rs`（拖入/接收侧）**正交**——前者按需 spawn、后者 setup 一次性注册，互不共享状态。
+
+**线程模型（铁律，续71 首版踩坑后修正）**：`DoDragDrop` **必须在主线程**调用——主线程①已 `OleInitialize`（STA，`dragdrop::register_drag_drop` setup 时做的、本模块复用、**不再 init/uninit** 以免破坏拖入 OLE 状态）；②拥有前台顶层窗口；③mousedown 起手已持有鼠标 capture（`SetCapture` 只对「前台窗口属于调用线程」的线程成功）。链路：前端 `invoke("start_drag_out", {items})`（命令，比 emit/listen 桥更可靠）→ 命令 spawn worker 线程（`build_formats` 重活：文件 IO/base64/解码，不堵主线程）→ `app.run_on_main_thread(do_drag_on_main)` 切回主线程 → 主线程构建 IDataObject + `DoDragDrop` 阻塞（其模态消息循环期间 tao 窗口仍收消息，同文件对话框 idiom）。DoDragDrop 阻塞在主线程，**不影响热键键态轮询线程**（独立线程，T9 待实测）。
+
+**💀 续71 首版死胡同（已修，别再走）**：首版把 `OleInitialize` + hide overlay + `DoDragDrop` 全塞进一个 worker `std::thread::spawn`、且 **hide 在 DoDragDrop 之前**。症状：界面消失但什么都没投放、日志无任何 `[dragout]` hr 行。根因双杀——① **hide 在 DoDragDrop 前 = 释放鼠标 capture**（隐藏持 capture 的窗口会丢 capture）；② **worker 线程无窗口、非前台** → DoDragDrop 起手 `SetCapture` 失败 → 拖拽根本不启动。教训：DoDragDrop 不是「自带 capture、与源窗口无关」——它起手要 SetCapture，**强依赖调用线程持有前台窗口 + 当前 capture**。
+
+**为什么 hide 在 DoDragDrop 之后**：overlay 全屏 topmost、覆盖所有 drop 目标，必须隐藏让用户能瞄准目标 app；但**不能在 DoDragDrop 前隐藏**（丢 capture）。故 DoDragDrop 起手（建立自己的 capture 窗口、steal 走 WebView2 的 capture）后，由一个 worker 线程延迟 `HIDE_AFTER_START_MS=60ms` 发**裸 `ShowWindow(hwnd, SW_HIDE)`**——DoDragDrop 的模态循环会泵这条跨线程消息把窗口隐藏（Tauri `window.hide()` 走主线程事件循环、此刻被 DoDragDrop 阻塞，故改用裸 ShowWindow），同时 emit `hotkey-hide` 同步前端 visible。隐藏后 cursor 落到底层 app、OLE 对其 IDropTarget 投放。DoDragDrop 自己的 capture 不随源窗口隐藏而失效，故续拖正常：`QueryContinueDrag` 见 LBUTTON 按下→S_OK，松开→`DRAGDROP_S_DROP`，Esc→`DRAGDROP_S_CANCEL`。完成后**不自动恢复**（用户重按热键再呼出）。**待 GUI 实测确认 60ms 足够 + run_on_main_thread 阻塞模态 DoDragDrop 与 tao 事件循环兼容**；诊断日志 `[dragout] start/DoDragDrop begin/DoDragDrop end hr=…` 三段定位卡点。
+
+**IDataObject 设计——存源字节、GetData 现 alloc**：`DragOutDataObject { formats: Vec<(u16 /*cfFormat*/, Vec<u8> /*源字节*/)> }`。OLE 协议下 `GetData` 出参 STGMEDIUM 的 HGLOBAL **所有权交调用方**（OLE 用完 `ReleaseStgMedium` 释放）。若直接交出自己持有的 HGLOBAL → 调用方释放后本对象 Drop 双重释放。故**存字节、每次 GetData 现 `GlobalAlloc` 拷一份**——本对象只持有 `Vec<u8>`（正常 drop），不碰 HGLOBAL 生命周期。`EnumFormatEtc`（Explorer 依赖）用系统 `SHCreateStdEnumFmtEtc` 从格式数组造标准枚举器，**免手写 IEnumFORMATETC**；其余方法（GetDataHere/SetData/DAdvise…）返回 `E_NOTIMPL`。`GlobalAlloc/Lock/Unlock` 用裸 `extern "system"`（isize 句柄，与 clipboard.rs 同 idiom，避开 windows-crate 版本签名猜测）；协议返回码（`DRAGDROP_S_*`/`DV_E_*`/`MK_LBUTTON`）手定义为 HRESULT 常量，避开 import 路径在不同版本的差异。
+
+**格式按条目类型暴露**：file/image 统一汇入**一份 CF_HDROP**（image 落地真 PNG；多条目合并）——复刻 `clipboard::write_cf_hdrop` 的 DROPFILES 内存布局（`fWide=1` UTF-16 双 \0 结尾），但只**构建 HGLOBAL 源字节、不写剪贴板**。仅当**唯一条目且为 image** 时额外暴露 **CF_DIB**（base64 PNG → RGBA → BITMAPINFOHEADER 40字节/32bpp/BI_RGB + 自底向上 BGRA 像素，供 Paint 等真位图目标）。无任何文件格式（纯单条 text）时暴露 **CF_UNICODETEXT**（UTF-16）。混合选区以文件为主、文本不并入（同 CF_HDROP §7 架构约束，混合无法合成单一 payload）。
+
+**image 临时文件**：优先 `orig_path`（`clip_images/` 持久原图、存在则直接引用、**绝不删**、保全分辨率），否则 base64 decode 落 `%TEMP%\workbench_dragout_<ns>.png`（`std::env::temp_dir()`，记入 temp 列表）。DoDragDrop 返回后 spawn 嵌套 detached 线程 `sleep(5s)` 再删 temp（给目标 app 异步拷贝留时间，不阻塞 drop 返回）。为支持原图，`StageItem` + `clipToStage` 续71 补 `orig_path` 字段透传（旧持久化条目无此字段→降级缩略图）。
+
+**前端**：`dragOutRef`（useRef，不触发重渲染）记录 pressing/itemId/origin/draggedIds；条目 `onPointerDown`（setPointerCapture + 读 `data-stage-id`）/`onPointerMove`（超阈值→按 `stageSel` 决定 ids[多选含按下项→全选 / 否则单项]→`invoke("start_drag_out",{items})`，置 `suppressStageClickRef` 防误触取走）/`onPointerUp`（未超阈值=普通点击，交 onClick）。与框选（续70，挂 `.drop-area`）天然互斥：down 在条目上时 lasso 的 `closest` 排除判定不布防。`drag-out-done` 监听：`effect==="move"` → 按 `draggedIds`（拖出触发时已快照，非 done 时重读 sel）从 `stageRef.current` 过滤移除 + 落盘 + 退出多选；copy/取消/none → 保留。
+
+**effect 语义**：`DROPEFFECT_MOVE`→移除（如拖到 Explorer 默认移动/部分目标按 Shift）；`DROPEFFECT_COPY`/`DRAGDROP_S_CANCEL`(Esc)/`DROPEFFECT_NONE`→保留。读 effect 用位与（`effect.0 & DROPEFFECT_MOVE.0`）而非等值，兼容目标回传组合 flag。
+
+**💀 续71b 两个 GUI 实测才暴露的根因（已修，GUI 实测通过 2026-06-29）**：
+
+- **① 落地成 `download.png`（64×64 图标 PNG）而非真实文件——WebView2 原生 HTML5 图片拖拽抢手势**。症状：拖文件/文件夹条目到别处，落地是个 `download.png`，且**那次没有任何 `[dragout]` 日志**（根本没走 Rust）。根因：中转卡片的图标/缩略图是 `<img src="data:image/png;base64,…">`，**WebView2(Chromium) 默认允许原生拖拽 `<img>`**，与我们基于 pointer 的 DoDragDrop **抢同一个手势**；原生那套赢时就把图片本身拖出，Chromium 给 data-URL 图片的默认落地名正是 `download.png`、尺寸=图标 64×64。这也曾被误判为「DoDragDrop 模态卡死」的诱因之一。**修复（纯前端三层）**：中转卡片容器 `draggable={false}` + `onDragStart={e=>e.preventDefault()}`（dragstart 冒泡，兜住所有子 `<img>`）；每个 `<img>` `draggable={false}`；CSS `.stage-card,.stage-item,…img{-webkit-user-drag:none;user-select:none;}`。手势从此只剩 pointer→DoDragDrop 一条路。
+
+- **② 拖出后整窗「卡死」、热键呼不出、须重启——裸 `ShowWindow` 绕过 tao 可见性缓存**。症状：一次干净成功的 DoDragDrop（`end → move` 日志齐全）之后，窗口再也呼不出，但后台线程仍在打日志（`foreground lost → auto hide`），重启才恢复。根因：tao（Tauri 底层）**内部缓存窗口可见性标志**，`window.show()/hide()` 是 **diff 缓存** 的（标志没变就 no-op、不调 `ShowWindow`）；而拖拽期/收尾我们用**裸 `ShowWindow(SW_HIDE)`** 隐藏 overlay（主线程那时阻塞在 DoDragDrop，Tauri hide 走不通）——裸 FFI **不更新 tao 缓存** → tao 仍以为窗口「可见」→ 下次热键 `window.show()` 被 diff 成 no-op → 窗口永不再现（表现为「卡死」，其实进程活着、只是 overlay 卡在隐藏态、tao 状态失同步；重启重置缓存才好）。**修复**：DoDragDrop 返回后（主线程已空闲）收尾隐藏**改走 Tauri `window.hide()`**（同步 tao 缓存为「隐藏」，下次 show 才能 diff 出变化真正显示）；拖拽中那个 60ms 裸 `ShowWindow` 不可避（主线程阻塞中）、保留，由收尾 Tauri hide() 把缓存兜回一致。**通用教训：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去，否则后续 Tauri show/hide 全被 diff 成 no-op。**
+
+**验证**：`cargo check --lib` 零 error + `cargo clippy --lib` 维持 8 基线 + `tsc --noEmit` 零错误（CC 自验）。**GUI 实测通过（2026-06-29）**：连续拖出多个 file + folder（含 `TimeForest`/`sdsd` 文件夹）到异地，全部真实落地、MOVE 后条目消失、`download.png` 不再出现、拖完不卡死、热键正常呼出。**仍未单独实测（功能已在，低风险）**：text→记事本（CF_UNICODETEXT）、image→Paint（CF_DIB）/Explorer（CF_HDROP）、Esc 取消、与原生拖入并发互不影响——后续顺手补测即可。
