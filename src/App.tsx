@@ -479,6 +479,26 @@ export default function App() {
         // copy/取消(Esc)/none → 保留。overlay 已被 Rust 隐藏，此处只改状态 + 落盘，用户重按热键再呼出。
         const un9 = await listen<string>("drag-out-done", async (event) => {
           const dr = dragOutRef.current;
+          // 续72：单个 text 条目拖出且 effect !== "move" 时，回退 copyAndPaste（写剪贴板 + 焦点交还 + Ctrl+V），等同点击取走。
+          // 判定依据（别改成「无论 effect 一律回退」，会双粘）：会原生插入文本的目标（Word/写字板）返回 move →
+          // 走下方 move 分支、native 已插入，此处不回退；返回 copy 的恰是 Chromium 输入框——它不原生插入（痼疾），
+          // 但拖拽过程已在输入框落了 caret，故回退 Ctrl+V 正好补上。即 copy⟺不原生插入，二者同源，故无双粘。
+          // 残留理论风险：非 Chromium 原生 app 若对文本返回 copy 且原生插入 → 双粘；实测 Word/写字板返回 move，未触发。
+          // Gemini 等 contenteditable dragover 不落 caret → 回退 Ctrl+V 也落空，属硬边界，无干净解（见会话分析）。
+          const draggedItems = dr.draggedIds.length
+            ? dr.draggedIds.map(id => stageRef.current.find(s => s.id === id)).filter((s): s is StageItem => !!s)
+            : [];
+          if (event.payload !== "move" && draggedItems.length === 1 && draggedItems[0].type === "text") {
+            const item = draggedItems[0];
+            copyAndPaste(item); // 复用现有粘贴出口（含焦点交还 + Ctrl+V）
+            const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
+            setStage(next);
+            setStageSel(new Set<number>());
+            setStageMultiselect(false);
+            if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+            dr.draggedIds = [];
+            return;
+          }
           if (event.payload === "move" && dr.draggedIds.length) {
             const ids = new Set(dr.draggedIds);
             const next = stageRef.current.filter(s => !ids.has(s.id));
