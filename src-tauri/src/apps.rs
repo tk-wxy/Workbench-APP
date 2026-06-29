@@ -277,7 +277,7 @@ fn should_skip_by_path(path: &str) -> bool {
 
 // ── 图标提取（SHGFI_SYSICONINDEX + ImageList_GetIcon，无 overlay）──
 
-fn extract_icon_base64(path: &str) -> Option<String> {
+pub fn extract_icon_base64(path: &str) -> Option<String> {
     let wide = str_to_wide(path);
     unsafe {
         let mut shfi: SHFILEINFOW = std::mem::zeroed();
@@ -372,7 +372,7 @@ fn encode_png_base64(width: u32, height: u32, rgba: &[u8]) -> Option<String> {
 
     let mut compressed = Vec::new();
     {
-        let mut enc = flate2::write::ZlibEncoder::new(&mut compressed, flate2::Compression::best());
+        let mut enc = flate2::write::ZlibEncoder::new(&mut compressed, flate2::Compression::fast());
         let row_bytes = (width * 4) as usize;
         for y in 0..height as usize {
             let start = y * row_bytes;
@@ -464,6 +464,16 @@ pub struct FileInfo {
     pub ext: String,
     /// Windows 系统图标，base64 PNG data URL（SHGetFileInfoW 提取，可为 None）
     pub icon: Option<String>,
+}
+
+/// 批量获取文件/文件夹的 Shell 图标（base64 PNG data URL），供搜索结果异步填充图标用。
+/// 返回 [(path, icon | null), ...]，顺序与入参一致；单次 COM init 覆盖整批，避免逐条初始化开销。
+#[tauri::command]
+pub fn get_file_icons(paths: Vec<String>) -> Vec<(String, Option<String>)> {
+    let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+    let result = paths.iter().map(|p| (p.clone(), extract_icon_base64(p))).collect();
+    if com_hr == 0 { unsafe { CoUninitialize(); } }
+    result
 }
 
 #[tauri::command]

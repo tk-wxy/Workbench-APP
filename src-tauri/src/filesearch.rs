@@ -38,6 +38,8 @@ pub struct FileSearchResult {
     pub name: String,
     pub ext: String,
     pub is_dir: bool,
+    /// Shell 图标 base64 PNG data URL；随查询结果同步返回，省去前端二次 IPC。
+    pub icon: Option<String>,
 }
 
 static FILE_INDEX: OnceLock<Mutex<Vec<IndexEntry>>> = OnceLock::new();
@@ -273,20 +275,68 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
             name: e.name.clone(),
             ext: e.ext.clone(),
             is_dir: e.is_dir,
+            icon: None, // 由 enrich_with_icons 统一填充
         })
         .collect()
 }
 
-/// 查询命令：按当前引擎分发。Everything 不可用时静默降级回内置（保证永远有结果）。
+/// extension 去重提图标：同扩展名 shell 图标相同，只提取一次；.exe/.lnk 按路径各取（各有独立图标）；
+/// 文件夹共用一个代表路径。单次 COM init 在 extract_icon_base64 内部由 apps::get_file_icons 管理。
+fn enrich_with_icons(mut results: Vec<FileSearchResult>) -> Vec<FileSearchResult> {
+    if results.is_empty() {
+        return results;
+    }
+    // cache_key → 代表路径（第一次遇到该类型时记录）
+    let mut key_to_rep: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for r in &results {
+        let key = if r.is_dir {
+            "::dir".to_string()
+        } else if r.ext == "exe" || r.ext == "lnk" {
+            r.path.clone() // 可执行文件/快捷方式图标各不同，按路径区分
+        } else {
+            format!("::{}", r.ext)
+        };
+        key_to_rep.entry(key).or_insert_with(|| r.path.clone());
+    }
+    // 批量提取（去重后的代表路径）
+    let rep_paths: Vec<String> = key_to_rep.values().cloned().collect();
+    let pairs = crate::apps::get_file_icons(rep_paths);
+    let path_to_icon: std::collections::HashMap<String, Option<String>> = pairs.into_iter().collect();
+    // key → icon
+    let key_to_icon: std::collections::HashMap<String, Option<String>> = key_to_rep
+        .into_iter()
+        .map(|(k, rep)| (k, path_to_icon.get(&rep).cloned().flatten()))
+        .collect();
+    // 回填
+    for r in &mut results {
+        let key = if r.is_dir {
+            "::dir".to_string()
+        } else if r.ext == "exe" || r.ext == "lnk" {
+            r.path.clone()
+        } else {
+            format!("::{}", r.ext)
+        };
+        r.icon = key_to_icon.get(&key).cloned().flatten();
+    }
+    results
+}
+
+/// 查询命令：按当前引擎分发，结果附带 Shell 图标（extension 去重，同类只提取一次）。
+/// Everything 不可用时静默降级回内置（保证永远有结果）。
 #[tauri::command]
 pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
-    if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
+    let results = if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
         match crate::everything::query(&query, limit.min(QUERY_LIMIT_CAP)) {
-            Ok(results) => return results,
-            Err(e) => eprintln!("[everything] 查询失败，降级内置: {e}"), // 降级走内置
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[everything] 查询失败，降级内置: {e}");
+                builtin_search(&query, limit)
+            }
         }
-    }
-    builtin_search(&query, limit)
+    } else {
+        builtin_search(&query, limit)
+    };
+    enrich_with_icons(results)
 }
 
 /// 索引 / 引擎状态查询（前端显示「建立中…」「Everything 未运行」用）。
