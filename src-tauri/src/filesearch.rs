@@ -12,6 +12,7 @@
 // - search_files 按引擎分发：Everything 不可用（未装/未运行）时静默降级回内置，保证永远有结果。
 // - 内置扫描范围 = 整个 %USERPROFILE% + 用户可配置额外根目录（set_search_dirs），改目录即触发一次后台重建。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -45,6 +46,10 @@ pub struct FileSearchResult {
 static FILE_INDEX: OnceLock<Mutex<Vec<IndexEntry>>> = OnceLock::new();
 /// 用户可配置的额外扫描根目录（如 D:\），与 %USERPROFILE% 合并。
 static EXTRA_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+/// 图标预热缓存：key（扩展名小写 或 文件夹哨兵）→ Shell 图标 base64（提取失败为 None）。
+/// 与 FILE_INDEX 同样走双缓冲原子替换——耗时的 Shell 提取在后台线程建好整张表后一次性换入。
+/// 查询时只读此表回填 icon，省去 search_files 现场调 Shell API 的开销（见 DECISIONS §17 图标预热）。
+static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 /// 当前搜索引擎：0=内置自建索引，1=Everything。
 static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
 
@@ -146,17 +151,24 @@ fn build_index(dirs: &[PathBuf]) -> Vec<IndexEntry> {
 pub fn start_index_worker(app: AppHandle) {
     FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
     EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
+    ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(INITIAL_DELAY_SECS));
         loop {
             let dirs = scan_dirs();
             let started = Instant::now();
             let new_index = build_index(&dirs); // 耗时部分，不持锁
+            let new_icons = build_icon_cache(&new_index); // 遍历后、替换前批量预热图标（后台线程，不持锁）
             let count = new_index.len();
             if let Some(lock) = FILE_INDEX.get() {
                 if let Ok(mut guard) = lock.lock() {
                     *guard = new_index; // 原子替换（瞬间临界区）
                 } // 立即出锁
+            }
+            if let Some(lock) = ICON_CACHE.get() {
+                if let Ok(mut guard) = lock.lock() {
+                    *guard = new_icons; // 图标缓存同样原子替换
+                }
             }
             eprintln!(
                 "[fileindex] ready: {} entries ({:?})",
@@ -280,48 +292,66 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
         .collect()
 }
 
-/// extension 去重提图标：同扩展名 shell 图标相同，只提取一次；.exe/.lnk 按路径各取（各有独立图标）；
-/// 文件夹共用一个代表路径。单次 COM init 在 extract_icon_base64 内部由 apps::get_file_icons 管理。
-fn enrich_with_icons(mut results: Vec<FileSearchResult>) -> Vec<FileSearchResult> {
-    if results.is_empty() {
-        return results;
+/// 文件夹图标的哨兵 key——文件夹无扩展名（ext=""），用独立 key 避免与「无扩展名文件」碰撞。
+/// 含 NUL 字符，永不与真实扩展名冲突。
+const DIR_ICON_KEY: &str = "\0dir";
+
+/// 图标缓存的归类 key（提取与回填两端共用，保证一致）：
+/// - 文件夹 → 哨兵（共用一个文件夹图标）；
+/// - .exe/.lnk → **按路径区分**（每个可执行文件/快捷方式都带各自的内嵌图标，不能按扩展名合并，
+///   否则搜索结果里所有 exe 显示同一图标——这正是续68 首版的缺陷）；
+/// - 其余 → 小写扩展名（同扩展名 Shell 图标相同，去重共用）。
+fn icon_key(is_dir: bool, ext: &str, path: &str) -> String {
+    if is_dir {
+        DIR_ICON_KEY.to_string()
+    } else if ext == "exe" || ext == "lnk" {
+        path.to_string()
+    } else {
+        ext.to_lowercase()
     }
-    // cache_key → 代表路径（第一次遇到该类型时记录）
-    let mut key_to_rep: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for r in &results {
-        let key = if r.is_dir {
-            "::dir".to_string()
-        } else if r.ext == "exe" || r.ext == "lnk" {
-            r.path.clone() // 可执行文件/快捷方式图标各不同，按路径区分
-        } else {
-            format!("::{}", r.ext)
-        };
-        key_to_rep.entry(key).or_insert_with(|| r.path.clone());
+}
+
+/// 索引建好后批量提图标（图标预热）：按「文件夹 / 扩展名」去重，每类只对一个代表路径提一次。
+/// 返回 key → 图标（提取失败存 None，仍保留 key——便于「试过但无图标」与「未试过」区分）。
+/// ⚠️ 耗时（Shell API），但只在后台线程、遍历完成后、替换全局索引前调用，绝不碰前台查询路径。
+/// 单次 COM init 由 apps::get_file_icons 内部统管整批。
+fn build_icon_cache(entries: &[IndexEntry]) -> HashMap<String, Option<String>> {
+    // key → 代表路径（第一次遇到该类型时记录）
+    let mut key_to_rep: HashMap<String, String> = HashMap::new();
+    for e in entries {
+        key_to_rep
+            .entry(icon_key(e.is_dir, &e.ext, &e.path))
+            .or_insert_with(|| e.path.clone());
     }
-    // 批量提取（去重后的代表路径）
-    let rep_paths: Vec<String> = key_to_rep.values().cloned().collect();
-    let pairs = crate::apps::get_file_icons(rep_paths);
-    let path_to_icon: std::collections::HashMap<String, Option<String>> = pairs.into_iter().collect();
-    // key → icon
-    let key_to_icon: std::collections::HashMap<String, Option<String>> = key_to_rep
+    // 批量提取去重后的代表路径
+    let reps: Vec<String> = key_to_rep.values().cloned().collect();
+    let path_to_icon: HashMap<String, Option<String>> =
+        crate::apps::get_file_icons(reps).into_iter().collect();
+    // 组装 key → icon（保留所有 key，值取代表路径的提取结果）
+    key_to_rep
         .into_iter()
-        .map(|(k, rep)| (k, path_to_icon.get(&rep).cloned().flatten()))
-        .collect();
-    // 回填
+        .map(|(key, rep)| (key, path_to_icon.get(&rep).cloned().flatten()))
+        .collect()
+}
+
+/// 从预热缓存回填查询结果的 icon——纯内存查表，无任何 Shell API 调用。
+/// 缓存未建立（极短启动窗口）或某 key 未命中时 icon=None，前端已有降级处理。
+fn fill_icons_from_cache(mut results: Vec<FileSearchResult>) -> Vec<FileSearchResult> {
+    let guard = match ICON_CACHE.get().and_then(|l| l.lock().ok()) {
+        Some(g) => g,
+        None => return results, // 缓存尚未建立：全部降级 icon=None
+    };
     for r in &mut results {
-        let key = if r.is_dir {
-            "::dir".to_string()
-        } else if r.ext == "exe" || r.ext == "lnk" {
-            r.path.clone()
-        } else {
-            format!("::{}", r.ext)
-        };
-        r.icon = key_to_icon.get(&key).cloned().flatten();
+        r.icon = guard
+            .get(&icon_key(r.is_dir, &r.ext, &r.path))
+            .cloned()
+            .flatten();
     }
     results
 }
 
-/// 查询命令：按当前引擎分发，结果附带 Shell 图标（extension 去重，同类只提取一次）。
+/// 查询命令：按当前引擎分发，结果从预热缓存回填 Shell 图标（纯内存查表，不调 Shell API）。
+/// 图标在后台建索引时已批量预提（build_icon_cache），查询路径只剩内存查找。
 /// Everything 不可用时静默降级回内置（保证永远有结果）。
 #[tauri::command]
 pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
@@ -336,7 +366,7 @@ pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
     } else {
         builtin_search(&query, limit)
     };
-    enrich_with_icons(results)
+    fill_icons_from_cache(results)
 }
 
 /// 索引 / 引擎状态查询（前端显示「建立中…」「Everything 未运行」用）。
@@ -388,12 +418,19 @@ pub fn set_search_dirs(dirs: Vec<String>) {
     }
     // 立刻在后台重建一次（不持锁遍历，建完原子替换），让新目录马上可搜。
     FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+    ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(|| {
         let dirs = scan_dirs();
         let new_index = build_index(&dirs);
+        let new_icons = build_icon_cache(&new_index); // 同步预热图标，与索引一起换入
         if let Some(lock) = FILE_INDEX.get() {
             if let Ok(mut guard) = lock.lock() {
                 *guard = new_index;
+            }
+        }
+        if let Some(lock) = ICON_CACHE.get() {
+            if let Ok(mut guard) = lock.lock() {
+                *guard = new_icons;
             }
         }
     });

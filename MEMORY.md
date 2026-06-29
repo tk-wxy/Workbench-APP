@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-06-28（续58：搜索框上移+目录路径；续59：悬浮操作按钮；续60：操作按钮 ✓ 反馈；续61：中转区双布局；续62：方格卡片对齐 app-tile；续63：中转区文件/文件夹真实 Windows 图标；续64：呼出默认搜索设置；续65：中转卡片视觉重设计；续65e：卡片缩至 80px 对齐启动台；续66f-i：中转卡片精调+加高+悬浮栏复制/删除两键 GUI 通过）
+> **最后更新**：2026-06-29（续58：搜索框上移+目录路径；续59：悬浮操作按钮；续60：操作按钮 ✓ 反馈；续61：中转区双布局；续62：方格卡片对齐 app-tile；续63：中转区文件/文件夹真实 Windows 图标；续64：呼出默认搜索设置；续65：中转卡片视觉重设计；续65e：卡片缩至 80px 对齐启动台；续66f-i：中转卡片精调+加高+悬浮栏复制/删除两键 GUI 通过；续67：增强搜索文件结果 Shell 原生图标同步返回；续68：图标提取前移到索引路径预热缓存，查询路径零 Shell 调用）
 >
 > **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
@@ -14,6 +14,8 @@
 ## 0. 当前状态 / 下一步 〔快照〕
 
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」；**续52 起解耦 janitor 自动管上限**——周期孤儿清理 + 总量封顶 500MB，不进 `CLIPBOARD_LOCK`；**续53 起图片粘贴按目标窗口类三分叉**——桌面→SHFileOperation 落地 / 资源管理器文件夹(CabinetWClass·ExploreWClass)→CF_HDROP 落地真 PNG（大图复用已落盘原图、零解码）/ 其余 app→位图，消除「文件夹粘不进」+「大图粘贴卡顿」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索四区联动**（输入即同时过滤启动台/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）+ **启动器收藏托盘**（手动策展持久化，app picker，.lnk 拖入提取图标存 kind:"app"，S3a/S3b/S3c GUI 实测通过 2026-06-25）+ **增强搜索接入文件系统**（Ctrl+K 分两组 Tier1+Tier2，文件结果分隔线+防抖+未就绪提示，filesearch.rs 后台索引，S4a/S4b/S4c GUI 实测通过 2026-06-25）+ **自定义热键 V2**（V2-1：`parse_combo` 表驱动任意组合，53 条主键，三键 GUI 实测通过；V2-2：正式文本输入 UI + Enter 触发 + 格式提示 + 底栏动态 kbd + `changeHotkey` 类型放宽为 string + 清理 PROBE/V21-TEMP，**全部 GUI 实测通过（2026-06-25）**）
+- **新增（续68，仅 `filesearch.rs`，零前端 / 零 API 改动）——图标提取从查询路径前移到索引路径（图标预热缓存）**：原 `search_files` 每次查询现场调 Shell API（`SHGetFileInfoW`）提图标（虽 extension 去重，50 条仍叠 10-15 次提取在查询延迟上）。本次把提取时机前移到后台建索引时。① 新增静态 `ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>>`，key=扩展名小写(无点) 或 文件夹哨兵 `\0dir`（NUL 哨兵避免与无扩展名文件 ext="" 碰撞），value=base64 图标（失败存 None 仍保留 key）；② 新增 `build_icon_cache(&[IndexEntry])`——在后台 `build_index` 遍历完成后、替换全局索引前调用，按 key 去重、每类对一个代表路径调一次 `apps::get_file_icons`（单次 COM init 整批），与索引一起**双缓冲原子替换**（耗时 Shell 提取不持锁，守 §17 不变量）；③ `enrich_with_icons` 删除，`search_files` 改 `fill_icons_from_cache` 纯内存查表回填 → **查询路径零 Shell API 调用**；④ Everything 路径复用同一表（内置索引线程总会建表、与引擎无关），冷启动表空时 icon=None 降级，不为 Everything 单独触发提取。**续68b 修正缺陷**：首版把 .exe/.lnk 也并入扩展名归类 → 搜索结果不同 exe 显示同一图标（用户实测发现），已回退为 `icon_key` 对 .exe/.lnk **按完整路径区分**（同续67 旧行为）、其余仍按扩展名去重；index 时对每个 distinct exe/lnk 路径各提一次（appdata/node_modules 已剪枝，数量有限，后台线程零前台感知）。**取舍**：Everything 路径的 exe 若不在内置索引内 → 缓存无此 key → icon=None 走前端 emoji 降级（非错误图标，可接受）。**验证（CC 自验）**：`cargo clippy --lib` 8 基线不变；首版临时 `#[test]`（key 集合==扩展名集合）通过后已删。**GUI 未实测**（图标有无本身是续67 已有功能，本次仅移提取时机 + 修复 exe/lnk 归类）。文件：`src-tauri/src/filesearch.rs`（+ `everything.rs` 一行注释）/ `DECISIONS §17 图标预热`。
+- **新增（续67，Rust + 前端）——增强搜索文件结果显示 Windows 系统原生图标（GUI 实测通过，2026-06-29）**：图标与搜索结果同步返回（单次 IPC），无中间 emoji 占位跳变。① `apps.rs`：`extract_icon_base64` 改 pub；`Compression::best()` → `Compression::fast()`（PNG 编码 3-5× 加速，32×32 图标无需最高压缩率）；新增 `get_file_icons` 批量命令（`lib.rs` 注册）。② `filesearch.rs`：`FileSearchResult` 加 `icon: Option<String>` 字段；新增 `enrich_with_icons()`——extension 去重（`.exe/.lnk` 按路径独立提取、文件夹共用一个代表、其余同扩展名只提一次代表路径），调用 `crate::apps::get_file_icons` 批量提取后回填；`search_files` 重构去掉 Everything early-return，两引擎统一走 `enrich_with_icons`。③ `everything.rs`：构造 `FileSearchResult` 补 `icon:None`。④ `App.tsx`：`fsResults` 类型加 `icon?`，`EnhResult` fs 变体加 `icon?`，`enhResults` memo 透传 icon，渲染直接用 `r.icon`；删掉上一轮的 `fsIcons` state + 异步 fetch effect（两步渲染是不流畅根因）。
 - **新增（续66f/g/h/i，纯前端 CSS+JSX，零 Rust 改动）——中转卡片视觉精调 + 悬浮栏精简，全部 GUI 实测通过（2026-06-28）**：
   - **续66f（CSS 数值精调对齐启动台节奏）**：逐项缩小 `.stage-card*` 尺寸——卡片圆角 14→10px；文件图标容器 36→32px、圆角 8→7px；标签区 padding 下 6→5px、gap 1→0px，name 10.5→10px、meta 9.5→9px 各加 `line-height:1.4`；悬浮操作栏圆角 14→10px、gap 6→4px、底色 rgba(40,40,40,.88)→rgba(30,30,30,.90)（height:36px 锁死=label 实际高 ≈4+14+12.6+5），按钮 28→24px、圆角 7→6px、font 13→11px。**保留 `var(--*)` 主题色变量未硬编码**（不破坏暗色模式）。
   - **续66g（内容区加高对齐 hover 轮廓）**：缩略图/图片 cover/文本预览高度 48→60px，使卡片总高 ≈96px 对齐启动台 `.app-tile` hover 轮廓（grid `align-items:stretch` 拉伸到 2 行标签高 ≈95.6px）；信息栏（label）与悬浮操作栏高度不变。
@@ -179,7 +181,8 @@ src-tauri/Cargo.toml
 | `copy_files_to_clipboard` | 只复制文件 CF_HDROP 到当前剪贴板（同上）|
 | `reveal_in_explorer` | 在资源管理器中高亮目标文件（/select,path）|
 | `trigger_screenshot` | hide overlay + emit hotkey-hide + 150ms + enigo Win+Shift+S |
-| `search_files` | 文件系统搜索：纯内存子串打分查询后台索引（µs 级，限 50 条）|
+| `search_files` | 文件系统搜索：纯内存子串打分查询后台索引（µs 级，限 50 条）；结果附带 Shell 图标（extension 去重后批量提取，随结果同步返回）|
+| `get_file_icons` | 批量获取文件/文件夹 Shell 图标（base64 PNG data URL），单次 COM init 覆盖整批；search_files 内部已调用，前端也可单独用 |
 | `get_index_status` | 返回搜索状态 `{ready,count,engine,everythingAvailable}`（前端显示「建立中…」/「Everything 未运行」用）|
 | `set_search_engine` | 切换搜索引擎（"builtin"/"everything"）；持久化前端 store 负责，命令不写 store |
 | `set_search_dirs` | 设置内置引擎额外扫描根目录并触发一次后台重建；持久化前端 store 负责 |
