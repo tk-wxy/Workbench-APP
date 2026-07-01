@@ -58,6 +58,7 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .launch-clone img{width:75%;height:75%;object-fit:contain;}
 .launch-clone span{font-size:20px;font-weight:600;color:var(--text2);}
 @keyframes launch-pop{from{transform:scale(1);opacity:1;}to{transform:scale(1.4);opacity:0;}}
+.drag-layer{position:fixed;inset:0;z-index:100003;pointer-events:none;overflow:visible;}
 
 /* ── 顶栏 ── */
 .top-bar{display:flex;align-items:center;height:64px;padding:0 24px;gap:20px;border-bottom:1px solid var(--border);flex-shrink:0;}
@@ -95,7 +96,7 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 /* 拖拽期间只禁止文字选中，不强制抓手光标（WebView2 下 grabbing 会带来卡顿感） */
 .launcher-reordering,.launcher-reordering *{user-select:none!important;-webkit-user-select:none!important;}
 /* ghost 跟手卡片：fixed 悬浮副本，保持按下时的抓取偏移，像原卡片被拿起来 */
-.launcher-drag-ghost{position:fixed;pointer-events:none;z-index:100003;box-sizing:border-box;transform:scale(1.05);transform-origin:center;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;background:color-mix(in srgb,var(--fill-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:none;opacity:0.72;will-change:left,top,transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
+.launcher-drag-ghost{position:absolute;pointer-events:none;box-sizing:border-box;transform:scale(1.05);transform-origin:center;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;background:color-mix(in srgb,var(--fill-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:none;opacity:0.72;will-change:left,top,transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
 .launcher-drag-ghost .app-tile-icon{background:var(--fill-1);}
 .launcher-drag-ghost .app-tile-label{color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,0.35);}
 @keyframes launcher-ghost-pop{from{opacity:0;transform:scale(.92);}to{opacity:.72;transform:scale(1.05);}}

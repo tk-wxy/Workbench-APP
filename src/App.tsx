@@ -315,6 +315,7 @@ export default function App() {
   useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
+  const dragLayerRef = useRef<HTMLDivElement | null>(null); // 顶层拖拽预览层，承载 DOM clone ghost
   const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
   // 中转区鼠标框选多选（续70，纯前端）：在 .drop-area 空白处按下拖拽，扫过的条目实时选中
   type LassoState = { active: boolean; origin: { x: number; y: number }; current: { x: number; y: number } };
@@ -776,19 +777,21 @@ export default function App() {
         ghostEl.classList.remove("selected", "launcher-dragging-src");
         ghostEl.classList.add("launcher-drag-ghost");
         ghostEl.querySelectorAll("img").forEach(img => { img.draggable = false; });
+        const ghostHost = dragLayerRef.current ?? document.body;
+        const inDragLayer = ghostHost === dragLayerRef.current;
         Object.assign(ghostEl.style, {
-          position: "fixed",
+          position: inDragLayer ? "absolute" : "fixed",
           left: `${me.clientX - grabOffsetX}px`,
           top: `${me.clientY - grabOffsetY}px`,
           width: `${srcStartRect.width}px`,
           height: `${srcStartRect.height}px`,
-          zIndex: "100003",
+          zIndex: inDragLayer ? "" : "100003",
           display: "flex",
           opacity: "0.72",
           visibility: "visible",
           pointerEvents: "none",
         });
-        document.body.appendChild(ghostEl);
+        ghostHost.appendChild(ghostEl);
         srcEl.classList.add("launcher-dragging-src");
         document.getElementById("overlay")?.classList.add("launcher-reordering");
       }
@@ -1787,6 +1790,8 @@ export default function App() {
           : <span>{launchAnim.name[0]}</span>}
       </div>
     )}
+    {/* 顶层拖拽预览层：承载 DOM clone ghost，集中管理层级，避免散挂 body 后再靠单个节点抢 z-index */}
+    <div className="drag-layer" ref={dragLayerRef}/>
     {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
     {ctxMenu && (
       <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
