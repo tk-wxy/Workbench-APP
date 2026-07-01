@@ -325,11 +325,12 @@ export default function App() {
   const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[] }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [] });
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
   // 启动台排序拖拽（续74重写）：全 DOM 直操作 + window 全局监听，绕过 React 渲染保证跟手
-  // state 只用于触发 ghost 内容渲染（激活时一次 setState），位置/class 全走 ref+DOM
-  const [launcherDragSource, setLauncherDragSource] = useState<{ id: number; idx: number } | null>(null);
+  // state 只用于触发 ghost 内容渲染（激活时一次 setState，含首帧鼠标坐标以消除左上角闪现），位置/class 全走 ref+DOM
+  const [launcherDragSource, setLauncherDragSource] = useState<{ id: number; idx: number; x: number; y: number } | null>(null);
   const launcherGhostRef = useRef<HTMLDivElement | null>(null); // ghost div DOM ref
   const launcherDragActiveRef = useRef(false); // 是否已超阈值激活
   const launcherDragInsertRef = useRef(-1); // 当前插入位置，-1=未激活
+  const launcherLandingRef = useRef(false); // 松手回落动画进行中：守卫此窗口内不被新拖拽采集脏几何
   const suppressLaunchClickRef = useRef(false); // 激活排序拖拽后抑制随之而来的 onClick
   // 外部文件拖入窗口时的悬停高亮（HTML5 dragenter/dragleave，与 OLE IDropTarget 正交）
   const [fileDragOver, setFileDragOver] = useState(false);
@@ -712,14 +713,15 @@ export default function App() {
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [launchApp]);
 
-  // ── 启动台排序拖拽（续74 全量重写）──
-  // 核心原则：ghost 位置 / insert 指示线全走 DOM 直操作，零 React 渲染，彻底保证跟手。
-  // React state 仅用于：① 触发 ghost 内容渲染（激活时一次 setLauncherDragSource）②清除 ghost（up 时）。
-  // window 级 pointermove/up 监听（在 pointerdown 时动态注册+清理），规避 setPointerCapture 与
-  // pointer-events 等坑；draggable={false} + user-select:none（CSS）消灭禁止图标与文字选中。
+  // ── 启动台排序拖拽（续75 打磨：Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起）──
+  // 核心原则：ghost 位置 / 让路 transform 全走 DOM 直操作，零 React 渲染，彻底保证跟手。
+  // 让路用 FLIP：激活时采集各格「固定原始槽位坐标」，之后插入判断 + 让路位移都基于这份快照
+  //（绝不用实时 rect——格子 transform 移动后 getBoundingClientRect 会含位移、污染插入判断）。
+  // React state 仅用于：① 触发 ghost 内容渲染（激活时一次 setLauncherDragSource，含首帧坐标）②清除 ghost。
   const handleLauncherPointerDown = useCallback((e: React.PointerEvent, id: number) => {
     if (e.button !== 0) return;
     if (search.trim()) return; // 过滤态禁排序（filteredLauncher 是子集）
+    if (launcherLandingRef.current) return; // 上一次松手回落动画未结束，忽略新起手（防脏几何）
     const srcIdx = launcherRef.current.findIndex(x => x.id === id);
     if (srcIdx === -1) return;
     e.preventDefault(); // 阻止默认（防文字选中、防系统拖拽光标）
@@ -729,65 +731,96 @@ export default function App() {
     launcherDragInsertRef.current = srcIdx;
     suppressLaunchClickRef.current = false;
 
-    // 按行扫描计算插入位置（grid 4 列，左右半区决定插入前/后）
+    // FLIP 快照：激活时采集，之后固定不变（同一次 pointerdown 闭包内 onMove/onUp 共享）
+    let tiles: HTMLElement[] = [];
+    let rects: { left: number; top: number; width: number; height: number }[] = [];
+
+    // 按固定槽位快照判断鼠标落在哪个插入点（0..n，插入到第 idx 个之前）
     const calcInsert = (cx: number, cy: number): number => {
-      const tiles = Array.from(document.querySelectorAll<HTMLElement>(".app-grid .app-tile"));
-      for (let i = 0; i < tiles.length; i++) {
-        const r = tiles[i].getBoundingClientRect();
+      for (let i = 0; i < rects.length; i++) {
+        const r = rects[i];
         if (cy < r.top) return i; // 鼠标在本行上方 → 插入本行第一项前
-        if (cy <= r.bottom) {
+        if (cy <= r.top + r.height) {
           if (cx < r.left + r.width / 2) return i; // 左半区 → 插入此格前
           // 右半区 → 继续找下一格
         }
       }
-      return launcherRef.current.length;
+      return rects.length;
     };
 
-    const updateInsert = (idx: number) => {
-      if (launcherDragInsertRef.current === idx) return;
-      launcherDragInsertRef.current = idx;
-      document.querySelectorAll<HTMLElement>(".app-tile.launcher-insert-before")
-        .forEach(el => el.classList.remove("launcher-insert-before"));
-      const tiles = Array.from(document.querySelectorAll<HTMLElement>(".app-grid .app-tile"));
-      tiles[idx]?.classList.add("launcher-insert-before");
+    // 让路：源被抓走后，非源格子平移填补，为落点 target 槽腾出空位（transform 纯视觉、不改 grid）
+    const applyShift = (insertIdx: number) => {
+      const target = insertIdx > srcIdx ? insertIdx - 1 : insertIdx; // 源在「去源序列」里的落点槽
+      for (let i = 0; i < tiles.length; i++) {
+        if (i === srcIdx) continue; // 源由 ghost 代替、不参与让路
+        const k = i < srcIdx ? i : i - 1;        // 该格在去源序列里的顺序
+        const newSlot = k < target ? k : k + 1;   // 跳过 target 槽 → 让出空位
+        const dx = rects[newSlot].left - rects[i].left;
+        const dy = rects[newSlot].top - rects[i].top;
+        tiles[i].style.transform = dx || dy ? `translate(${dx}px,${dy}px)` : "";
+      }
     };
 
     const onMove = (me: PointerEvent) => {
       if (!launcherDragActiveRef.current) {
         if (Math.hypot(me.clientX - originX, me.clientY - originY) < 8) return;
-        // 超阈值激活
+        // 超阈值激活：先采集固定槽位快照（此刻所有格都在原位、未 transform）
+        tiles = Array.from(document.querySelectorAll<HTMLElement>(".app-grid .app-tile"));
+        rects = tiles.map(t => { const r = t.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; });
+        tiles.forEach(t => t.classList.add("launcher-shift")); // 建立让路过渡
         launcherDragActiveRef.current = true;
         suppressLaunchClickRef.current = true;
         srcEl.classList.add("launcher-dragging-src");
         document.getElementById("overlay")?.classList.add("launcher-reordering");
-        setLauncherDragSource({ id, idx: srcIdx }); // 触发一次 ghost 渲染
+        setLauncherDragSource({ id, idx: srcIdx, x: me.clientX, y: me.clientY }); // 首帧即定位到鼠标
       }
       // ghost 跟手：直接写 DOM style，零 React 渲染
       const ghost = launcherGhostRef.current;
       if (ghost) { ghost.style.left = me.clientX + "px"; ghost.style.top = me.clientY + "px"; }
-      updateInsert(calcInsert(me.clientX, me.clientY));
+      const ins = calcInsert(me.clientX, me.clientY);
+      if (ins !== launcherDragInsertRef.current) {
+        launcherDragInsertRef.current = ins;
+        applyShift(ins);
+      }
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
-      srcEl.classList.remove("launcher-dragging-src");
-      document.getElementById("overlay")?.classList.remove("launcher-reordering");
-      document.querySelectorAll<HTMLElement>(".app-tile.launcher-insert-before")
-        .forEach(el => el.classList.remove("launcher-insert-before"));
 
-      if (!launcherDragActiveRef.current) return; // 短按 → 不重排，onClick 正常启动
+      if (!launcherDragActiveRef.current) { // 短按 → 未激活，onClick 正常启动
+        srcEl.classList.remove("launcher-dragging-src");
+        return;
+      }
       launcherDragActiveRef.current = false;
-      setLauncherDragSource(null); // 清除 ghost
-
       const finalInsert = launcherDragInsertRef.current;
-      const list = [...launcherRef.current];
-      const [moved] = list.splice(srcIdx, 1);
-      const target = Math.max(0, Math.min(finalInsert > srcIdx ? finalInsert - 1 : finalInsert, list.length));
-      list.splice(target, 0, moved);
-      const unchanged = list.every((x, i) => x.id === launcherRef.current[i]?.id);
-      if (!unchanged) saveLauncher(list);
+      const target = finalInsert > srcIdx ? finalInsert - 1 : finalInsert;
+
+      // 松手回落：ghost 平滑飞回落点空槽（rects[target]），落定后再统一 commit
+      const ghost = launcherGhostRef.current;
+      const landing = rects[target] ?? rects[srcIdx];
+      launcherLandingRef.current = true;
+      if (ghost && landing) {
+        ghost.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
+        ghost.style.left = (landing.left + landing.width / 2) + "px";
+        ghost.style.top = (landing.top + landing.height / 2) + "px";
+      }
+
+      // 180ms 回落结束后统一 commit：清 transform/class → 清 ghost → 重排持久化
+      window.setTimeout(() => {
+        tiles.forEach(t => { t.style.transform = ""; t.classList.remove("launcher-shift"); });
+        srcEl.classList.remove("launcher-dragging-src");
+        document.getElementById("overlay")?.classList.remove("launcher-reordering");
+        setLauncherDragSource(null);
+        launcherLandingRef.current = false;
+        const list = [...launcherRef.current];
+        const [moved] = list.splice(srcIdx, 1);
+        const tgt = Math.max(0, Math.min(target, list.length));
+        list.splice(tgt, 0, moved);
+        const unchanged = list.every((x, i) => x.id === launcherRef.current[i]?.id);
+        if (!unchanged) saveLauncher(list); // 位置不变则跳过 I/O
+      }, 180);
     };
 
     window.addEventListener("pointermove", onMove);
@@ -1739,7 +1772,7 @@ export default function App() {
       const src = launcherRef.current.find(x => x.id === launcherDragSource.id);
       if (!src) return null;
       return (
-        <div className="launcher-drag-ghost" ref={launcherGhostRef} style={{left:0,top:0}}>
+        <div className="launcher-drag-ghost" ref={launcherGhostRef} style={{left:launcherDragSource.x, top:launcherDragSource.y}}>
           <div className="app-tile-icon">
             {src.kind==="app" && src.icon ? <img src={src.icon} alt="" draggable={false}/>
              : src.kind==="folder" ? <span>📁</span>
