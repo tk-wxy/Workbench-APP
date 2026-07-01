@@ -1,17 +1,26 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-01（续73：启动台 file/folder 条目启动动画对齐 app；续74：启动台条目拖拽排序；续75：启动台拖拽细节打磨——Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起 + 抓手光标）
+> **最后更新**：2026-07-01（续76：Codex 迁移适配——AGENTS/CLAUDE 入口同源、MEMORY §0 短快照化、原长状态保留到 §0A）
 >
-> **关联文档**：规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
+> **关联文档**：Codex 规则铁律看 `AGENTS.md`，Claude Code 规则铁律看 `CLAUDE.md`；决策根因看 `DECISIONS.md`；本文件 = 项目现状快照 + 变更记录。
 >
 > **维护方式**：
 > - 标〔快照〕的小节 = 覆盖更新，反映当前真实状态
 > - 标〔追加〕的小节 = 只往后加
-> - 每次结构性改动完成后：① 更新对应〔快照〕 ② 追加「变更记录」 ③ 改顶部日期
+> - 每次结构性改动完成后：① 更新 §0 短快照 ② 必要细节放 §0A 或追加「变更记录」 ③ 改顶部日期
 
 ---
 
-## 0. 当前状态 / 下一步 〔快照〕
+## 0. 当前状态 / 下一步 〔快照，Codex 快速入口〕
+
+- **文档入口（续76，2026-07-01）**：`AGENTS.md` 为 Codex 主入口，`CLAUDE.md` 为 Claude Code 入口；两者保持同源。PowerShell 读中文文档必须显式 `-Encoding utf8`。完成开发任务前继续强制更新本文件；§0 只放短快照，长细节放 §0A / 后续记录。
+- **当前稳定功能**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化/图片原图缓存 janitor；中转区多选、批量 file、拖入/拖出；启动器收藏托盘、应用/文件启动、增强搜索与文件索引；设置面板（常规/剪贴板/快捷键/关于）。
+- **最高危硬规则提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `AGENTS.md` / `CLAUDE.md` 铁律；根因查 `DECISIONS.md`。尤其别改 `tauri.conf.json` 的 `transparent:true` / `focus:false`，别让前端管 hide，别把热键 show/hide 回退到 `RegisterHotKey` 事件，新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
+- **最近状态（续75）**：启动台拖拽排序已升级为 Launchpad 式让路；ghost 首帧、松手回落、淡入抬起已修并经用户反馈基本正常。待打磨：去掉 grab/grabbing 抓手光标；拖动时被拖项目“消失”，下次先加日志确认 ghost 是否真实跟手，再决定增强 ghost 可见性或让源半可见。
+- **下一步候选**：① 启动台拖拽两处细节打磨；② 启动器键盘导航；③ 文件结果右键「打开所在目录」/命中高亮回传；④ 索引目录可配置；⑤ 增强搜索纳入剪贴板条目；⑥ file/folder 收藏的非拖入入口。
+- **阻塞 / 待决策**：无。
+
+## 0A. 最近状态细节 〔保留详记，按需阅读〕
 
 - **新增（续75，纯前端，静态验证通过 / GUI 未实测 2026-07-01）——启动台拖拽细节打磨（在续74 基础上）**：把"竖线指示插入点"升级为 **Launchpad 式让路**，并修掉一个真 bug + 三处手感打磨。① **ghost 首帧闪现修复（真 bug）**：续74 激活时 `setLauncherDragSource` 触发 React 渲染、但同一次 `onMove` 读 `launcherGhostRef` 时 ref 未 commit（null）→ ghost 首帧用 JSX `style={{left:0,top:0}}` + `translate(-50%,-45%)` 摆在屏幕左上角、要等下一次 pointermove 才跳到鼠标。修复：state 类型加 `{x,y}`，激活时塞入当次鼠标坐标，ghost 首帧 `style={{left:x,top:y}}` 直接定位。② **Launchpad 式让路（FLIP）**：激活瞬间用 `getBoundingClientRect` 采集所有 `.app-grid .app-tile` 的**固定原始槽位快照**（`{left,top,width,height}[]`），之后**插入判断 `calcInsert` 与让路位移 `applyShift` 全基于这份快照**——绝不用实时 rect（格子 transform 移动后 `getBoundingClientRect` 含位移、会污染插入判断，是让路能稳定工作的关键）。`applyShift(insertIdx)`：`target=insertIdx>srcIdx?insertIdx-1:insertIdx`，对每个非源格 `i` 求它在去源序列里的顺序 `k=i<srcIdx?i:i-1`、跳过 target 槽得 `newSlot=k<target?k:k+1`，写 `transform:translate(dx,dy)`（`dx/dy=rects[newSlot]-rects[i]`）。**穷举 n=1..6 全部 112 组合验证**：每次恰空出 1 个槽且 = target（ghost 落点），零失败。③ **松手回落**：`onUp` 给 ghost 开 `left/top transition` 飞到落点空槽中心（`rects[target]`），180ms 后统一 commit（清 transform/class → `setLauncherDragSource(null)` → 重排持久化）；`launcherLandingRef` 守卫回落期不被新 pointerdown 采集脏几何。④ **ghost 淡入+抬起**：CSS `@keyframes launcher-ghost-pop`（opacity 0→.95、scale .82→1.08，180ms），元素创建时自动跑一次；回落改 `left/top`、动画改 `transform`，两者正交不冲突。⑤ **抓手光标**：`.app-tile{cursor:grab}` + `.launcher-reordering *{cursor:grabbing!important}`。**源格子改 `opacity:0`**（续74 是 0.2，让路后会与移过来的格子重叠）。**架构守恒**：仍是"零 React 渲染 DOM 直操作 + window 级 pointer 监听"，React state 只触发 ghost 内容渲染一次。删除续74 的 `updateInsert` + `.launcher-insert-before` 竖线 CSS（已全局无引用）。**验证**：`tsc --noEmit` 零错误 + `npm run build`（tsc && vite build）通过 + FLIP 槽位映射 112 组合穷举零失败。**GUI 实测反馈（2026-07-01，用户）**：让路动画 / ghost 首帧修复 / 松手回落 / 淡入抬起 均正常。**两处待打磨（本次仅记录、未实现）**：① **抓手光标 grab/grabbing 实测有卡顿** → 用户要求**舍去该细节**（后续回退光标改动：`.app-tile` cursor 恢复默认、`.launcher-reordering` 去掉 grabbing）；② **拖动时被拖项目「消失」缺跟随观感** → 现状源 `.launcher-dragging-src{opacity:0}` 完全隐藏、由 ghost 代替，用户反馈拖动过程中希望**被拖项目明确跟在光标上**才协调；需排查 ghost 实际是否显示/跟手到位（若 ghost 未如预期跟随=bug，若已跟随则是希望强化跟随可见性/让源半可见），下次动手前先在真实拖拽下加日志确认 ghost DOM 位置。文件：`src/App.tsx`（state 类型 + `launcherLandingRef` + `handleLauncherPointerDown` 全量重写 + ghost JSX style）/ `src/App.css`（`.launcher-shift`/`.launcher-dragging-src`/`.launcher-ghost-pop`/grab 光标，删 insert-before）。
 - **当前稳定**：Ctrl+Space 热键（长按 momentary + 短按 toggle，键态轮询驱动）+ Esc 关闭 + light dismiss（点外部应用自动隐藏）+ 三类型剪贴板（文本/图片/文件）粘贴（含桌面落地）+ 后台监听 + 全屏无缝 + 呼出白闪修复 + 剪贴板条目删除 + 设置面板（**左侧条目导航 + 右侧详情**：常规/剪贴板/快捷键/关于）+ 去阴影（`set_shadow(false)`）+ 底部蓝缝消除 + 底部贴齐任务栏顶（`clamp_window_bottom` 修 set_shadow 后 WebView 遮任务栏）+ 剪贴板卡片「只复制到剪贴板」按钮（不粘贴、seq 水位防回流）+ **剪贴板历史持久化**（落盘 `clip_history.json`，重启后历史完整读回）+ **剪贴板历史条数可配置**（设置面板四档 10/20/50/100，默认 20，持久化重启保留）+ **开机自启可配置**（设置 → 常规 → 开启/关闭，`tauri-plugin-autostart` 写注册表）+ **历史图片粘贴原图**（落盘 `clip_images/{time}.png`，detached write，小图跳过，设置面板「打开文件夹/清空缓存」；**续52 起解耦 janitor 自动管上限**——周期孤儿清理 + 总量封顶 500MB，不进 `CLIPBOARD_LOCK`；**续53 起图片粘贴按目标窗口类三分叉**——桌面→SHFileOperation 落地 / 资源管理器文件夹(CabinetWClass·ExploreWClass)→CF_HDROP 落地真 PNG（大图复用已落盘原图、零解码）/ 其余 app→位图，消除「文件夹粘不进」+「大图粘贴卡顿」）+ **中转区多选 + 批量操作**（Ctrl/Shift 多选，批量取走/复制/删除，仅 file 同质可批量上剪贴板）+ **增强搜索独立页**（Ctrl+K 呼出同 overlay 内视图层，搜应用 + 中转 file 条目，↑↓ + Enter 激活，纯前端）+ **顶栏普通搜索四区联动**（输入即同时过滤启动台/中转/剪贴板，名称内容优先 + 类型词叠加，与 Ctrl+K 独立）+ **启动器收藏托盘**（手动策展持久化，app picker，.lnk 拖入提取图标存 kind:"app"，S3a/S3b/S3c GUI 实测通过 2026-06-25）+ **增强搜索接入文件系统**（Ctrl+K 分两组 Tier1+Tier2，文件结果分隔线+防抖+未就绪提示，filesearch.rs 后台索引，S4a/S4b/S4c GUI 实测通过 2026-06-25）+ **自定义热键 V2**（V2-1：`parse_combo` 表驱动任意组合，53 条主键，三键 GUI 实测通过；V2-2：正式文本输入 UI + Enter 触发 + 格式提示 + 底栏动态 kbd + `changeHotkey` 类型放宽为 string + 清理 PROBE/V21-TEMP，**全部 GUI 实测通过（2026-06-25）**）
