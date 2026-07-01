@@ -2,7 +2,15 @@
 
 Windows 全屏"第二桌面"工具：热键 toggle 呼出覆盖全屏的功能界面（应用启动器 / 文件中转 / 剪贴板历史），用完优雅消失，原桌面不受影响。理念 ≈ "功能增强版的开始菜单"。
 
-> **每次会话开始**：① 看 `MEMORY.md §0`（当前进度 / 下一步 / 待决策）；② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】；③ 需要"为什么这样做"的根因去 `DECISIONS.md`。本文件只放结论与硬规则。
+> **每次会话开始**：① 看 `MEMORY.md §0`（当前进度 / 下一步 / 待决策；细节在 §0A）；② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】；③ 需要"为什么这样做"的根因去 `DECISIONS.md`。本文件只放结论与硬规则。
+
+## Agent 入口约定
+- `AGENTS.md` 是 Codex 主入口；本文件是 Claude Code 入口。两者应保持同源，改铁律时同步更新，避免 agent 之间规则漂移。
+- Windows PowerShell 读取中文文档时显式使用 UTF-8（例如 `Get-Content -Encoding utf8`），避免乱码导致误判。
+- 默认先诊断再修改：先读相关代码 / 日志 / 决策记录，确认根因后再动手；窗口、焦点、热键、剪贴板属于最高危区，必须按下方铁律逐条对照。
+- 可验证的改动要自己跑验证；GUI 无法真实驱动时必须明说，并至少跑可复现的核心逻辑或静态检查。
+- 完成开发任务前必须更新 `MEMORY.md`：§0 写当前短快照，§0A 或后续记录写必要细节，不在记忆里粘大段代码。
+- Git 提交按用户意图执行：用户要求提交时，每到稳定点及时 commit；用户未要求时，完成验证后汇报建议提交点，不擅自制造提交历史。
 
 ## 技术栈
 - Tauri 2.0（Rust 后端）+ React 18 + TypeScript + Vite + Tailwind CSS
@@ -24,7 +32,7 @@ npm run tauri build    # 打包
 - `src-tauri/src/dragout.rs` — 中转区拖出（`DoDragDrop`：IDataObject + IDropSource；**主线程**跑 DoDragDrop[持鼠标 capture]、hide-after；source 侧，与 dragdrop.rs 拖入正交。详见 DECISIONS §18 含三条死胡同：「hide-before 丢 capture」/「WebView2 原生 `<img>` 拖拽抢手势 → 落地 download.png」/「裸 ShowWindow 绕过 tao 可见性缓存 → 下次 show 被 diff 成 no-op → 卡死」。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
-- `DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，本文件只放结论）
+- `DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，入口规则文档只放结论）
 - `MEMORY.md` — 滚动会话小结，**当前进度 / 待办 / 下一步以它为准**
 
 ---
@@ -113,7 +121,7 @@ npm run tauri build    # 打包
 - "理论上更优雅" ≠ "实际更好"：已验证的笨方法优于未验证的聪明方法。
 - 出现"焦点回不来"这类**架构性死胡同信号时，果断回退**，不要打补丁硬撑。
 - **`LauncherItem`（启动器收藏）与 `StageItem`（中转条目）不可合并**：二者形似但**左键动作契约不同**——启动器=打开/启动（不走粘贴链/不取 `CLIPBOARD_LOCK`），中转=取走粘贴（走粘贴链）。**动作由"区"决定**，别因字段相似而合并类型或复用左键 handler（详见 DECISIONS §16）。
-- 每到一个稳定点立即 `git commit`。
+- Git 提交按本文件顶部「Agent 入口约定」执行；不要在用户未要求提交时擅自制造提交历史。
 
 ## 强制记忆更新 (Post-Task)
 在你完成了用户下达的开发需求，准备结束本次任务之前，你必须**主动修改并更新** `MEMORY.md` 文件。
