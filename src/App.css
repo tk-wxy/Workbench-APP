@@ -81,7 +81,7 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 /* ── 左：应用启动器（图标宫格）── */
 .app-panel{width:360px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;}
 .app-grid{flex:1;overflow-y:auto;padding:4px 8px 8px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;align-content:start;}
-.app-tile{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;cursor:grab;transition:background 60ms;min-width:0;}
+.app-tile{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;transition:background 60ms;min-width:0;}
 .app-tile:hover,.app-tile.selected{background:var(--hover);}
 .app-tile-icon{width:48px;height:48px;border-radius:10px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
 .app-tile-icon img{width:36px;height:36px;object-fit:contain;image-rendering:auto;}
@@ -92,11 +92,13 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .app-tile.launcher-dragging-src{opacity:0;pointer-events:none;}
 /* 让路过渡：非源格子平移填补空位时平滑滑开（transform 纯视觉、不改 grid）*/
 .app-tile.launcher-shift{transition:transform 200ms cubic-bezier(.2,.8,.2,1),opacity 140ms ease;will-change:transform;}
-/* 拖拽期间全局禁止文字选中 + 抓手光标 */
-.launcher-reordering,.launcher-reordering *{user-select:none!important;-webkit-user-select:none!important;cursor:grabbing!important;}
-/* ghost 跟手卡片：fixed，transform 让鼠标指在图标中心偏上，视觉更自然；激活时淡入+抬起 */
-.launcher-drag-ghost{position:fixed;pointer-events:none;z-index:9999;transform:translate(-50%,-45%) scale(1.08);display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:10px;background:var(--fill-2);border:1px solid rgba(255,255,255,0.12);box-shadow:0 12px 32px rgba(0,0,0,0.6),0 2px 8px rgba(0,0,0,0.3);opacity:0.95;min-width:72px;max-width:88px;will-change:transform;animation:launcher-ghost-pop 180ms cubic-bezier(.2,.8,.2,1);}
-@keyframes launcher-ghost-pop{from{opacity:0;transform:translate(-50%,-45%) scale(.82);}to{opacity:.95;transform:translate(-50%,-45%) scale(1.08);}}
+/* 拖拽期间只禁止文字选中，不强制抓手光标（WebView2 下 grabbing 会带来卡顿感） */
+.launcher-reordering,.launcher-reordering *{user-select:none!important;-webkit-user-select:none!important;}
+/* ghost 跟手卡片：fixed 悬浮副本，保持按下时的抓取偏移，像原卡片被拿起来 */
+.launcher-drag-ghost{position:fixed;pointer-events:none;z-index:100003;box-sizing:border-box;transform:scale(1.05);transform-origin:center;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;background:color-mix(in srgb,var(--fill-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:none;opacity:0.72;will-change:left,top,transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
+.launcher-drag-ghost .app-tile-icon{background:var(--fill-1);}
+.launcher-drag-ghost .app-tile-label{color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,0.35);}
+@keyframes launcher-ghost-pop{from{opacity:0;transform:scale(.92);}to{opacity:.72;transform:scale(1.05);}}
 
 /* ── 中：文件中转区 + 快捷入口 ── */
 .center-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;padding:0 16px 16px;min-width:200px;}

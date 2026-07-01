@@ -325,9 +325,7 @@ export default function App() {
   const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[] }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [] });
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
   // 启动台排序拖拽（续74重写）：全 DOM 直操作 + window 全局监听，绕过 React 渲染保证跟手
-  // state 只用于触发 ghost 内容渲染（激活时一次 setState，含首帧鼠标坐标以消除左上角闪现），位置/class 全走 ref+DOM
-  const [launcherDragSource, setLauncherDragSource] = useState<{ id: number; idx: number; x: number; y: number } | null>(null);
-  const launcherGhostRef = useRef<HTMLDivElement | null>(null); // ghost div DOM ref
+  // ghost 也走 DOM clone，不经 React state/ref，确保拖拽预览一定可见。
   const launcherDragActiveRef = useRef(false); // 是否已超阈值激活
   const launcherDragInsertRef = useRef(-1); // 当前插入位置，-1=未激活
   const launcherLandingRef = useRef(false); // 松手回落动画进行中：守卫此窗口内不被新拖拽采集脏几何
@@ -727,6 +725,9 @@ export default function App() {
     e.preventDefault(); // 阻止默认（防文字选中、防系统拖拽光标）
     const originX = e.clientX, originY = e.clientY;
     const srcEl = e.currentTarget as HTMLElement;
+    const srcStartRect = srcEl.getBoundingClientRect();
+    const grabOffsetX = originX - srcStartRect.left;
+    const grabOffsetY = originY - srcStartRect.top;
     launcherDragActiveRef.current = false;
     launcherDragInsertRef.current = srcIdx;
     suppressLaunchClickRef.current = false;
@@ -734,6 +735,7 @@ export default function App() {
     // FLIP 快照：激活时采集，之后固定不变（同一次 pointerdown 闭包内 onMove/onUp 共享）
     let tiles: HTMLElement[] = [];
     let rects: { left: number; top: number; width: number; height: number }[] = [];
+    let ghostEl: HTMLElement | null = null;
 
     // 按固定槽位快照判断鼠标落在哪个插入点（0..n，插入到第 idx 个之前）
     const calcInsert = (cx: number, cy: number): number => {
@@ -770,13 +772,31 @@ export default function App() {
         tiles.forEach(t => t.classList.add("launcher-shift")); // 建立让路过渡
         launcherDragActiveRef.current = true;
         suppressLaunchClickRef.current = true;
+        ghostEl = srcEl.cloneNode(true) as HTMLElement;
+        ghostEl.classList.remove("selected", "launcher-dragging-src");
+        ghostEl.classList.add("launcher-drag-ghost");
+        ghostEl.querySelectorAll("img").forEach(img => { img.draggable = false; });
+        Object.assign(ghostEl.style, {
+          position: "fixed",
+          left: `${me.clientX - grabOffsetX}px`,
+          top: `${me.clientY - grabOffsetY}px`,
+          width: `${srcStartRect.width}px`,
+          height: `${srcStartRect.height}px`,
+          zIndex: "100003",
+          display: "flex",
+          opacity: "0.72",
+          visibility: "visible",
+          pointerEvents: "none",
+        });
+        document.body.appendChild(ghostEl);
         srcEl.classList.add("launcher-dragging-src");
         document.getElementById("overlay")?.classList.add("launcher-reordering");
-        setLauncherDragSource({ id, idx: srcIdx, x: me.clientX, y: me.clientY }); // 首帧即定位到鼠标
       }
-      // ghost 跟手：直接写 DOM style，零 React 渲染
-      const ghost = launcherGhostRef.current;
-      if (ghost) { ghost.style.left = me.clientX + "px"; ghost.style.top = me.clientY + "px"; }
+      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 DOM style，零 React 渲染
+      if (ghostEl) {
+        ghostEl.style.left = (me.clientX - grabOffsetX) + "px";
+        ghostEl.style.top = (me.clientY - grabOffsetY) + "px";
+      }
       const ins = calcInsert(me.clientX, me.clientY);
       if (ins !== launcherDragInsertRef.current) {
         launcherDragInsertRef.current = ins;
@@ -798,13 +818,12 @@ export default function App() {
       const target = finalInsert > srcIdx ? finalInsert - 1 : finalInsert;
 
       // 松手回落：ghost 平滑飞回落点空槽（rects[target]），落定后再统一 commit
-      const ghost = launcherGhostRef.current;
       const landing = rects[target] ?? rects[srcIdx];
       launcherLandingRef.current = true;
-      if (ghost && landing) {
-        ghost.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
-        ghost.style.left = (landing.left + landing.width / 2) + "px";
-        ghost.style.top = (landing.top + landing.height / 2) + "px";
+      if (ghostEl && landing) {
+        ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
+        ghostEl.style.left = landing.left + "px";
+        ghostEl.style.top = landing.top + "px";
       }
 
       // 180ms 回落结束后统一 commit：清 transform/class → 清 ghost → 重排持久化
@@ -812,7 +831,8 @@ export default function App() {
         tiles.forEach(t => { t.style.transform = ""; t.classList.remove("launcher-shift"); });
         srcEl.classList.remove("launcher-dragging-src");
         document.getElementById("overlay")?.classList.remove("launcher-reordering");
-        setLauncherDragSource(null);
+        ghostEl?.remove();
+        ghostEl = null;
         launcherLandingRef.current = false;
         const list = [...launcherRef.current];
         const [moved] = list.splice(srcIdx, 1);
@@ -1332,7 +1352,7 @@ export default function App() {
             {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
             {filteredLauncher.map((it)=>(
               <div key={it.id}
-                className={`app-tile${launcherDragSource?.id===it.id ? " launcher-dragging-src" : ""}`}
+                className="app-tile"
                 draggable={false}
                 onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
                 onContextMenu={e=>openLauncherCtxMenu(e,it)}
@@ -1767,22 +1787,6 @@ export default function App() {
           : <span>{launchAnim.name[0]}</span>}
       </div>
     )}
-    {/* 启动台排序拖拽 ghost：fixed 定位跟手卡片，位置由 window pointermove 直写 style，零 React 渲染延迟 */}
-    {launcherDragSource && (() => {
-      const src = launcherRef.current.find(x => x.id === launcherDragSource.id);
-      if (!src) return null;
-      return (
-        <div className="launcher-drag-ghost" ref={launcherGhostRef} style={{left:launcherDragSource.x, top:launcherDragSource.y}}>
-          <div className="app-tile-icon">
-            {src.kind==="app" && src.icon ? <img src={src.icon} alt="" draggable={false}/>
-             : src.kind==="folder" ? <span>📁</span>
-             : src.kind==="file" ? <span>{fi(src.ext??"")}</span>
-             : <span>{src.name[0]}</span>}
-          </div>
-          <span className="app-tile-label">{src.name}</span>
-        </div>
-      );
-    })()}
     {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
     {ctxMenu && (
       <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
