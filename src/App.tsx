@@ -129,6 +129,8 @@ type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
 // 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
 const SETTINGS_TABS = [
   { id: "general",   icon: "⚙",  label: "常规" },
+  { id: "launcher",  icon: "🚀", label: "启动台" },
+  { id: "stage",     icon: "📦", label: "中转站" },
   { id: "clipboard", icon: "📋", label: "剪贴板" },
   { id: "search",    icon: "🔍", label: "搜索" },
   { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
@@ -1100,6 +1102,7 @@ export default function App() {
     try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
   }, []);
   const clearStage = useCallback(async () => { await saveStage([]); }, [saveStage]);
+  const clearLauncher = useCallback(async () => { await saveLauncher([]); }, [saveLauncher]);
   // ── 搜索引擎切换 + 额外目录配置（续57）：持久化 store + 运行时 invoke 应用 ──
   const changeSearchEngine = useCallback(async (eng: "builtin"|"everything") => {
     setSearchEngine(eng);
@@ -1633,21 +1636,37 @@ export default function App() {
                       <button className={`seg-btn${!autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(false)}>关闭</button>
                     </div>
                   </div>
+                  <p className="settings-hint">这里仅保留全局外观与启动行为；启动台、中转站、剪贴板和搜索分别在独立条目中设置。</p>
+                </>)}
+                {settingsTab==="launcher" && (<>
+                  <div className="settings-panel-title">启动台</div>
                   <div className="settings-row">
-                    <span className="settings-row-label">中转区布局</span>
+                    <span className="settings-row-label">收藏条目<span className="settings-row-sub">{launcher.length} / {LAUNCHER_MAX}</span></span>
+                    <div className="settings-inline-actions">
+                      <button className="settings-action" onClick={()=>{setPickerQuery("");setPickerOpen(true);}}>添加应用</button>
+                      <button className="settings-action danger" onClick={clearLauncher} disabled={!launcher.length}>清空</button>
+                    </div>
+                  </div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">排序方式<span className="settings-row-sub">拖拽调整</span></span>
+                    <span className="settings-row-value">手动排序</span>
+                  </div>
+                  <p className="settings-hint">启动台只负责打开应用、文件或文件夹；与中转站的取走粘贴动作保持分离。</p>
+                </>)}
+                {settingsTab==="stage" && (<>
+                  <div className="settings-panel-title">中转站</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">显示布局</span>
                     <div className="seg">
                       <button className={`seg-btn${stageLayout==="list"?" seg-active":""}`} onClick={()=>changeStageLayout("list")}>列表</button>
                       <button className={`seg-btn${stageLayout==="grid"?" seg-active":""}`} onClick={()=>changeStageLayout("grid")}>方格</button>
                     </div>
                   </div>
                   <div className="settings-row">
-                    <span className="settings-row-label">呼出默认搜索</span>
-                    <div className="seg">
-                      <button className={`seg-btn${searchDefaultMode==="page"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("page")}>界面搜索</button>
-                      <button className={`seg-btn${searchDefaultMode==="enhanced"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("enhanced")}>增强搜索</button>
-                    </div>
+                    <span className="settings-row-label">中转条目<span className="settings-row-sub">{stage.length} / {STAGE_MAX}</span></span>
+                    <button className="settings-action danger" onClick={clearStage} disabled={!stage.length}>清空</button>
                   </div>
-                  <p className="settings-hint">{searchDefaultMode==="enhanced"?"呼出后顶栏输入直接进入增强搜索；"+comboLabel(enhHotkey)+"切换为界面搜索。":"呼出后顶栏搜索过滤界面内容；"+comboLabel(enhHotkey)+"进入增强搜索（共用顶栏）。"}</p>
+                  <p className="settings-hint">中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。</p>
                 </>)}
                 {settingsTab==="clipboard" && (<>
                   <div className="settings-panel-title">剪贴板</div>
@@ -1661,25 +1680,28 @@ export default function App() {
                   </div>
                   <div className="settings-row">
                     <span className="settings-row-label">剪贴板历史<span className="settings-row-sub">{clipboard.length} 条</span></span>
-                    <button className="settings-action" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
+                    <button className="settings-action danger" onClick={clearClipboard} disabled={!clipboard.length}>清空</button>
                   </div>
                   <p className="settings-hint">复制的文本、图片、文件会自动记录，最多保留 {clipCacheMax} 条。</p>
                   <div className="settings-row">
                     <span className="settings-row-label">图片原图缓存</span>
                     <div style={{display:"flex",gap:4}}>
                       <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>打开文件夹</button>
-                      <button className={`settings-action${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?"✓ 已清空":"清空缓存"}</button>
+                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?"✓ 已清空":"清空缓存"}</button>
                     </div>
                   </div>
                   <p className="settings-hint">历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">文件中转区<span className="settings-row-sub">{stage.length} 条</span></span>
-                    <button className="settings-action" onClick={clearStage} disabled={!stage.length}>清空</button>
-                  </div>
-                  <p className="settings-hint">手动钉入或拖入的文件、文本、图片条目。</p>
                 </>)}
                 {settingsTab==="search" && (<>
                   <div className="settings-panel-title">搜索</div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">呼出默认搜索</span>
+                    <div className="seg">
+                      <button className={`seg-btn${searchDefaultMode==="page"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("page")}>界面搜索</button>
+                      <button className={`seg-btn${searchDefaultMode==="enhanced"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("enhanced")}>增强搜索</button>
+                    </div>
+                  </div>
+                  <p className="settings-hint">{searchDefaultMode==="enhanced"?"呼出后顶栏输入直接进入增强搜索；"+comboLabel(enhHotkey)+"切换为界面搜索。":"呼出后顶栏搜索过滤界面内容；"+comboLabel(enhHotkey)+"进入增强搜索（共用顶栏）。"}</p>
                   <div className="settings-row">
                     <span className="settings-row-label">搜索引擎</span>
                     <div className="seg">
