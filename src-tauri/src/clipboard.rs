@@ -53,6 +53,12 @@ const CLIP_IMAGE_SWEEP_INITIAL_MS: u64 = 5000;
 const AHASH_MAX_HAMMING: u32 = 5;
 /// 图片去重的尺寸近似阈值（px）
 const AHASH_MAX_DIM_DELTA: i64 = 2;
+/// hide 后焦点交还守卫的轮询间隔（GetForegroundWindow 是 µs 级调用，高频采样零成本）
+const FOCUS_HANDBACK_POLL_MS: u64 = 10;
+/// 焦点交还等待上限：超时则不再等、保底继续注入（与旧盲等行为一致），仅留日志证据
+const FOCUS_HANDBACK_MAX_MS: u64 = 500;
+/// 前台交接确认后的落定余量：前台切换先于目标线程键盘焦点落定，立即注入可能丢键
+const FOCUS_HANDBACK_SETTLE_MS: u64 = 50;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -454,6 +460,34 @@ pub(crate) fn set_clip_cache_max(n: usize) {
     save_clip_history(snap);
 }
 
+/// hide 后等待 OS 把前台交还给目标窗口（替代旧「盲等固定 150ms」）。
+/// 根因：hide() 只是异步派发（事件循环处理 + OS 激活交接都发生在返回之后），负载高时
+/// 固定延时不够，GetForegroundWindow 仍返回本窗口/NULL → Ctrl+V 注入进已隐藏的自家
+/// 窗口 → 点击粘贴偶发失败。改为守卫轮询：前台既非本窗口也非 NULL 即交接完成
+///（上限 FOCUS_HANDBACK_MAX_MS，超时保底继续不阻断），再留 FOCUS_HANDBACK_SETTLE_MS
+/// 让目标线程键盘焦点落定（前台切换先于键盘焦点落定）。日志带 tag 便于分路径诊断。
+fn wait_foreground_handback(app: &AppHandle, tag: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let self_hwnd = app.get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+    let start = std::time::Instant::now();
+    let max = std::time::Duration::from_millis(FOCUS_HANDBACK_MAX_MS);
+    let mut timed_out = false;
+    loop {
+        let fg = unsafe { GetForegroundWindow() }.0 as isize;
+        if fg != 0 && fg != self_hwnd { break; }
+        if start.elapsed() >= max { timed_out = true; break; }
+        std::thread::sleep(std::time::Duration::from_millis(FOCUS_HANDBACK_POLL_MS));
+    }
+    let waited = start.elapsed().as_millis();
+    std::thread::sleep(std::time::Duration::from_millis(FOCUS_HANDBACK_SETTLE_MS));
+    let fg = unsafe { GetForegroundWindow() }.0 as isize;
+    println!("[{tag}] handback waited={waited}ms timeout={timed_out} fg class=\"{}\"",
+        get_window_class(fg));
+}
+
 /// 获取窗口类名
 fn get_window_class(hwnd: isize) -> String {
     unsafe {
@@ -585,9 +619,8 @@ pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<
 
     // Bug A 修复：场景判断提到写剪贴板之前，桌面直接落地不碰剪贴板
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    wait_foreground_handback(&app, "filepaste"); // 交接完成后 class 判断才可信（含日志）
     let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
-    println!("[filepaste] after hide, foreground class=\"{class1}\"");
 
     if class1 == "WorkerW" || class1 == "Progman" {
         return desktop_copy_files(&paths);
@@ -681,10 +714,9 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
 
     // 先隐藏窗口，再判断目标（与 set_clipboard_files 逻辑对齐）
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    wait_foreground_handback(&app, "imgpaste"); // 交接完成后 class 判断才可信（含日志）
 
     let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
-    println!("[imgpaste] foreground class=\"{class1}\"");
 
     if class1 == "WorkerW" || class1 == "Progman" {
         // 桌面：PNG 落地。优先用原图文件（已是 PNG，无需重编码）
@@ -849,7 +881,7 @@ pub(crate) fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String
     suppress_clip_until_now(); // 防自写内容回流历史面板（文本路径漏洞修复，对齐 set_clipboard_files/image）
 
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
-    std::thread::sleep(std::time::Duration::from_millis(150));
+    wait_foreground_handback(&app, "paste"); // 文本路径原先零日志，失败不可诊断；此处补齐
 
     unsafe {
         let hwnd = GetForegroundWindow();
