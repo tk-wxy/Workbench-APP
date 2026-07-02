@@ -73,6 +73,16 @@
 window.hide() → sleep(150ms) → GetForegroundWindow → SetForegroundWindow → enigo Ctrl+V
 ```
 
+### §3 延伸（续80）：第 7 轮——盲等 150ms → 守卫轮询 `wait_foreground_handback`
+
+**症状**：点击粘贴偶发失败，但失败后手动 Ctrl+V 能粘上（剪贴板内容其实已写成功）——失败全在「焦点交还 + 注入」后半段。
+
+**根因**：`window.hide()` 从命令线程调用是异步派发（事件循环处理 + OS 激活交接都发生在返回之后），`sleep(150ms)` 是在赌两步都完成。主线程忙 / 系统负载高时赌输：`GetForegroundWindow` 仍返回本窗口（已隐藏但激活权未交接）或 NULL → Ctrl+V 注入进已隐藏的自家 WebView / 被丢弃。副作用还污染 file/image 路径的 class 三分叉（读到自家类名 → 桌面/Explorer 目标被误分到通用 CF_HDROP 分支）。
+
+**修复**：`sleep(150ms)` 换成 `wait_foreground_handback(&app, tag)`（clipboard.rs）：每 `FOCUS_HANDBACK_POLL_MS`(10ms) 采样，直到前台「既非本窗口也非 NULL」（交接完成），上限 `FOCUS_HANDBACK_MAX_MS`(500ms) 超时保底继续（不比旧方案更差）；确认后再留 `FOCUS_HANDBACK_SETTLE_MS`(50ms) 让目标线程键盘焦点落定（前台切换先于键盘焦点落定，立即注入可能丢键）。三处调用点（paste/filepaste/imgpaste）统一替换，并带 tag 日志（文本路径原先零日志、失败不可诊断）。典型等待 ~30-80ms + 50ms，比旧 150ms 略快。
+
+**未修（已识别、暂缓）**：① show 时未快照原前台 HWND，`SetForegroundWindow(GetForegroundWindow())` 仍是恒等空操作——结构性改流程，需单变量验证再动；② UIPI：目标窗口是提权进程时 SendInput 被系统静默拦截，无法绕过，只能将来做检测提示；③ 注入前不中和物理修饰键。若守卫轮询后仍有失败，按 tag 日志先查是否 ①/②。
+
 ---
 
 ## 4. 窗口透明 vs 不透明：GPU 合成路径选择

@@ -5,7 +5,7 @@ Windows 全屏"第二桌面"工具：热键 toggle 呼出覆盖全屏的功能�
 > **每次会话开始**：① 看 `MEMORY.md §0`（当前进度 / 下一步 / 待决策；细节在 §0A）；② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】；③ 需要"为什么这样做"的根因去 `DECISIONS.md`。本文件只放结论与硬规则。
 
 ## Agent 入口约定
-- `AGENTS.md` 是 Codex 主入口；本文件是 Claude Code 入口。两者应保持同源，改铁律时同步更新，避免 agent 之间规则漂移。
+- 本文件是**唯一** agent 规则入口，任何 AI 编码助手（Claude Code / Codex 等）均以本文件为准。原 Codex 副本 `AGENTS.md` 已移除（续80）——单一真相源，杜绝双文档规则漂移。
 - Windows PowerShell 读取中文文档时显式使用 UTF-8（例如 `Get-Content -Encoding utf8`），避免乱码导致误判。
 - 默认先诊断再修改：先读相关代码 / 日志 / 决策记录，确认根因后再动手；窗口、焦点、热键、剪贴板属于最高危区，必须按下方铁律逐条对照。
 - 可验证的改动要自己跑验证；GUI 无法真实驱动时必须明说，并至少跑可复现的核心逻辑或静态检查。
@@ -48,7 +48,8 @@ npm run tauri build    # 打包
   ② `set_focus()` **必须有**（否则键盘焦点不在窗口，Esc 的 keydown 到不了 JS → Esc 没反应）；
   ③ `set_focus()` 必须**延迟执行**（50ms 后台线程 + 可见性守卫；立刻调会触发 `WM_ACTIVATE` 重绘 → 白闪）。
 - 关闭/粘贴的**焦点交还流程**（文本 / 图片 / 文件夹粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
-  `window.hide()` → `sleep(150ms)` → `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
+  `window.hide()` → `wait_foreground_handback`（守卫轮询，见下）→ `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
+  等待段**曾是盲等 `sleep(150ms)`——已废弃别回退**：`hide()` 是异步派发，负载高时 150ms 不够、前台仍是本窗口 → Ctrl+V 注入进已隐藏的自家窗口 → 点击粘贴偶发失败（剪贴板已写成功，故手动 Ctrl+V 反而能粘上）。现为 `wait_foreground_handback`：轮询到前台「既非本窗口也非 NULL」再留落定余量，超时保底继续；参数为 `clipboard.rs` 顶部 `FOCUS_HANDBACK_*` 常量。
 - "前台窗口"与"键盘输入焦点"是两个概念——推回焦点的死路见下方【💀 死胡同】。
 
 ### 全局热键
