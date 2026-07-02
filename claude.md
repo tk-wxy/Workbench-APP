@@ -2,14 +2,19 @@
 
 Windows 全屏"第二桌面"工具：热键 toggle 呼出覆盖全屏的功能界面（应用启动器 / 文件中转 / 剪贴板历史），用完优雅消失，原桌面不受影响。理念 ≈ "功能增强版的开始菜单"。
 
-> **每次会话开始**：① 看 `MEMORY.md §0`（当前进度 / 下一步 / 待决策；细节在 §0A）；② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】；③ 需要"为什么这样做"的根因去 `DECISIONS.md`。本文件只放结论与硬规则。
+> **每次会话开始（渐进式读取，按需不贪多）**：
+> ① 读 `MEMORY.md §0`（当前进度/待办/下一步）；§0A 详记只在与当前任务相关时读。
+> ② 动窗口·焦点·热键·剪贴板代码前，先读完下面的【铁律】。
+> ③ 需要"为什么"时先看 `DECISIONS.md` 顶部目录的一行摘要，只读相关 §，不整读。
+> ④ `HISTORY.md` 是历史归档，**默认不读**；考古时用 Grep 按「续N」/关键词定位。
+> 本文件只放结论与硬规则，根因一律在 DECISIONS.md。
 
 ## Agent 入口约定
-- 本文件是**唯一** agent 规则入口，任何 AI 编码助手（Claude Code / Codex 等）均以本文件为准。原 Codex 副本 `AGENTS.md` 已移除（续80）——单一真相源，杜绝双文档规则漂移。
-- Windows PowerShell 读取中文文档时显式使用 UTF-8（例如 `Get-Content -Encoding utf8`），避免乱码导致误判。
+- 本文件是**唯一** agent 规则入口，任何 AI 编码助手（Claude Code / Codex 等）均以本文件为准（原 Codex 副本 `AGENTS.md` 已于续80 移除，杜绝双文档漂移）。
+- Windows PowerShell 读取中文文档时显式 UTF-8（例如 `Get-Content -Encoding utf8`），避免乱码导致误判。
 - 默认先诊断再修改：先读相关代码 / 日志 / 决策记录，确认根因后再动手；窗口、焦点、热键、剪贴板属于最高危区，必须按下方铁律逐条对照。
 - 可验证的改动要自己跑验证；GUI 无法真实驱动时必须明说，并至少跑可复现的核心逻辑或静态检查。
-- 完成开发任务前必须更新 `MEMORY.md`：§0 写当前短快照，§0A 或后续记录写必要细节，不在记忆里粘大段代码。
+- 完成开发任务前必须更新 `MEMORY.md`，规则见文末【强制记忆更新与文档维护】。
 - Git 提交按用户意图执行：用户要求提交时，每到稳定点及时 commit；用户未要求时，完成验证后汇报建议提交点，不擅自制造提交历史。
 
 ## 技术栈
@@ -28,12 +33,14 @@ npm run tauri build    # 打包
 ## 项目结构
 - `src-tauri/src/lib.rs` — 主逻辑（窗口全屏、热键监听/焦点 light dismiss、托盘、Tauri setup/命令注册）
 - `src-tauri/src/clipboard.rs` — 剪贴板子系统（历史/粘贴/复制/janitor/监听；`clipboard::init` 封装 setup 时序）
-- `src-tauri/src/apps.rs` — 应用扫描 / `ExtractIconEx` 图标提取
-- `src-tauri/src/dragout.rs` — 中转区拖出（`DoDragDrop`：IDataObject + IDropSource；**主线程**跑 DoDragDrop[持鼠标 capture]、hide-after；source 侧，与 dragdrop.rs 拖入正交。详见 DECISIONS §18 含三条死胡同：「hide-before 丢 capture」/「WebView2 原生 `<img>` 拖拽抢手势 → 落地 download.png」/「裸 ShowWindow 绕过 tao 可见性缓存 → 下次 show 被 diff 成 no-op → 卡死」。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）
+- `src-tauri/src/apps.rs` — 应用扫描 / 图标提取（`ExtractIconEx`/`SHGetFileInfoW`）
+- `src-tauri/src/dragdrop.rs` — 中转区拖入（target 侧；setup 一次性自注册 IDropTarget，详见 DECISIONS §14）
+- `src-tauri/src/dragout.rs` — 中转区拖出（source 侧，与拖入正交；`DoDragDrop` 必须**主线程**跑 + hide-after，三条死胡同见 DECISIONS §18。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）
+- `src-tauri/src/filesearch.rs` / `everything.rs` — 文件索引（后台预建）/ 可选 Everything 引擎（详见 DECISIONS §17）
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
-- `DECISIONS.md` — 完整架构决策与踩坑根因（需要"为什么"时读它，入口规则文档只放结论）
-- `MEMORY.md` — 滚动会话小结，**当前进度 / 待办 / 下一步以它为准**
+- `DECISIONS.md` — 架构决策与踩坑根因（目录带一行摘要，按需选读）
+- `MEMORY.md` — 现状快照 + 最近会话详记，**当前进度/待办/下一步以它为准**；`HISTORY.md` — 历史归档（默认不读）
 
 ---
 
@@ -41,60 +48,58 @@ npm run tauri build    # 打包
 
 ### 窗口 / 焦点（最高危区）
 - **一次只改一个焦点 / 激活 / 窗口相关的变量**。捆绑改动必出连锁 bug。
-- **`tauri.conf.json` 锁定项**：`transparent:true`（改 false → 全屏 + blur 的 GPU 合成开销 → hide/show 延迟 + 空白页闪烁）和 `focus:false`（抢焦点会破坏热键）**都不能改**；其余基线 `decorations:false / alwaysOnTop:true / skipTaskbar:true / visible:false`。
-- 可见性的**唯一真相是 `window.is_visible()`（Rust）**。Rust 直接 `show()/hide()`，`emit` 只用于同步前端状态。**绝不让前端管 hide**（会引入 IPC 往返延迟，表现为"空白页后延迟关闭"）。
-- **呼出(show)路径的三条耦合约束，别"顺手简化"**（横跨"幽灵界面 / Esc 失灵 / 白闪"三次修复才凑齐，两处 show 路径——hotkey handler + tray_toggle——必须一致）：
+- **`tauri.conf.json` 锁定项**：`transparent:true`（改 false → 全屏+blur 走重量级 GPU 合成 → hide/show 延迟 + 空白页闪烁）和 `focus:false`（抢焦点会破坏热键）**都不能改**；其余基线 `decorations:false / alwaysOnTop:true / skipTaskbar:true / visible:false`。
+- 可见性的**唯一真相是 `window.is_visible()`（Rust）**。Rust 直接 `show()/hide()`，`emit` 只用于同步前端状态。**绝不让前端管 hide**（IPC 往返延迟 → "空白页后延迟关闭"）。
+- **呼出(show)路径的三条耦合约束，别"顺手简化"**（两处 show 路径——hotkey handler + tray_toggle——必须一致；由来见 DECISIONS §8）：
   ① `emit("hotkey-show")` 必须**在 `window.show()` 之前**（前端先渲染深色 CSS，否则白闪）；
   ② `set_focus()` **必须有**（否则键盘焦点不在窗口，Esc 的 keydown 到不了 JS → Esc 没反应）；
   ③ `set_focus()` 必须**延迟执行**（50ms 后台线程 + 可见性守卫；立刻调会触发 `WM_ACTIVATE` 重绘 → 白闪）。
-- 关闭/粘贴的**焦点交还流程**（文本 / 图片 / 文件夹粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
-  `window.hide()` → `wait_foreground_handback`（守卫轮询，见下）→ `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
-  等待段**曾是盲等 `sleep(150ms)`——已废弃别回退**：`hide()` 是异步派发，负载高时 150ms 不够、前台仍是本窗口 → Ctrl+V 注入进已隐藏的自家窗口 → 点击粘贴偶发失败（剪贴板已写成功，故手动 Ctrl+V 反而能粘上）。现为 `wait_foreground_handback`：轮询到前台「既非本窗口也非 NULL」再留落定余量，超时保底继续；参数为 `clipboard.rs` 顶部 `FOCUS_HANDBACK_*` 常量。
+- 关闭/粘贴的**焦点交还流程**（文本 / 图片 / 文件粘贴复用，**别改流程**；例外：桌面 WorkerW/Progman 走 SHFileOperation 落地）：
+  `window.hide()` → `wait_foreground_handback`（守卫轮询到前台「既非本窗口也非 NULL」再留落定余量，超时保底继续；参数为 `clipboard.rs` 顶部 `FOCUS_HANDBACK_*` 常量）→ `GetForegroundWindow` → `SetForegroundWindow` → `enigo` 发 `Ctrl+V`。
+  等待段曾是盲等 `sleep(150ms)`——**已废弃别回退**（`hide()` 是异步派发，负载高时 Ctrl+V 注入进已隐藏的自家窗口 → 偶发粘贴失败；根因见 DECISIONS §3 续80 延伸）。
 - "前台窗口"与"键盘输入焦点"是两个概念——推回焦点的死路见下方【💀 死胡同】。
 
 ### 全局热键
-- **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState(VK_CONTROL/VK_SPACE)` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——那条路有 500-800ms 抖动（见【💀 死胡同】）。
-- `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费" Ctrl+Space**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
-- **混合语义**（`lib.rs` 顶部常量 `HOTKEY_TAP_MAX_MS=250ms` 分界）：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、松开不关，下次短按才关）。要调灵敏度改 `HOTKEY_TAP_MAX_MS`，调采样率改 `HOTKEY_POLL_MS`。
-- **自定义热键（V2-1，续44）**：combo 不再硬编码——轮询读静态 `HOTKEY_VK_KEYS`（VK 列表），注册层用 `CURRENT_SHORTCUT`。setup **同步读 store** 落地（`read_combo_from_store`，失败兜底 Ctrl+Space，无启动空窗）；`set_hotkey` 命令做**原子注册切换**（先 register(new) 成功→unregister(old)→更新两静态，失败保留旧组合并回滚 + 红字提示）；**持久化由前端 store 负责**，命令不写 store。**表驱动 `parse_combo`**（非白名单）：blocklist **仅** win/super/meta + 裸 alt+space/alt+f4（OS 占用）；**修饰键 Ctrl/Shift/Alt 均可选（续46 起，含全无 = 纯主键，已弃「必须含 Ctrl」）**；恰 1 个主键（`key_token` 表，a-z/0-9/f1-f12/space/方向键，53 条）。⚠️ **Alt 续46 spike 实测可用**（RegisterHotKey 消费组合 → 前台收不到 Alt → 不触发菜单栏激活；推翻旧「Alt 死路」，详见 DECISIONS §9 续46 + 下方死胡同已划掉条目）。⚠️ **纯主键会注册成全局热键、抢占该键**（如录 `f` → 打字 f 触发窗口）——用户自负，前端提示已警示。**录制式输入（续46）**：快捷键 tab「录制」按钮，capture 阶段监听 keydown（`addEventListener(..,true)`+preventDefault/stopPropagation 抢在全局 onKey 前）→ `tokenFromCode` 映射 `e.code` 成 token → 写回文本框（不自动应用，再点「应用」走 changeHotkey）。轮询循环只改 combo 检测一行、长短按判定不动。
-- 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。修饰键避坑见【💀 死胡同】。
-  - ⚠️ **别再给热键关闭加「淡出再 hide」**：试过（续25），延迟 hide 让窗口多可见 200ms，破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按时第 N 次「开」被误判成「关」→ 热键失灵/不灵敏。已回退。淡出仅用于前端点击驱动的关闭（启动/粘贴），不用于键态轮询驱动的热键关闭。
-- **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 show 的 set_focus dance 里会抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防，之后前台变了才关）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**（违反上面"绝不让前端管 hide"）。详见 DECISIONS §12。
+- **show/hide 的唯一驱动 = 物理键态轮询**（`start_hotkey_monitor`，后台线程 25ms 读 `GetAsyncKeyState` 的 MSB）。**不要回退到用 `RegisterHotKey` 的 Pressed/Released 事件做 show/hide**——500-800ms 抖动（见【💀 死胡同】）。
+- `RegisterHotKey`（`tauri-plugin-global-shortcut`）**仅保留用来"消费"当前组合**（handler 故意为空），防止该键漏给前台应用（IME 切换 / 编辑器补全）。**别在这个空 handler 里加 show/hide 逻辑**。
+- **混合语义**：长按 = momentary（按下开、松开关）；短按 = toggle（按下沿开、下次短按才关）。调灵敏度改 `HOTKEY_TAP_MAX_MS`（=250ms 分界），调采样率改 `HOTKEY_POLL_MS`（均为 `lib.rs` 顶部常量）。
+- **自定义热键**（演进见 DECISIONS §9）：轮询读静态 `HOTKEY_VK_KEYS`，注册层用 `CURRENT_SHORTCUT`；setup **同步读 store** 落地（失败兜底 Ctrl+Space，无启动空窗）。`set_hotkey` 命令做**原子注册切换**（先 register(new) 成功 → unregister(old) → 更新两静态；失败保留旧组合回滚）；**持久化由前端 store 负责，命令不写 store**。`parse_combo` 表驱动（非白名单）：blocklist **仅** win/super/meta + 裸 alt+space/alt+f4（OS 占用）；修饰键 Ctrl/Shift/Alt 均可选（含全无 = 纯主键，**会全局抢占该键**，前端已警示）；恰 1 个主键（`key_token` 表）。⚠️ **Alt 组合可用**（续46 spike 推翻旧「Alt 死路」：RegisterHotKey 消费整个组合、前台收不到 Alt → 不触发菜单栏）。录制式输入：capture 阶段抢先监听 keydown 写回文本框，再点「应用」生效；轮询循环只改 combo 检测一行、长短按判定不动。
+- 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。
+  - ⚠️ **别再给热键关闭加「淡出再 hide」**（续25 试过已回退）：延迟 hide 破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按误判、热键失灵。淡出仅用于前端点击驱动的关闭（启动/粘贴）。
+- **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 set_focus dance 里抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**。详见 DECISIONS §12。
 
 ### 剪贴板
-> 下列可调数值（轮询 150ms / 缩略图 1024px / aHash 阈值）均为 `lib.rs` 顶部命名常量（`CLIP_POLL_MS` / `MAX_THUMB_DIM` / `AHASH_*`）。**要调就改常量，别在散落处硬编码。**
-> 缓存条数：`CLIP_CACHE_MAX_DEFAULT=20`（默认），运行时由 `CLIP_CACHE_MAX_RUNTIME`（AtomicUsize）控制，可通过设置面板四档（10/20/50/100）调整，持久化到 store key `clip-cache-max`，`set_clip_cache_max` 命令更新。**不要直接改 `CLIP_CACHE_MAX_DEFAULT` 来调条数，改设置面板即可。**
-> ⚠️ `CLIP_POLL_MS` 别再调大：轮询式监听下，两次复制落在同一采样窗口会"塌缩"丢中间项（详见 DECISIONS §6）；要彻底根治需改事件驱动（`AddClipboardFormatListener`）。
-- 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻运行，轮询 `sleep(CLIP_POLL_MS)`。
-- 用 `GetClipboardSequenceNumber()` 判断是否变化，**不每次读全量数据**。
-- 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）；`CLIP_CACHE` 最多 20 条。
-- 图片：>1024px 用 `image` crate `FilterType::Triangle` 缩到 1024px 缩略图再编码。**轮询不读图，只在内容变化时处理一次**。
-- **所有剪贴板读写必须走 `CLIPBOARD_LOCK` 串行化**（监听读 + 全部写入者：copy/paste × 文本/图片/文件，含 `set_clipboard_image` 桌面分支读当前图的 `get_image`）。根因：监听线程占着 `OpenClipboard` 句柄时，写入者的 `SetClipboardData`/`EmptyClipboard` 抢不到 → `os error 1418`（线程没有打开的剪贴板）。锁粒度**仅限 `OpenClipboard…CloseClipboard` 临界区**（arboard 的 set/get 调用本身、或裸 FFI `write_cf_hdrop`）——写入者**绝不跨 `hide()`/`sleep()`/焦点交还/`enigo` Ctrl+V 持锁**（会阻塞监听线程、emit 往返时可能死锁）。桌面分支 `SHFileOperation`/`desktop_copy_files` 落地文件、**不碰系统剪贴板，不加锁**。`write_cf_hdrop` 被 paste 与 copy 共用 → 锁加在**调用方**、**别进 `write_cf_hdrop`**（否则 copy 重入死锁）。锁序：监听**先放 `CLIPBOARD_LOCK` 再取 `CLIP_CACHE`**，写入者只取 `CLIPBOARD_LOCK`，无环。**新增任何剪贴板读写路径必须取此锁。**（唯一例外：监听读在剪贴板被外部占用时，持锁跨有界 retry-sleep `CLIP_READ_RETRIES×CLIP_READ_RETRY_MS`——此时外部正占着剪贴板、写入者本就进不来，无额外损害；见 DECISIONS §6。）
-- 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（用计数器非布尔——arboard 的 get+set 可能触发 2 次 seq 变化），后台 `swap` 递减跳过。`CLIPBOARD_LOCK` 与 `SKIP_CLIP_EVENTS`/seq 水位是两层正交防护：前者防**并发抢句柄(1418)**，后者防**自写回流历史面板**。
-- 写文件用 `CF_HDROP` raw FFI（`SetClipboardData` / `DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径）。别用 `[0u8;16]` 清零，会导致 fWide=FALSE 解析失败。
-- **图片粘贴按目标窗口类三分叉**（`set_clipboard_image`，按 `GetForegroundWindow`+`GetClassNameW` 取的 class 分流）：① **桌面**(`WorkerW`/`Progman`)→ `desktop_copy_files`(SHFileOperation 落地真 PNG)；② **资源管理器文件夹**(`CabinetWClass`/`ExploreWClass`)→ CF_HDROP 落地真 PNG（**文件夹只收文件、不收位图**——已探针证实：Explorer 粘贴只认 CF_HDROP/FileDescriptor/FileContents，CF_DIB 收不下，Win+Shift+S 能粘是因 Snip 额外放了 shell 文件格式；大图复用已落盘 `clip_images/{time}.png` **零解码**，小图解 base64 写一份 `clip_images/workbench_clip_*.png` **由 janitor 孤儿清理兜底**，无固定延时 race）；③ **其余 app**(Paint/聊天框等)→ `set_image` 位图。**文件夹/桌面分支绝不为位图解码全分辨率 RGBA**（那是卡顿源、且文件夹收不下=白解码）；只有第 ③ 分支(真吃位图的 app)才解码。文件夹分支复用文件粘贴 idiom：CF_HDROP 锁加调用方、写前 `SKIP_CLIP_EVENTS.store(2)`、焦点交还流程不变。详见 DECISIONS §6 延伸。
+> 可调数值（轮询间隔 / 缩略图尺寸 / aHash 阈值等）均为 `clipboard.rs` 顶部命名常量（`CLIP_POLL_MS` / `MAX_THUMB_DIM` / `AHASH_*` …）。**要调就改常量，别在散落处硬编码。**
+> 缓存条数：默认 `CLIP_CACHE_MAX_DEFAULT=20`，运行时由 `CLIP_CACHE_MAX_RUNTIME` 控制（设置面板四档 10/20/50/100，持久化 store）。**别直接改 DEFAULT 调条数。**
+> ⚠️ `CLIP_POLL_MS` 别再调大：两次复制落同一采样窗口会"塌缩"丢中间项（DECISIONS §6）；彻底根治需改事件驱动（`AddClipboardFormatListener`）。
+- 后台线程 `start_clipboard_monitor` 独立于窗口 visible 常驻轮询；用 `GetClipboardSequenceNumber()` 判变化，**不每次读全量**；**轮询不读图，只在内容变化时处理一次**（>1024px 缩到缩略图再编码）。
+- 检测顺序 `图片 → CF_HDROP(文件) → 文本`（截图同时有 CF_HDROP+位图，图片优先）。
+- **所有剪贴板读写必须走 `CLIPBOARD_LOCK` 串行化**（监听读 + 全部写入者：copy/paste × 文本/图片/文件，含桌面分支读当前图的 `get_image`）。根因：并发抢 `OpenClipboard` 句柄 → `os error 1418`。锁粒度**仅限 `OpenClipboard…CloseClipboard` 临界区**——写入者**绝不跨 `hide()`/`sleep()`/焦点交还/`enigo` Ctrl+V 持锁**（阻塞监听、emit 往返可能死锁）。桌面分支 `SHFileOperation`/`desktop_copy_files` 不碰系统剪贴板、不加锁。`write_cf_hdrop` 被 paste 与 copy 共用 → **锁加调用方、别进函数**（否则 copy 重入死锁）。锁序：监听先放 `CLIPBOARD_LOCK` 再取 `CLIP_CACHE`，写入者只取 `CLIPBOARD_LOCK`，无环。**新增任何剪贴板读写路径必须取此锁。**（唯一例外：监听读在剪贴板被外部占用时持锁跨有界 retry-sleep——此时写入者本就进不来，无额外损害；见 DECISIONS §6。）
+- 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（计数器非布尔——get+set 可能触发 2 次 seq 变化）。`CLIPBOARD_LOCK` 防**并发抢句柄(1418)**、`SKIP_CLIP_EVENTS`/seq 水位防**自写回流历史面板**，两层正交防护各管各的。
+- 写文件用 `CF_HDROP` raw FFI（`SetClipboardData`/`DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径），清零会导致 Explorer 解析失败。
+- **图片粘贴按目标窗口类三分叉**（`set_clipboard_image`，按前台窗口 class 分流；探针取证见 DECISIONS §6 延伸）：① **桌面**(`WorkerW`/`Progman`)→ SHFileOperation 落地真 PNG；② **资源管理器文件夹**(`CabinetWClass`/`ExploreWClass`)→ CF_HDROP 落地真 PNG（**文件夹只收文件、不收位图**，已探针证实；大图复用已落盘 `clip_images/{time}.png` **零解码**，小图写 `clip_images/workbench_clip_*.png` 由 janitor 孤儿清理兜底）；③ **其余 app**(Paint/聊天框等)→ `set_image` 位图。**只有分支③才解码全分辨率 RGBA**（①②解码 = 卡顿源 + 白解码）。文件夹分支复用文件粘贴 idiom：锁加调用方、写前 `store(2)`、焦点交还流程不变。
 - 去重**只在同类型内进行**（跨类型去重会误删）：文件按 `items[0].path`，文本/图片按 `content`，不同类型永久保留。
-- **批量 file 走合并 CF_HDROP、混合不可批量上剪贴板**：多个 file 条目可 `flatMap items` 合并成一个 CF_HDROP 一次写入；但文本/图片/混合无法合并成单一 payload。前端批量取走/复制仅对「全选 file」启用（`allFiles` 判断），混合/文本/图片选中时置灰。此限制源于 CF_HDROP §7 架构，任何新增批量剪贴板功能必须过此关（详见 DECISIONS §6 延伸）。
-- **历史持久化落盘 I/O 绝不进 `CLIPBOARD_LOCK`**（磁盘 IO 与 Win32 剪贴板锁正交，混用无必要且拉长持锁时间）。`save_clip_history` 接**快照入参**、自身不持任何锁——调用方必须先释放 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 再调（防重入死锁；与 `write_cf_hdrop` 锁加调用方同理）。固定模式：`{ 锁 CLIP_CACHE → mutate → let snap = cache.clone(); }` 出锁 → `save_clip_history(snap)`。
-- **`clip_images/` 原图缓存由解耦 janitor 管上限**（`sweep_clip_image_cache` + `start_clip_image_janitor` 后台线程，周期 `CLIP_IMAGE_SWEEP_MS`）：两步——孤儿清理（删未被任何 `orig_path` 引用的文件）+ 总量封顶（超 `CLIP_IMAGE_CACHE_MAX_BYTES` 从最旧删）。**绝不进 `CLIPBOARD_LOCK`**（磁盘 I/O 与剪贴板锁正交），`CLIP_CACHE` 锁**仅 snapshot-and-release 收集被引用文件名**（锁块内零 fs）。**绝不在 `set_clip_cache_max`/`delete`/`clear`/dedup truncate 等写路径插删图逻辑**（侵入高危区、增锁与重入风险）——自动管理一律走这个自包含 janitor。启动时序：首次 sweep 必须在 `load_clip_history` 填充 `CLIP_CACHE` 之后（否则空集合误删全部），靠线程起手 `sleep(CLIP_IMAGE_SWEEP_INITIAL_MS)` 错开。要调上限/周期改 `lib.rs` 顶部命名常量。详见 DECISIONS §6 延伸。
+- **批量上剪贴板仅限「全选 file」**：多 file 条目可合并成一个 CF_HDROP 一次写入；文本/图片/混合无法合成单一 payload（CF_HDROP §7 架构限制），前端相应置灰。任何新增批量剪贴板功能必须过「能否合并成单一 payload」这道门槛（详见 DECISIONS §6 延伸）。
+- **历史持久化落盘 I/O 绝不进 `CLIPBOARD_LOCK`**（磁盘 I/O 与剪贴板锁正交）。`save_clip_history` 接**快照入参**、自身不持任何锁——调用方必须先释放 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 再调（防重入死锁）。固定模式：`{ 锁 CLIP_CACHE → mutate → let snap = cache.clone(); }` 出锁 → `save_clip_history(snap)`。
+- **`clip_images/` 原图缓存由解耦 janitor 管上限**（`sweep_clip_image_cache` + 后台线程周期执行）：孤儿清理 + 总量封顶两步。**绝不进 `CLIPBOARD_LOCK`**；`CLIP_CACHE` 锁**仅 snapshot-and-release 收集被引用文件名**（锁块内零 fs）。**绝不在 `set_clip_cache_max`/`delete`/`clear`/dedup truncate 等写路径插删图逻辑**（侵入高危区、增锁与重入风险）——自动管理一律走 janitor。启动时序：首次 sweep 必须在 `load_clip_history` 之后（否则空集合误删全部），靠线程起手 sleep 错开。上限/周期为命名常量。详见 DECISIONS §6 延伸。
 
 ### 窗口尺寸
 - 用**工作区（work area）尺寸**而非物理全屏，保留任务栏。
-- 200% DPI 下 `outer_size` 比设置值大 ~26×15px（Windows 给无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
-- `set_shadow(false)` 后透明窗 `WRY_WEBVIEW` 子窗填满外框（含隐形边框），底边落在 `outer.bottom` 会越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 量 `GetWindowRect`、越界则等量缩 inner 高度贴齐工作区底（动态测量、无硬编码）。详见 DECISIONS §5 延伸。
+- 200% DPI 下 `outer_size` 比设置值大 ~26×15px（无边框窗口的隐形边框），用"位置补偿对齐屏幕原点"**动态计算**修正，**不要硬编码**。
+- `set_shadow(false)` 后 WebView 填满外框、底边越过任务栏顶遮一条 → `make_fullscreen` 末尾 `clamp_window_bottom` 动态量 `GetWindowRect`、越界则等量缩 inner 高度贴齐（无硬编码）。详见 DECISIONS §5 延伸。
 
 ### 扫描/索引一律后台预建（`filesearch.rs` 文件索引 · `start_apps_worker` 应用扫描）
-- **耗时预备工作（应用扫描、文件索引）一律挪到独立后台线程预建、前端只监听就绪事件**（`apps-ready` / `file-index-ready`），**绝不在呼出路径同步执行**。应用扫描曾绑在「前端首次 `visible` 时 invoke」，正好砸在首次呼出 → 卡（S4c 修，约 1.5s 移到后台）。前端 invoke 命令仅保留为**兜底**（事件错过时调，命中缓存近乎瞬时）。
-- **索引建立只在独立后台线程**（`start_index_worker` 内 `std::thread::spawn`），**永不经 Tauri 命令 / invoke / 阻塞 IPC/UI**；setup 阶段 spawn、先 `sleep(3s)` 再首次建索引，不等窗口/呼出。
-- **查询命令（`search_files`/`get_index_status`）只读内存、永不碰磁盘**（µs 级）。**双缓冲原子替换**：耗时的 `walkdir` 遍历**绝不持锁**，建完一次性换 Vec；`FILE_INDEX` 锁只罩「替换 Vec」「读 Vec」两个瞬间临界区。
-- `FILE_INDEX` 是**全新独立 Mutex**，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无任何交集、无锁序问题。要调遍历目录/深度/重建周期改 `filesearch.rs` 顶部命名常量。详见 DECISIONS §17。
+- **耗时预备工作（应用扫描、文件索引）一律独立后台线程预建、前端只监听就绪事件**（`apps-ready` / `file-index-ready`），**绝不在呼出路径同步执行**（应用扫描曾砸在首次呼出 → 卡 ~1.5s）。前端 invoke 命令仅作兜底（命中缓存近乎瞬时）。
+- **索引建立只在独立后台线程**（`start_index_worker` 内 `std::thread::spawn`），**永不经 Tauri 命令 / invoke / 阻塞 IPC/UI**；setup 阶段 spawn、先延迟再首次建索引，不等窗口/呼出。
+- **查询命令（`search_files`/`get_index_status`）只读内存、永不碰磁盘**（µs 级）。**双缓冲原子替换**：耗时遍历**绝不持锁**，建完一次性换 Vec；`FILE_INDEX` 锁只罩「替换 Vec」「读 Vec」两个瞬间临界区。
+- `FILE_INDEX` 是**全新独立 Mutex**，与 `CLIPBOARD_LOCK`/`CLIP_CACHE` 无任何交集、无锁序问题。调遍历目录/深度/重建周期改 `filesearch.rs` 顶部命名常量。详见 DECISIONS §17。
 
 ### 💀 死胡同（已验证失败，别再试，别浪费时间）
 - **`WS_EX_NOACTIVATE` 推回键盘焦点**：WebView2 内部 `SetFocus` 抢占键盘路由，外部进程无权推回。
 - **自建 OS 级钩子 `rdev` / `WH_KEYBOARD_LL`**：消息循环编排极易错、多轮踩坑失败——用 `tauri-plugin-global-shortcut`。（遗留实现 `hotkey.rs` 已删）
-- **用 `RegisterHotKey` 的 Pressed/Released 事件判按键时长**：其事件经消息队列异步投递、有 500–800ms 抖动，阈值 200/300/500ms 全失败。⚠️ 注意区分：长短按本身**已实现**，但靠的是 `GetAsyncKeyState` 轮询物理电平（DECISIONS §2），**不是** RegisterHotKey 事件——别再回头试事件时长判定。
-- ~~**修饰键 `Alt`（裸 Alt 触发菜单栏）**~~：**已推翻（续46 spike 实测）**——Alt 组合（如 Alt+Q）可用，`RegisterHotKey` 消费整个组合、前台应用收不到 Alt → 不触发菜单栏激活；旧结论来自早期 JS/rdev 录入态路线、与当前架构无关（详见 DECISIONS §9 续46）。仍禁：`Fn`（硬件键，OS 收不到）/ 裸 `Alt+Space`（系统窗口菜单）/ 裸 `Alt+F4`（关窗）——这几个语义被 OS 占用。
-- **拖入 target「每次 show 经 `run_on_main_thread` 幂等重注册」**：实测重注册虽报成功、产出的 IDropTarget 却收不到回调、破坏正常拖入（单变量隔离确认）。拖入注册**只在 setup 做一次**。详见 DECISIONS §14。（注：原生拖入本身**可行、已实现**，别误删——曾被错误登记为死胡同后已推翻。）
+- **用 `RegisterHotKey` 的 Pressed/Released 事件判按键时长**：事件经消息队列异步投递、500-800ms 抖动，阈值全失败。⚠️ 长短按本身**已实现**，靠的是 `GetAsyncKeyState` 轮询物理电平（DECISIONS §2）——别再回头试事件时长判定。
+- ~~**修饰键 `Alt`（裸 Alt 触发菜单栏）**~~：**已推翻（续46 spike 实测）**——Alt 组合可用，RegisterHotKey 消费整个组合、前台收不到 Alt；旧结论来自早期 JS/rdev 录入态路线（详见 DECISIONS §9 续46）。仍禁：`Fn`（硬件键）/ 裸 `Alt+Space`（系统窗口菜单）/ 裸 `Alt+F4`（关窗）——语义被 OS 占用。
+- **拖入 target「每次 show 幂等重注册」**：重注册虽报成功、产出的 IDropTarget 收不到回调、破坏正常拖入（单变量隔离确认）。拖入注册**只在 setup 做一次**。详见 DECISIONS §14。（注：原生拖入本身**可行、已实现**，别误删——曾被错误登记为死胡同后已推翻。）
 
 ### 🔍 出问题时反查（症状 → 先查哪条铁律）
 | 症状 | 大概率违反 |
@@ -103,28 +108,32 @@ npm run tauri build    # 打包
 | 呼出白闪 | `set_focus` 太早 / `hotkey-show` 没提前于 `show()` |
 | Esc 没反应 | show 路径缺 `set_focus()` |
 | 焦点回不来、粘贴失败 | 碰了 `WS_EX_NOACTIVATE` 死胡同 |
+| 点击粘贴偶发失败、手动 Ctrl+V 却能粘 | 焦点交还回退成了盲等 sleep / 看 `handback` 日志的 timeout 与 fg class（DECISIONS §3 续80）|
 | 文件粘贴被 Explorer 拒绝 | `DROPFILES.fWide ≠ 1` |
 | 截图不显示缩略图 | 检测顺序没把图片排在 CF_HDROP 之前 |
 | 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
 | 复制/粘贴写剪贴板报 os error 1418 | 写入段没取 `CLIPBOARD_LOCK`，与监听读并发抢 OpenClipboard 句柄 |
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
-| 窗口底部细蓝缝 / 透明窗边异常 | `NCRENDERING_POLICY=DISABLED` 破坏透明边自画的；去阴影改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
-| WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后 WebView 填满外框、底边越过任务栏顶；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
-| 拖出后窗口呼不出 / 卡死须重启 | 裸 `ShowWindow` 改了可见性却没同步 tao 缓存 → 下次 `window.show()` 被 diff 成 no-op；收尾改走 Tauri `hide()`；见 DECISIONS §18 续71b |
-| 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢了手势（且无 `[dragout]` 日志）；卡片 + img 需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
+| 窗口底部细蓝缝 / 透明窗边异常 | 用了 `NCRENDERING_POLICY=DISABLED` 去阴影；改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
+| WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后底边越界；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
+| 拖出后窗口呼不出 / 卡死须重启 | 裸 `ShowWindow` 没同步 tao 缓存 → 下次 `window.show()` 被 diff 成 no-op；收尾改走 Tauri `hide()`；见 DECISIONS §18 续71b |
+| 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢手势（且无 `[dragout]` 日志）；需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
 
 ---
 
 ## 协作约定（给 AI 编码助手）
 - 改完代码要**自己真跑、看日志、用数据说话**，不要只说"请测试"就交差。
-- **真跑不了 GUI 时别假装**：热键 / 桌面点击这类无头环境无法驱动的链路，至少**针对性验证可复现的核心逻辑**（例：本会话用 P/Invoke 直接验证 `SHFileOperation` 的 flag 语义），并在结论里**诚实标注哪些是模拟验证、哪些没真跑**。
+- **真跑不了 GUI 时别假装**：热键 / 桌面点击这类无头环境无法驱动的链路，至少**针对性验证可复现的核心逻辑**（例：用 P/Invoke 直接验证 `SHFileOperation` 的 flag 语义），并在结论里**诚实标注哪些是模拟验证、哪些没真跑**。
 - **诊断优先于修改**：先加日志 / 输出分析确认根因，再动手改。
 - "理论上更优雅" ≠ "实际更好"：已验证的笨方法优于未验证的聪明方法。
 - 出现"焦点回不来"这类**架构性死胡同信号时，果断回退**，不要打补丁硬撑。
 - **`LauncherItem`（启动器收藏）与 `StageItem`（中转条目）不可合并**：二者形似但**左键动作契约不同**——启动器=打开/启动（不走粘贴链/不取 `CLIPBOARD_LOCK`），中转=取走粘贴（走粘贴链）。**动作由"区"决定**，别因字段相似而合并类型或复用左键 handler（详见 DECISIONS §16）。
 - Git 提交按本文件顶部「Agent 入口约定」执行；不要在用户未要求提交时擅自制造提交历史。
 
-## 强制记忆更新 (Post-Task)
-在你完成了用户下达的开发需求，准备结束本次任务之前，你必须**主动修改并更新** `MEMORY.md` 文件。
-- 更新内容需包含：本次新增/修改的核心文件路径、逻辑变更的极简概括、以及发现的已知 Bug 或下一步建议。
-- **严禁**在 `MEMORY.md` 中粘贴大量代码，仅保留结构索引和文字说明。
+## 强制记忆更新与文档维护 (Post-Task)
+完成用户下达的开发需求、准备结束任务之前，必须**主动更新** `MEMORY.md`：
+- **§0** 覆盖更新短快照：本次改了什么、核心文件路径、已知 bug、下一步建议；本会话详记写入 **§0A**（多行短 bullet 格式）。
+- **§0A 滚动窗口 ≤3 个会话**：写入新详记时，把最老一条**整段迁入** `HISTORY.md`「一、会话详记归档」顶部，MEMORY.md 不留副本；变更记录同样只进 HISTORY.md。
+- **单一真相源**：每个事实只落一处——硬规则→本文件铁律；根因/决策→`DECISIONS.md`（新增 § 时在其目录补一行摘要）；当前状态→`MEMORY.md`；历史→`HISTORY.md`（git log 已有的不重复记）。其他位置只放一行指针，**别把同一段叙述抄多份**。
+- **短行原则**：新记录写多行短 bullet，禁止数千字符的单行（毁掉 Read offset / Grep 局部读取）。
+- **严禁**在 MEMORY.md 中粘贴大量代码，仅保留结构索引和文字说明。
