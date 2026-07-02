@@ -2,12 +2,25 @@
 
 > 本文件记录"为什么这样做"和"哪些路走不通"。需要硬规则（怎么做、别碰什么）看 `CLAUDE.md` 的【铁律】；本文件是其背后的证据与根因。
 
-## 目录（按主题）
-- **热键**：§1 RegisterHotKey vs 自建钩子 · §2 放弃长短按 · §9 修饰键选择
-- **窗口 / 焦点 / 渲染**：§4 透明 vs 不透明 · §5 全屏缝隙(outer≠inner) · §8 前端状态 + Esc 幽灵界面 + 呼出白闪 · §14 原生拖入(drag-in)废弃
-- **剪贴板 / 粘贴**：§3 粘贴可靠性 6 轮演进 · §6 后台缓存架构 · §7 CF_HDROP/DROPFILES · §10 检测优先级(截图去重) · §11 桌面 SHFileOperation 兜底 + fFlags
-- **搜索 / 启动器 UI**：§15 增强搜索(Ctrl+K)视图层 + 两套搜索分工 · §16 启动器=持久化收藏托盘(vs 自动扫描全量) · §17 文件搜索=自建内存索引+后台预建(vs Windows Search/Everything)
-- **其他**：§12 Git 版本历史（关键节点）
+## 目录（§ → 一行结论；先看摘要再决定读哪节，别整读本文件）
+- **§1 全局热键**：自建 OS 钩子（rdev / WH_KEYBOARD_LL）5 轮全败 → 用 tauri-plugin-global-shortcut；后又演进为键态轮询驱动（RegisterHotKey 降级为仅消费按键）
+- **§2 长短按判定**：RegisterHotKey 事件有 500-800ms 抖动不堪用（问题在信号源不在阈值）→ 换 `GetAsyncKeyState` 轮询物理电平做成
+- **§3 粘贴可靠性（7 轮演进）**：`SetForegroundWindow` 强制刷新焦点队列是成功关键；续80 延伸：盲等 150ms 有竞态 → 守卫轮询 `wait_foreground_handback`（含 3 个已识别未修项）
+- **§4 窗口透明**：`transparent:false` + 全屏 + blur 走重量级 GPU 合成（hide/show ~200ms 延迟）→ 必须 `transparent:true` + CSS 模拟不透明
+- **§5 全屏缝隙**：outer≠inner 动态补偿；去阴影必须用 `set_shadow(false)`（`NCRENDERING_POLICY=DISABLED` 正是蓝缝元凶，含 8 条排查死路）；延伸 `clamp_window_bottom` 防 WebView 遮任务栏
+- **§6 剪贴板架构**：后台缓存 + seq 轮询；采样塌缩；`CLIPBOARD_LOCK`/skip 计数/seq 水位分层防护与锁纪律；历史持久化；落盘原图 + 解耦 janitor；三分叉粘贴与探针取证；续56 截图丢分辨率双修
+- **§7 CF_HDROP/DROPFILES**：raw FFI 内存布局；`fWide` 必须=1（ANSI 标志位是 Explorer 拒收根因）
+- **§8 前端状态**：opacity 切换不卸载组件；Esc 幽灵界面 / 呼出白闪两次修复 → 铁律「show 路径三约束」的由来
+- **§9 修饰键与自定义热键**：Ctrl+Space 当前默认；V1 预设 → V2-1 表驱动 parse_combo → 续46 录制式输入 + 修饰键全可选 + spike 实测推翻「Alt 死路」
+- **§10 检测优先级**：图片 > CF_HDROP > 文本（截图双格式，旧顺序吞缩略图）
+- **§11 桌面粘贴**：WorkerW/Progman 不收 CF_HDROP → SHFileOperation 落地；fFlags 必须含 `FOF_RENAMEONCOLLISION`（单用 NOCONFIRMATION 会静默覆盖丢数据）
+- **§12 Light dismiss**：轮询 `GetForegroundWindow`（不用 Focused 事件）+ arm-after-focus 状态机防「开即关」
+- **§13 Git 版本历史**：早期关键节点 commit 列表
+- **§14 原生拖入（可行，已实现）**：`dragDropEnabled:false` + setup 一次性自注册 IDropTarget 到全部子孙窗；曾误判死胡同被 spike 推翻；「每次 show 重注册」才是真死路
+- **§15 增强搜索**：做成同 overlay 内视图层而非新窗口（避开焦点高危区）；两套搜索分工（顶栏就地过滤 vs Ctrl+K 跨区直达）
+- **§16 启动器**：手动策展收藏托盘取代自动扫描全量平铺；`LauncherItem` 与 `StageItem` 左键契约不同、不可合并
+- **§17 文件搜索**：自建内存索引 + 后台预建（三道保险防卡 UI）；§17.1 双引擎（内置扩面 + 可选 Everything 运行时动态加载、失败静默降级）；续68 图标预热进索引路径
+- **§18 拖出 drag-out**：DoDragDrop 必须主线程 + hide-after（hide-before 丢 capture）；IDataObject 存字节 GetData 现拷贝；续71b 两死胡同——`<img>` 原生拖拽抢手势、裸 ShowWindow 不同步 tao 缓存
 
 ---
 
