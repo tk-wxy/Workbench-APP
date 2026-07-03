@@ -10,7 +10,7 @@ Windows 全屏"第二桌面"工具：热键 toggle 呼出覆盖全屏的功能�
 > 本文件只放结论与硬规则，根因一律在 DECISIONS.md。
 
 ## Agent 入口约定
-- 本文件是**唯一** agent 规则入口，任何 AI 编码助手（Claude Code / Codex 等）均以本文件为准（原 Codex 副本 `AGENTS.md` 已于续80 移除，杜绝双文档漂移）。
+- 本文件是**唯一** agent 规则入口，任何 AI 编码助手（Claude Code / Antigravity / Codex 等）均以本文件为准。`AGENTS.md` 仅作路由指针（引导 agent 预读本文件），**不含独立规则，不要在其中添加规则**。
 - Windows PowerShell 读取中文文档时显式 UTF-8（例如 `Get-Content -Encoding utf8`），避免乱码导致误判。
 - 默认先诊断再修改：先读相关代码 / 日志 / 决策记录，确认根因后再动手；窗口、焦点、热键、剪贴板属于最高危区，必须按下方铁律逐条对照。
 - 可验证的改动要自己跑验证；GUI 无法真实驱动时必须明说，并至少跑可复现的核心逻辑或静态检查。
