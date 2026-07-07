@@ -117,6 +117,7 @@ npm run tauri build    # 打包
 | 窗口底部细蓝缝 / 透明窗边异常 | 用了 `NCRENDERING_POLICY=DISABLED` 去阴影；改用 `set_shadow(false)`；见 DECISIONS §5 延伸 |
 | WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后底边越界；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
 | 拖出后窗口呼不出 / 卡死须重启 | 裸 `ShowWindow` 没同步 tao 缓存 → 下次 `window.show()` 被 diff 成 no-op；收尾改走 Tauri `hide()`；见 DECISIONS §18 续71b |
+| 拖出到 cmd/终端后目标失焦、像卡死 2-3s（点一下才活） | 落点 console 不自我激活、本隐藏窗口仍持前台；drop 成功后 `activate_drop_target` 交还前台（前台锁挡住则 AttachThreadInput 强制）；见 DECISIONS §18 续82 |
 | 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢手势（且无 `[dragout]` 日志）；需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
 
 ---
