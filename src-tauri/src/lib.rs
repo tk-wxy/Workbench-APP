@@ -11,7 +11,7 @@ use std::sync::Mutex;
 // CREATE_NO_WINDOW：防止 cmd.exe 子进程在开发模式下弹出控制台窗口
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 use tauri::{AppHandle, Emitter, Manager};
-use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
@@ -20,6 +20,27 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLock::new();
 /// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
 static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
+
+/// 托盘菜单项句柄（setup 时 manage 进 app state），供 set_tray_language 运行时切换文案用。
+struct TrayMenuItems {
+    toggle: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
+
+#[tauri::command]
+fn set_tray_language(lang: String, app: AppHandle) -> Result<(), String> {
+    let items = app.state::<TrayMenuItems>();
+    let en = lang == "en";
+    items
+        .toggle
+        .set_text(if en { "Show Window" } else { "显示窗口" })
+        .map_err(|e| e.to_string())?;
+    items
+        .quit
+        .set_text(if en { "Quit" } else { "退出" })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 /// 供 dragout「保持界面」模式在拖动中轮询当前热键键态用（用户拖动中按热键 → 手动隐藏 overlay 去外部应用）。
 /// 返回同一份 HOTKEY_VK_KEYS 快照，判据与 start_hotkey_monitor 一致；未初始化则返回空（视为无热键、不触发）。
@@ -503,7 +524,7 @@ pub fn run() {
             everything::reload_everything,
             dragout::start_drag_out,
             dragout::get_dragout_auto_close, dragout::set_dragout_auto_close,
-            set_hotkey
+            set_hotkey, set_tray_language
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None::<Vec<&str>>))
@@ -549,6 +570,7 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+            app.manage(TrayMenuItems { toggle: toggle_item, quit: quit_item });
             Ok(())
         })
         .run(tauri::generate_context!())

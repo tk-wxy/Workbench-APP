@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-07（续84：「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 实测通过，见 §0）
+> **最后更新**：2026-07-07（续85：新增中/英文界面语言切换，设置→常规可选，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -15,10 +15,10 @@
 
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
-- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）。
+- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
-- **上一状态（续82，仅 dragout.rs + 文档）**：修「拖出 text/image 到 cmd/PowerShell/Windows Terminal 后目标 2-3s 失焦、像卡死」。诊断定死：drop 干净成功但本隐藏 overlay 仍持前台 2-3s（console 不自我激活）。修复 = drop 成功后 `activate_drop_target` 取落点顶层窗口交还前台，前台锁挡住则 `AttachThreadInput` 强制。**GUI 实测 cmd/终端通过（attached+ok2 true、失焦消失）**；记事本/Paint/Explorer/Esc 回归待用户顺带确认。详见 DECISIONS §18 续82。
+- **最近状态（续85）——新增中/英文界面语言切换**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
+- **上一状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
   - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
@@ -26,6 +26,15 @@
 - **阻塞 / 待决策**：无。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续85（2026-07-07，src/i18n.ts 新增 + App.tsx + lib.rs）——新增中/英文界面语言切换
+- **需求**：设置里可切换界面语言，默认中文，新增英文。`App.tsx` 单文件 ~1860 行，UI 文本几乎全硬编码中文。
+- **方案**：新文件 `src/i18n.ts` — 字典式 `EN_DICT: Record<中文,英文>`，key 直接用中文原文（不发明语义 key）；`makeT(lang)` 返回 `t(zh, vars?)`，缺项 fallback 回中文（不会白屏）；动态文案（`ago()`/"已选 {n} 项"）用 `{占位符}` 模板复用同一套字典。
+- **App.tsx**：新增 `lang`/`t` state（`useMemo(makeT)`），持久化到 store `"language"` key（同 `theme` 惯例）；`changeLang` 同时 invoke `set_tray_language` 同步托盘；时钟 `toLocaleTimeString` 按 lang 切 `zh-CN`/`en-US`；委派 subagent 做机械替换——全文件 ~230 处 `t(...)` 包裹 + ~145 条字典项（设置面板 7 个 tab、主界面、右键菜单、toast、空状态全覆盖）。
+- **Rust（`lib.rs`）**：托盘菜单"显示窗口"/"退出"是唯一 `t()` 管不到的用户可见文案——`MenuItem<Wry>` 存进 `app.manage(TrayMenuItems)`，新增 `set_tray_language` 命令 `.set_text()` 运行时切换；前端读取语言设置后主动 invoke 一次同步。3 条热键校验 Rust `Err(String)` 不改 Rust，原文录入字典，渲染时 `t(hotkeyError)` 包一层复用。
+- **人工 review 修正 2 处撞 key**（字典 key=中文原文的固有代价，详见 DECISIONS §19）：①`"关闭"` 本兼有 Esc-关闭 与 开关 Off 两义，开关按钮改为调用点直写 `lang==="en"?"Off":"关闭"`，不查字典；连带修正中转站设置提示段落里引用的 "Open"/"Close" 改回 "On"/"Off" 保持与按钮一致。②`"应用"` 本兼有名词 App 与动词 Apply 两义，搜索结果徽章同样绕开字典直写 `lang==="en"?"App":"应用"`。
+- **验证**：`npx tsc --noEmit` + `cargo check --lib` 均零错误；人工逐段 review 全量 diff（设置面板七个 tab/主界面/剪贴板/中转区/启动台/增强搜索/右键菜单）。**GUI 实测未做**（切换语言需要用户实际点击操作，按仓库惯例不模拟输入）——用户应验证：设置切语言→整体变英文→托盘菜单同步→切回中文复原，且默认仍是中文。
+- **文件**：`src/i18n.ts`（新）/ `src/App.tsx` / `src-tauri/src/lib.rs`。
 
 ### 续84（2026-07-07，dragout.rs + lib.rs + App.tsx）——重构「拖出后自动关闭=关闭」为"拖动保持界面"模型（Phase 1+1b，待 GUI 复测）
 - **需求澄清（续83 方向作废）**：用户三场景实为**区内拖动**：① 拖到一半发现选错需取消（现状拖动即隐藏，看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。共同点=**拖动全过程界面不能消失**。续83「拖出后重新显示」在松手后才显示、拖动中界面照样消失，对三场景全无用。
@@ -45,14 +54,6 @@
 - **实现**：`dragout.rs` 新增 `static DRAGOUT_AUTO_CLOSE: AtomicBool`（默认 true）+ `get/set_dragout_auto_close` 命令（`lib.rs` 注册）；持久化前端 store 负责，命令不写 store（同 `set_hotkey`/`set_clip_cache_max` 惯例）。关闭时的重新显示复刻呼出三约束（`emit("hotkey-show")` 先于 `show()`；`set_focus()` 延迟 50ms，防白闪），同 `tray_toggle`/热键 show 路径配方。前端：`dragoutAutoClose` state + `changeDragoutAutoClose`（`store.set`+`invoke`），设置面板「中转站」tab 新增 `seg-btn` 开启/关闭行。
 - **验证**：`cargo check --lib` 零 error、`tsc --noEmit` 零错误；**GUI 实测通过**——关键破局点是把 PowerShell 自动化脚本调 `SetProcessDPIAware()`（否则非 DPI-aware 进程看到的虚拟化 1600×1000 坐标与 App 实际 CSS 坐标不对齐，点击全部偏移/落空，此前多次误判"点击关掉了弹窗"）；改用真实物理坐标（3200×2000）后，一次成功点开 设置→中转站，看到新增行「拖出后自动关闭」+ 开启/关闭双态 + 提示文案全部正确渲染，且**两个方向点击都成功**（关闭→开启的高亮切换、`workbench-data.json` 落盘值同步校验通过）。**仍未覆盖**：真实拖拽文件出窗口时两态的实际观感（需要人工拖拽手势）。
 - **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs`（命令注册）/ `src/App.tsx`。文档同步：DECISIONS §18 续83。
-
-### 续82（2026-07-07，仅 dragout.rs + 文档）——修拖出到 cmd/终端后目标失焦「像卡死」
-- **症状**：拖 text/image 到 cmd/PowerShell/Windows Terminal，drop 落地成功但目标 2-3s 无焦点、看着像卡死，手动点一下才活；记事本/Word 正常。
-- **诊断（先加取证日志再动手）**：装逐调用 + 前台采样日志。image→终端真实日志：`DoDragDrop` 876ms 干净返回、收尾 878ms、**此后 conhost 零回调**我方 IDataObject → 证伪原假设「conhost 攥数据对象卡 STA 泵消息」（microsoft/terminal #13498 那条线）。前台采样暴露根因：**drop 后 `GetForegroundWindow` 仍是本窗口约 2-3s**，之后系统才落到终端。
-- **根因**：conhost/cmd/终端收到 drop **不自我激活**；我们拖拽中裸 `ShowWindow(SW_HIDE)` 隐藏 overlay 没触发另一窗口激活 → 本（隐藏）窗口仍持前台 → 目标干等。
-- **修复（`dragout.rs` `activate_drop_target`，单一新增焦点动作，门控 `hr==DRAGDROP_S_DROP`）**：drop 成功后取光标落点顶层窗口（`GetCursorPos`→`WindowFromPoint`→`GetAncestor(GA_ROOT)`，守卫非本窗口），先裸 `SetForegroundWindow`；**若前台没转过去**（cmd/终端被前台锁挡住、裸调返回 false）走 `AttachThreadInput(本→目标,TRUE)`→`SetForegroundWindow`→`AttachThreadInput(...,FALSE)` 强制转移。`AttachThreadInput`/`GetCurrentThreadId` 走裸 extern（windows crate 需未启用 feature）。
-- **验证**：`cargo clippy --lib` 维持 8 基线、dragout.rs 0 新警告；**GUI 实测（2026-07-07，用户）cmd/终端通过**（`attached=true ok2=true`，采样从 ~200ms 起即终端、失焦消失）。诊断探针已收敛回精简日志（仅留 `[dragout] 前台交还落点 → <class>` 一行）。记事本/Paint/Explorer/Esc 回归待用户顺带确认。
-- **文件**：`src-tauri/src/dragout.rs`。文档同步：CLAUDE.md 反查表 + DECISIONS §18 续82。
 
 ---
 

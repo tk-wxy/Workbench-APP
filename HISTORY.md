@@ -9,6 +9,14 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续82（2026-07-07，仅 dragout.rs + 文档，2026-07-07 续85 迁入）——修拖出到 cmd/终端后目标失焦「像卡死」
+- **症状**：拖 text/image 到 cmd/PowerShell/Windows Terminal，drop 落地成功但目标 2-3s 无焦点、看着像卡死，手动点一下才活；记事本/Word 正常。
+- **诊断（先加取证日志再动手）**：装逐调用 + 前台采样日志。image→终端真实日志：`DoDragDrop` 876ms 干净返回、收尾 878ms、**此后 conhost 零回调**我方 IDataObject → 证伪原假设「conhost 攥数据对象卡 STA 泵消息」（microsoft/terminal #13498 那条线）。前台采样暴露根因：**drop 后 `GetForegroundWindow` 仍是本窗口约 2-3s**，之后系统才落到终端。
+- **根因**：conhost/cmd/终端收到 drop **不自我激活**；我们拖拽中裸 `ShowWindow(SW_HIDE)` 隐藏 overlay 没触发另一窗口激活 → 本（隐藏）窗口仍持前台 → 目标干等。
+- **修复（`dragout.rs` `activate_drop_target`，单一新增焦点动作，门控 `hr==DRAGDROP_S_DROP`）**：drop 成功后取光标落点顶层窗口（`GetCursorPos`→`WindowFromPoint`→`GetAncestor(GA_ROOT)`，守卫非本窗口），先裸 `SetForegroundWindow`；**若前台没转过去**（cmd/终端被前台锁挡住、裸调返回 false）走 `AttachThreadInput(本→目标,TRUE)`→`SetForegroundWindow`→`AttachThreadInput(...,FALSE)` 强制转移。`AttachThreadInput`/`GetCurrentThreadId` 走裸 extern（windows crate 需未启用 feature）。
+- **验证**：`cargo clippy --lib` 维持 8 基线、dragout.rs 0 新警告；**GUI 实测（2026-07-07，用户）cmd/终端通过**（`attached=true ok2=true`，采样从 ~200ms 起即终端、失焦消失）。诊断探针已收敛回精简日志（仅留 `[dragout] 前台交还落点 → <class>` 一行）。记事本/Paint/Explorer/Esc 回归待用户顺带确认。
+- **文件**：`src-tauri/src/dragout.rs`。文档同步：CLAUDE.md 反查表 + DECISIONS §18 续82。
+
 ### 续81（2026-07-02，纯文档，零代码改动，2026-07-07 续84 迁入）——三大 md 文档优化
 - **动因**：MEMORY.md 膨胀至 195KB（Read 全文超工具上限），§0A 单条 bullet 长达数千字符；同一事实最多重复 4 处；CLAUDE.md 每会话自动加载且叙事占比高——tokens 消耗大、局部读取失效。
 - **改动**：
