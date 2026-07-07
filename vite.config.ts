@@ -1,12 +1,20 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // https://v2.tauri.app/start/frontend/vite/
 const host = process.env.TAURI_DEV_HOST;
+const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("./package.json", import.meta.url)), "utf-8"));
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+
+  // 单一版本号来源：package.json（tauri.conf.json / Cargo.toml 仍需手动同步）
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version),
+  },
 
   // 阻止 Vite 在编辑器中打开浏览器（使用 Tauri 窗口）
   clearScreen: false,
