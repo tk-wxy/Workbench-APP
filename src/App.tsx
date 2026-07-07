@@ -1822,7 +1822,7 @@ export default function App() {
                 {settingsTab==="about" && (<>
                   <div className="settings-panel-title">{t("关于")}</div>
                   <div className="settings-about">
-                    <div>Workbench <b>v0.1.0</b></div>
+                    <div>Workbench <b>v{__APP_VERSION__}</b></div>
                     <div>{t("Windows 全屏「第二桌面」工具")}</div>
                     <div>{t("应用启动器 · 文件中转 · 剪贴板历史")}</div>
                   </div>
@@ -1835,7 +1835,7 @@ export default function App() {
       <footer className="bottom-bar">
         <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} {t("核")}</span></div>
         <div className="bot-center"><kbd>{comboLabel(hotkeyCombo)}</kbd> {t("切换")} · <kbd>{comboLabel(enhHotkey)}</kbd> {enhOpen?t("界面搜索"):t("增强搜索")} · <kbd>Esc</kbd> {t("关闭")} · <kbd>↑↓</kbd> {t("导航")} · <kbd>Enter</kbd> {t("启动")}</div>
-        <div className="bot-right"><span>Workbench v0.1.0</span></div>
+        <div className="bot-right"><span>Workbench v{__APP_VERSION__}</span></div>
       </footer>
     </div>
     {/* 启动放大暂留：顶层克隆，#overlay 的兄弟节点（避开 backdrop-filter 的定位上下文与宫格 overflow 裁剪），按点击瞬间坐标定位、自播 scale+淡出 */}

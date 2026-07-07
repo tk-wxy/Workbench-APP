@@ -17,7 +17,7 @@
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续85）——新增中/英文界面语言切换**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
+- **最近状态（续85）——新增中/英文界面语言切换 + 版本号从 0.1.0 起修**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。同会话顺带修复版本号一直停在 0.1.0 未同步的问题：三处版本文件（`package.json`/`Cargo.toml`/`tauri.conf.json`）升至 **0.2.0**，`App.tsx` 两处硬编码版本号改为 `vite.config.ts` `define: __APP_VERSION__` 注入 `package.json` 的版本（单一来源，不再手动同步两份字符串；后两个 Rust/Tauri 版本文件仍需手动同步）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
 - **上一状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
@@ -33,8 +33,9 @@
 - **App.tsx**：新增 `lang`/`t` state（`useMemo(makeT)`），持久化到 store `"language"` key（同 `theme` 惯例）；`changeLang` 同时 invoke `set_tray_language` 同步托盘；时钟 `toLocaleTimeString` 按 lang 切 `zh-CN`/`en-US`；委派 subagent 做机械替换——全文件 ~230 处 `t(...)` 包裹 + ~145 条字典项（设置面板 7 个 tab、主界面、右键菜单、toast、空状态全覆盖）。
 - **Rust（`lib.rs`）**：托盘菜单"显示窗口"/"退出"是唯一 `t()` 管不到的用户可见文案——`MenuItem<Wry>` 存进 `app.manage(TrayMenuItems)`，新增 `set_tray_language` 命令 `.set_text()` 运行时切换；前端读取语言设置后主动 invoke 一次同步。3 条热键校验 Rust `Err(String)` 不改 Rust，原文录入字典，渲染时 `t(hotkeyError)` 包一层复用。
 - **人工 review 修正 2 处撞 key**（字典 key=中文原文的固有代价，详见 DECISIONS §19）：①`"关闭"` 本兼有 Esc-关闭 与 开关 Off 两义，开关按钮改为调用点直写 `lang==="en"?"Off":"关闭"`，不查字典；连带修正中转站设置提示段落里引用的 "Open"/"Close" 改回 "On"/"Off" 保持与按钮一致。②`"应用"` 本兼有名词 App 与动词 Apply 两义，搜索结果徽章同样绕开字典直写 `lang==="en"?"App":"应用"`。
-- **验证**：`npx tsc --noEmit` + `cargo check --lib` 均零错误；人工逐段 review 全量 diff（设置面板七个 tab/主界面/剪贴板/中转区/启动台/增强搜索/右键菜单）。**GUI 实测未做**（切换语言需要用户实际点击操作，按仓库惯例不模拟输入）——用户应验证：设置切语言→整体变英文→托盘菜单同步→切回中文复原，且默认仍是中文。
-- **文件**：`src/i18n.ts`（新）/ `src/App.tsx` / `src-tauri/src/lib.rs`。
+- **验证**：`npx tsc --noEmit` + `cargo check --lib` 均零错误；人工逐段 review 全量 diff（设置面板七个 tab/主界面/剪贴板/中转区/启动台/增强搜索/右键菜单）。**语言切换 GUI 实测已由用户完成并确认提交**（commit `9f5a01f`）。
+- **版本号追加修复（同会话，用户提出）**：讨论后采用**手动 SemVer**（非自动每提交递增）——功能加 minor、修复加 patch，在你认为的"检查点"手动 bump 并配 `git tag`。本次定为 v0.2.0（新功能：语言切换）。`package.json`/`Cargo.toml`/`tauri.conf.json` 三处同步改 0.2.0；`vite.config.ts` 新增 `define: { __APP_VERSION__: JSON.stringify(pkg.version) }`（Node 侧 `readFileSync` 读 `package.json`），`src/vite-env.d.ts` 声明该全局，`App.tsx` 两处 `v0.1.0` 硬编码改用 `__APP_VERSION__`。`npm run build` 验证过产物 JS 里确实内联出 "0.2.0" 两处。**仍手动**的部分：`Cargo.toml`/`tauri.conf.json` 与 `package.json` 版本号无自动同步机制，三处不一致不会报错，下次 bump 版本时三个文件都要记得改。
+- **文件**：`src/i18n.ts`（新）/ `src/App.tsx` / `src-tauri/src/lib.rs` / `package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` / `vite.config.ts` / `src/vite-env.d.ts`。
 
 ### 续84（2026-07-07，dragout.rs + lib.rs + App.tsx）——重构「拖出后自动关闭=关闭」为"拖动保持界面"模型（Phase 1+1b，待 GUI 复测）
 - **需求澄清（续83 方向作废）**：用户三场景实为**区内拖动**：① 拖到一半发现选错需取消（现状拖动即隐藏，看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。共同点=**拖动全过程界面不能消失**。续83「拖出后重新显示」在松手后才显示、拖动中界面照样消失，对三场景全无用。
