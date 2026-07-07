@@ -55,12 +55,77 @@ extern "system" {
     fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> isize;
     fn GlobalLock(hMem: isize) -> *mut u8;
     fn GlobalUnlock(hMem: isize) -> i32;
+    fn GetCurrentThreadId() -> u32;
 }
 
 // SW_HIDE 跨线程隐藏 overlay：DoDragDrop 阻塞在主线程的模态消息循环、会泵此消息。
 #[link(name = "user32")]
 extern "system" {
     fn ShowWindow(hwnd: isize, n_cmd_show: i32) -> i32;
+    // 续82：读前台 class 确认交还 + AttachThreadInput 绕过前台锁（windows crate 该符号需未启用 feature，裸声明）。
+    fn GetForegroundWindow() -> isize;
+    fn GetClassNameW(hwnd: isize, lp: *mut u16, n: i32) -> i32;
+    fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
+}
+
+/// 读前台窗口 class（续82：activate 后确认焦点确实落到落点窗口）。
+fn foreground_class() -> String {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd == 0 {
+            return "NULL".into();
+        }
+        let mut cls = [0u16; 128];
+        let n = GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+        String::from_utf16_lossy(&cls[..n.max(0) as usize])
+    }
+}
+
+/// 拖出**成功投放后**把前台焦点交还给「落点窗口」（续82 修复，根因见 DECISIONS §18）。
+/// 根因：conhost/cmd/终端收到 drop 不自我激活，而我们隐藏 overlay 后仍持前台 → 目标 2-3s
+/// 拿不到焦点、看着像卡死，须手动点一下才活。记事本/Word 等自我激活目标：本调用是无害重申。
+/// **仅在 hr==DRAGDROP_S_DROP 时**由调用方门控（Esc 取消/无投放不进来，不误改前台）。
+/// 落点 = 光标释放处顶层窗口（overlay 早已 SW_HIDE，WindowFromPoint 不命中自己；仍加本窗口守卫）。
+/// 先裸 SetForegroundWindow（复用 clipboard.rs 同款 idiom）；被前台锁挡住则 AttachThreadInput
+/// 临时挂输入队列强制转移、随即解挂（GUI 实测 cmd/Windows Terminal 走②路，attached+ok2 均 true）。
+fn activate_drop_target(self_hwnd: isize) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetAncestor, GetCursorPos, GetWindowThreadProcessId, SetForegroundWindow, WindowFromPoint,
+        GA_ROOT,
+    };
+    unsafe {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_err() {
+            return;
+        }
+        let under = WindowFromPoint(pt);
+        if under.0.is_null() {
+            return;
+        }
+        let top = GetAncestor(under, GA_ROOT);
+        let top = if top.0.is_null() { under } else { top };
+        let top_h = top.0 as isize;
+        if top_h == self_hwnd {
+            return;
+        }
+        // ① 裸调：本进程仍持前台许可即成（自我激活目标走这条）。
+        let _ = SetForegroundWindow(top);
+        if GetForegroundWindow() != top_h {
+            // ② 被前台锁挡住（隐藏后仍持前台 → cmd/终端 2-3s 拿不到焦点像卡死）：
+            //    AttachThreadInput 把本线程输入队列临时挂到目标线程绕过锁，强制转移后立即解挂。
+            let target_tid = GetWindowThreadProcessId(top, None);
+            let our_tid = GetCurrentThreadId();
+            let attached = target_tid != 0
+                && target_tid != our_tid
+                && AttachThreadInput(our_tid, target_tid, 1) != 0;
+            let _ = SetForegroundWindow(top);
+            if attached {
+                AttachThreadInput(our_tid, target_tid, 0);
+            }
+        }
+        println!("[dragout] 前台交还落点 → {}", foreground_class());
+    }
 }
 
 /// 把字节拷进一块 GMEM_MOVEABLE HGLOBAL，返回原始句柄。
@@ -136,7 +201,7 @@ impl IDataObject_Impl for DragOutDataObject_Impl {
     }
 
     fn GetCanonicalFormatEtc(&self, _fin: *const FORMATETC, fout: *mut FORMATETC) -> HRESULT {
-        // 无设备相关格式：清零出参的 ptd 并报 E_NOTIMPL（调用方据此自行规范化）
+        // 无设备相关格式：清零出参的 ptd 并报 E_NOTIMPL(调用方据此自行规范化)
         unsafe {
             if !fout.is_null() {
                 (*fout).ptd = std::ptr::null_mut();
@@ -452,6 +517,12 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
     }
     let _ = app.emit("hotkey-hide", ());
     let _ = app.emit("drag-out-done", effect_str);
+
+    // 续82 修复：真正投放成功时，把前台交还给落点窗口（conhost/cmd 不自我激活 → 否则无焦点像卡死）。
+    // 门控 hr==DRAGDROP_S_DROP：Esc 取消/无投放不动前台。放在 hide+emit 之后（本窗口已隐藏、不抢激活）。
+    if hr == DRAGDROP_S_DROP {
+        activate_drop_target(hwnd);
+    }
 
     // 临时文件延迟删除：DoDragDrop 已返回，但目标 app 可能仍在异步拷贝，宽限几秒再删（detached，不阻塞）
     if !temp_files.is_empty() {

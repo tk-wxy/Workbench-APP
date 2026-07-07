@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-02（续81：三大 md 文档优化——HISTORY.md 归档 + §0A 滚动窗口 + 单一真相源约定）
+> **最后更新**：2026-07-07（续82：修复中转区拖出到 cmd/终端后目标失焦「像卡死」——drop 成功后交还前台焦点）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -17,8 +17,8 @@
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续81，纯文档，零代码改动）**：三大 md 优化——新建 `HISTORY.md` 归档全部变更记录与老化详记；MEMORY 瘦身；CLAUDE.md 铁律去叙事；DECISIONS 目录加摘要。详见 §0A。
-- **上一状态（续80）**：修「点击粘贴偶发失败」——焦点交还盲等 `sleep(150ms)` 改守卫轮询 `wait_foreground_handback`。GUI 实测文本→Chrome 通过；file/image 与高负载场景待日常观察。同会话删除 `AGENTS.md`。详见 §0A + DECISIONS §3 延伸。
+- **最近状态（续82，仅 dragout.rs + 文档）**：修「拖出 text/image 到 cmd/PowerShell/Windows Terminal 后目标 2-3s 失焦、像卡死」。诊断定死：drop 干净成功但本隐藏 overlay 仍持前台 2-3s（console 不自我激活）。修复 = drop 成功后 `activate_drop_target` 取落点顶层窗口交还前台，前台锁挡住则 `AttachThreadInput` 强制。**GUI 实测 cmd/终端通过（attached+ok2 true、失焦消失）**；记事本/Paint/Explorer/Esc 回归待用户顺带确认。详见 §0A + DECISIONS §18 续82。
+- **上一状态（续81，纯文档）**：三大 md 优化——新建 `HISTORY.md` 归档全部变更记录与老化详记；MEMORY 瘦身；CLAUDE.md 铁律去叙事；DECISIONS 目录加摘要。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
   - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
@@ -26,6 +26,14 @@
 - **阻塞 / 待决策**：无。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续82（2026-07-07，仅 dragout.rs + 文档）——修拖出到 cmd/终端后目标失焦「像卡死」
+- **症状**：拖 text/image 到 cmd/PowerShell/Windows Terminal，drop 落地成功但目标 2-3s 无焦点、看着像卡死，手动点一下才活；记事本/Word 正常。
+- **诊断（先加取证日志再动手）**：装逐调用 + 前台采样日志。image→终端真实日志：`DoDragDrop` 876ms 干净返回、收尾 878ms、**此后 conhost 零回调**我方 IDataObject → 证伪原假设「conhost 攥数据对象卡 STA 泵消息」（microsoft/terminal #13498 那条线）。前台采样暴露根因：**drop 后 `GetForegroundWindow` 仍是本窗口约 2-3s**，之后系统才落到终端。
+- **根因**：conhost/cmd/终端收到 drop **不自我激活**；我们拖拽中裸 `ShowWindow(SW_HIDE)` 隐藏 overlay 没触发另一窗口激活 → 本（隐藏）窗口仍持前台 → 目标干等。
+- **修复（`dragout.rs` `activate_drop_target`，单一新增焦点动作，门控 `hr==DRAGDROP_S_DROP`）**：drop 成功后取光标落点顶层窗口（`GetCursorPos`→`WindowFromPoint`→`GetAncestor(GA_ROOT)`，守卫非本窗口），先裸 `SetForegroundWindow`；**若前台没转过去**（cmd/终端被前台锁挡住、裸调返回 false）走 `AttachThreadInput(本→目标,TRUE)`→`SetForegroundWindow`→`AttachThreadInput(...,FALSE)` 强制转移。`AttachThreadInput`/`GetCurrentThreadId` 走裸 extern（windows crate 需未启用 feature）。
+- **验证**：`cargo clippy --lib` 维持 8 基线、dragout.rs 0 新警告；**GUI 实测（2026-07-07，用户）cmd/终端通过**（`attached=true ok2=true`，采样从 ~200ms 起即终端、失焦消失）。诊断探针已收敛回精简日志（仅留 `[dragout] 前台交还落点 → <class>` 一行）。记事本/Paint/Explorer/Esc 回归待用户顺带确认。
+- **文件**：`src-tauri/src/dragout.rs`。文档同步：CLAUDE.md 反查表 + DECISIONS §18 续82。
 
 ### 续81（2026-07-02，纯文档，零代码改动）——三大 md 文档优化
 - **动因**：MEMORY.md 膨胀至 195KB（Read 全文超工具上限），§0A 单条 bullet 长达数千字符；同一事实最多重复 4 处；CLAUDE.md 每会话自动加载且叙事占比高——tokens 消耗大、局部读取失效。
@@ -43,11 +51,6 @@
 - **已识别未修**（详见 DECISIONS §3 延伸续80）：① show 时未快照原前台 HWND（`SetForegroundWindow(GetForegroundWindow())` 恒等空操作），结构性改流程暂缓；② UIPI 提权目标静默吞 SendInput，无解只能将来提示；③ 物理修饰键未中和。若再偶发失败，先看 `[paste]/[filepaste]/[imgpaste] handback` 日志的 timeout 与 fg class 定位是①还是②。
 - **验证**：`cargo clippy` 8 条基线不变、新代码零警告；**GUI 实测（2026-07-02，用户）文本→Chrome 对话框成功**（waited=0ms / timeout=false / fg class 正确，全程 114ms，比旧盲等还快）；file/image 路径与高负载场景待日常观察。
 - **文件**：`src-tauri/src/clipboard.rs`。文档同步：CLAUDE.md 焦点交还铁律改守卫轮询、DECISIONS §3 延伸记根因。同会话应用户要求删除 `AGENTS.md`（Codex 副本，零信息丢失），CLAUDE.md 成唯一规则入口。
-
-### 续79（2026-07-01，纯前端，GUI 未实测）——设置面板按功能域重构
-- `SETTINGS_TABS` 扩为 常规/启动台/中转站/剪贴板/搜索/快捷键/关于：常规只留背景主题 + 开机自启；启动台页含收藏数量/添加应用/清空/手动排序标注；中转站页承接显示布局 + 清空中转条目；剪贴板页只留历史条数/清空历史/图片原图缓存；搜索页承接呼出默认搜索模式 + 搜索引擎/额外目录。
-- CSS：`.settings-action` 普通按钮 hover 中性样式、清空类加 `.danger` 才红色 hover；新增 `.settings-inline-actions` / `.settings-row-value`。
-- **验证**：`npx tsc --noEmit` + `npm run build` 通过；GUI 观感待用户实测。文件：`src/App.tsx` / `src/App.css`。
 
 ---
 
