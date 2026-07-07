@@ -20,7 +20,7 @@
 - **§15 增强搜索**：做成同 overlay 内视图层而非新窗口（避开焦点高危区）；两套搜索分工（顶栏就地过滤 vs Ctrl+K 跨区直达）
 - **§16 启动器**：手动策展收藏托盘取代自动扫描全量平铺；`LauncherItem` 与 `StageItem` 左键契约不同、不可合并
 - **§17 文件搜索**：自建内存索引 + 后台预建（三道保险防卡 UI）；§17.1 双引擎（内置扩面 + 可选 Everything 运行时动态加载、失败静默降级）；续68 图标预热进索引路径
-- **§18 拖出 drag-out**：DoDragDrop 必须主线程 + hide-after（hide-before 丢 capture）；IDataObject 存字节 GetData 现拷贝；续71b 两死胡同——`<img>` 原生拖拽抢手势、裸 ShowWindow 不同步 tao 缓存；续82 拖到 cmd/终端「卡死」= 落点未交还前台，drop 后 SetForegroundWindow 落点窗口（前台锁挡住则 AttachThreadInput 强制）
+- **§18 拖出 drag-out**：DoDragDrop 必须主线程 + hide-after（hide-before 丢 capture）；IDataObject 存字节 GetData 现拷贝；续71b 两死胡同——`<img>` 原生拖拽抢手势、裸 ShowWindow 不同步 tao 缓存；续82 拖到 cmd/终端「卡死」= 落点未交还前台，drop 后 SetForegroundWindow 落点窗口（前台锁挡住则 AttachThreadInput 强制）；续84「关闭」重构为"拖动保持界面"模型（拖动全程不隐藏、区内落点交自窗口 IDropTarget、外部靠拖动中按热键自轮询 SW_HIDE；`DRAG_IN_PROGRESS` 让热键 monitor 拖动期间让路防白闪；续83 方案作废）
 
 ---
 
@@ -574,5 +574,35 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 - **② 拖出后整窗「卡死」、热键呼不出、须重启——裸 `ShowWindow` 绕过 tao 可见性缓存**。症状：一次干净成功的 DoDragDrop（`end → move` 日志齐全）之后，窗口再也呼不出，但后台线程仍在打日志（`foreground lost → auto hide`），重启才恢复。根因：tao（Tauri 底层）**内部缓存窗口可见性标志**，`window.show()/hide()` 是 **diff 缓存** 的（标志没变就 no-op、不调 `ShowWindow`）；而拖拽期/收尾我们用**裸 `ShowWindow(SW_HIDE)`** 隐藏 overlay（主线程那时阻塞在 DoDragDrop，Tauri hide 走不通）——裸 FFI **不更新 tao 缓存** → tao 仍以为窗口「可见」→ 下次热键 `window.show()` 被 diff 成 no-op → 窗口永不再现（表现为「卡死」，其实进程活着、只是 overlay 卡在隐藏态、tao 状态失同步；重启重置缓存才好）。**修复**：DoDragDrop 返回后（主线程已空闲）收尾隐藏**改走 Tauri `window.hide()`**（同步 tao 缓存为「隐藏」，下次 show 才能 diff 出变化真正显示）；拖拽中那个 60ms 裸 `ShowWindow` 不可避（主线程阻塞中）、保留，由收尾 Tauri hide() 把缓存兜回一致。**通用教训：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去，否则后续 Tauri show/hide 全被 diff 成 no-op。**
 
 **验证**：`cargo check --lib` 零 error + `cargo clippy --lib` 维持 8 基线 + `tsc --noEmit` 零错误（CC 自验）。**GUI 实测全部通过（2026-06-29，T1–T10）**：① file/folder 拖到异地真实落地、MOVE 后条目消失、`download.png` 不再出现、拖完不卡死、热键正常呼出；② image→Paint / Explorer：`start → 2 format(s)`（CF_HDROP + CF_DIB），真实落地；③ Esc 取消：`end hr=0x00040101 effect=0 → none`、条目保留（在 text/image/file 三类型上各验一次）；④ 多选拖出：N 条合并一份 CF_HDROP、MOVE 后全部移除；⑤ 与原生拖入并发：`[dragdrop] Drop` 照常，互不影响。**text 拖出（CF_UNICODETEXT）**：拖到 **Word / 写字板等经典文本目标正常插入**（`→ move`，证明数据正确）；但**浏览器 `<input>`/contenteditable 收不进（闪一下无内容）= Chromium 对 OLE 文本拖入的已知挑剔行为、目标侧限制、非本功能 bug**——文本拖出请用编辑器类目标。
+
+**续84（2026-07-07）把「关闭」重构为"拖动保持界面"模型（Phase 1+1b，GUI 实测通过）——续83 方案及其"待修方向"整体作废**
+
+**需求澄清（推翻续83 方向）**：用户三场景实为**区内拖动**，不是"拖出后是否关窗"：① 拖到一半发现选错要取消（现状拖动即隐藏、看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。三者共同点=**拖动全过程界面不能消失**。续83 的"松手后重新显示"在松手才显示、拖动中界面照样没了，对三场景全无用（且与 light-dismiss 打架，见下方续83）。
+
+**统一模型（用户敲定，关键洞察）**：拖动仍**只有一种手段**（OLE `DoDragDrop`），只改"何时隐藏界面"。这绕开了"HTML5 拖动 vs OLE 拖动 无法中途切换 + 全屏 overlay 盖住外部目标"的死结——手段不变、只操作可见性。`关闭`时：拖动全程 overlay 保持可见，区内落点（启动台/取消）交给**窗口自身的 IDropTarget**（`dragdrop.rs` 那个拖入 target；同进程 OLE 拖动照样把 drop 投递给光标下的自窗口——GUI 实测日志 `[dragdrop] Drop … at (…)` + `effect=1→copy` 证实，这是本模型成立的核心前提）；要拖到外部应用，用户**拖动中按一下呼出热键**手动隐藏 overlay 再松手落地。
+
+**Phase 1（界面不消失 + 区内落点）**：`dragout.rs` 撤续83 re-show；`auto_close=false` 时**不 spawn 60ms SW_HIDE 线程**、DoDragDrop 返回后**不 hide**、延迟 50ms `set_focus`（Esc 复活；窗口本就可见、无白闪风险）。收尾分支改为 `if auto_close || manually_hidden { hide+Tauri 同步 tao 缓存+activate_drop_target } else { 保持可见+set_focus }`。前端 `files-dropped` 加 `internalDrag`（`dragOutRef.draggedIds` 非空）判定：区内拖出落回中转区**暂 no-op**（避免把自身当外部文件重复添加；区内重排=后续 Phase 2）、落启动台走既有添加；`drag-out-done` 的单 text `copyAndPaste` 回退在 `keepOpen` 时跳过（否则会隐藏窗口）。
+
+**Phase 1b（拖动中手动隐藏去外部）**：`lib.rs` 加 `pub current_hotkey_vks()`（读 `HOTKEY_VK_KEYS` 快照）；`dragout.rs` `auto_close=false` 时改 spawn **自轮询线程**（20ms 读 `GetAsyncKeyState`，热键上升沿 → 裸 `SW_HIDE` + `manually_hidden=true` + emit `hotkey-hide`，触发一次即退；`drag_done` 兜底退出）。**为何不复用热键 monitor 的 hide**：monitor 的 `window.hide()` 是 Tauri 调用、DoDragDrop 阻塞主线程时会被 queue 到返回后才执行——太晚（用户需要立刻看到界面消失才能看清外部目标）；故必须自轮询裸 `SW_HIDE`（同拖出那条 60ms 裸 ShowWindow，DoDragDrop 模态循环会泵该消息）。收尾 `manually_hidden` 分支复用 Tauri `win.hide()` 把 tao 缓存兜回隐藏（续71b 铁律）+ `activate_drop_target` 交还外部落点（续82）。
+
+**白闪修复（DRAG_IN_PROGRESS 让路，关键教训）**：手动隐藏后松手落地时**白闪一下**（`开启`自动隐藏无此现象）。诊断——两模式唯一差异=手动隐藏流程有用户按热键 → **热键 monitor 介入、并发操作窗口可见性**（其 `window.hide()` toggle 与 dragout 的 SW_HIDE 抢窗口状态）。修复：`static DRAG_IN_PROGRESS`（`do_drag_on_main` 起手置位/收尾清位，`pub drag_in_progress()`）；`lib.rs` 热键 monitor 循环开头判定——拖动期间**只跟踪键态、不做 show/hide toggle**（`prev_combo=combo; down_at=None; continue`）。**通用教训（新铁律）**：**拖动期间窗口可见性必须由 dragout 独占，任何其它隐藏机制（热键 monitor、light-dismiss）都要让路**——否则并发操作出白闪/误关（同续83 light-dismiss 打架、§8 两 hide 路径必须一致的历史教训）。
+
+**GUI 实测（2026-07-07，用户，三轮收敛）**：① 核心前提成立（`[dragdrop] Drop 1 path(s)`）；② 主流程合格（拖动中热键→界面隐藏→Windows Terminal(CASCADIA)落地粘贴 + activate 交还前台）；③ 加 DRAG_IN_PROGRESS 后白闪消除，复测通过。
+
+**已知窄边界（暂留，非 bug）**：`keepOpen` 下"外部拖单 text 到 Chromium 输入框"仍不粘（`copyAndPaste` 被 `keepOpen` 跳过、前端无法区分本次是否已手动隐藏——窄场景）；区内重排暂 no-op（Phase 2）；text 项无 CF_HDROP 故不能落启动台（本就不应落）。
+
+---
+
+**续83（2026-07-07）新增设置「拖出后自动关闭」（默认开=现状行为）——⚠️ 方案已被续84 整体推翻，本段仅留作历史**：动因——用户反馈中转区任何超阈值拖动都会触发完整 OLE 拖出并隐藏窗口，但有时拖动只是想调整位置/误触发，不希望窗口消失。中转区当前**没有独立的"区内重排"手势**（与启动台的纯前端拖拽重排不同，见 §16），任何拖动一律进 `start_drag_out`→`DoDragDrop`，故关不掉的"自动关闭"本质是这条路径末尾的收尾 `hide()`。**设计取舍（已与用户确认）**：设置关闭时**无条件**重新显示窗口——不区分 move/copy/cancel，即使真投放成功到外部窗口（如拖进 Explorer）窗口也会重新弹出并抢回前台焦点，**覆盖续82 的前台交还修复**（因为马上又会被抢回，交还变得没有意义，故此时跳过 `activate_drop_target` 调用）。实现：`static DRAGOUT_AUTO_CLOSE: AtomicBool`（默认 true）+ `get/set_dragout_auto_close` 命令，持久化仍由前端 store 负责（同 `set_hotkey`/`set_clip_cache_max` 惯例，命令不写 store）。关闭时的重新显示复刻呼出三约束（`emit("hotkey-show")` 先于 `show()`；`set_focus()` 延迟 50ms 独立线程，防 `WM_ACTIVATE` 白闪），与 `tray_toggle`/热键 show 路径同配方。设置面板 UI 落在「中转站」tab，`seg-btn` 开启/关闭二态，同 `autostartEnabled`/`stageLayout` 惯例。**验证**：`cargo check`/`tsc --noEmit` 均零错误；设置面板本身 GUI 实测通过（2026-07-07）——设置→中转站新行「拖出后自动关闭」+ 开启/关闭 + 提示文案渲染正确，双向点击均生效，`workbench-data.json` 落盘值同步核对通过。
+
+**💀 续83 bug（2026-07-07，用户真实拖拽实测发现，尚未修复）：「关闭」档不生效，窗口仍自动消失**。用户日志实锤：
+```
+[dragout] DoDragDrop end hr=HRESULT(0x00040101) effect=0 → none
+[focus] foreground lost → auto hide
+[focus] foreground lost → auto hide
+```
+**根因**：`lib.rs` 的 `start_focus_watch`（light-dismiss，50ms 轮询 `GetForegroundWindow`）完全不知道 `DRAGOUT_AUTO_CLOSE` 这个新设置的存在，是与 `dragout.rs` 独立的第二套隐藏机制（本文件 §18 开头即注明"与 dragdrop.rs 正交"，但没人告诉 light-dismiss 拖出流程也有个"重新显示"分支）。拖拽期间 overlay 靠裸 `ShowWindow(SW_HIDE)` 隐藏——**不同步 tao 可见性缓存**（本文件续71b 已记录的通用教训）——所以 light-dismiss 里 `window.is_visible()` 读到的是**过期缓存**（仍=true），没有 disarm。当「关闭」档触发 `dragout.rs` 重新 `win.show()` 时，`set_focus()` 按呼出三约束故意延迟 50ms（防白闪），这个空窗期恰好被 light-dismiss 的下一次轮询逮到「可见但前台不是本窗口」→ 立即调用 `hide()`，把刚重新弹出的窗口又关掉——**两个独立的隐藏机制打架，light-dismiss 赢**，用户看到的现象就是"设置了关闭也没用，窗口照样消失"。
+
+~~**待修方向**（下次会话动手前先读这段）：需让 `start_focus_watch` 感知 `DRAGOUT_AUTO_CLOSE`，或者在 dragout 重新 show 后给 light-dismiss 加一段短暂 grace period……~~ **⚠️ 本"待修方向"已作废**：续84 没有沿"重新显示 + 让 light-dismiss 感知"这条路，而是整体改为"拖动全程保持界面可见、只在拖动中手动隐藏"的模型（见上方续84），根本不存在"重新显示"这一步、也就没有 light-dismiss 抢跑的空窗期。其中"任何隐藏机制拖动期间必须让路"的教训在续84 以 `DRAG_IN_PROGRESS` 落地。
 
 **💀→✅ 续82 拖出到 cmd/终端「卡死一段时间」= 落点未交还前台（已修，GUI 实测通过 2026-07-07）**。症状：拖 text/image 到 cmd/PowerShell/Windows Terminal，drop 落地成功但目标 2-3s 无焦点、看着像卡死，手动点一下才活；记事本/Word 等正常。**诊断（先加取证日志再动手）**：装逐调用/前台采样日志后，一个 image→终端的真实日志显示 `DoDragDrop` 876ms 干净返回、收尾 878ms、**此后 conhost 零回调**我方 IDataObject → **排除**「conhost 攥数据对象卡 STA 泵消息」（原领先假设 + microsoft/terminal #13498 那条线，被数据证伪）。前台采样进一步暴露根因：drop 后 **`GetForegroundWindow` 仍是本窗口（"Tauri Window"）约 2-3s**，之后系统才把前台落到终端。**根因**：conhost/cmd/终端收到 drop **不自我激活**；而我们拖拽中用裸 `ShowWindow(SW_HIDE)` 隐藏 overlay，DoDragDrop 模态循环里这次隐藏**没触发另一窗口激活** → 本（隐藏）窗口仍持前台 → 目标干等。**修复**（`dragout.rs` `activate_drop_target`，单一新增焦点动作，门控 `hr==DRAGDROP_S_DROP`）：drop 成功后取光标落点顶层窗口（`GetCursorPos`→`WindowFromPoint`→`GetAncestor(GA_ROOT)`，守卫非本窗口），先裸 `SetForegroundWindow`（自我激活目标够用、无害重申）；**若前台没转过去**（cmd/终端被前台锁挡住，裸调实测返回 false），走 `AttachThreadInput(本线程,目标线程,TRUE)`→`SetForegroundWindow`→`AttachThreadInput(...,FALSE)` **绕过前台锁强制转移**。GUI 实测：`attached=true ok2=true`，采样从 ~200ms 起即终端、失焦消失。Esc 取消不进本路径（不误改前台）。`AttachThreadInput`/`GetCurrentThreadId` 走裸 extern（windows crate 该符号需未启用 feature）。

@@ -7,7 +7,24 @@
 
 ---
 
-## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-02 续81 迁入）
+## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
+
+### 续81（2026-07-02，纯文档，零代码改动，2026-07-07 续84 迁入）——三大 md 文档优化
+- **动因**：MEMORY.md 膨胀至 195KB（Read 全文超工具上限），§0A 单条 bullet 长达数千字符；同一事实最多重复 4 处；CLAUDE.md 每会话自动加载且叙事占比高——tokens 消耗大、局部读取失效。
+- **改动**：
+  - 新建 `HISTORY.md`：原 MEMORY §九（全部变更记录）+ §0A 老化详记（续23~续78 等）**逐字迁入，零信息删除**。
+  - `MEMORY.md`：§0 重写为短快照；§0A 改滚动窗口（≤3 会话，多行短 bullet 格式）；§一~八快照保留并修正陈旧项（§五功能清单、§六命令表补新条目）；§九改为一行指针。
+  - `CLAUDE.md`：铁律去叙事——硬规则全保留，踩坑经过压缩为一行 + DECISIONS §指针；会话开始改为渐进式读取协议；「强制记忆更新」升级为完整文档维护约定（滚动窗口/单一真相源/短行原则）。
+  - `DECISIONS.md`：**仅动目录**——每 § 加一行结论摘要、修正编号漂移（旧目录把 §13 git 历史标成 §12、把 §14 拖入标成「废弃」而实际已推翻实现），正文一字未改。
+- **验证**：Grep 抽查关键规则（CLIPBOARD_LOCK / fWide / show 三约束 / 死胡同清单）在 CLAUDE.md 全部命中；归档采用 sed 按行号逐字提取 + 字节数核对，确认迁移完整。
+- **文件**：`CLAUDE.md` / `MEMORY.md` / `DECISIONS.md`（仅目录）/ `HISTORY.md`（新）。
+
+### 续80（2026-07-02，仅 clipboard.rs + 文档，2026-07-07 续83 迁入）——点击粘贴不稳定修复（焦点交还守卫轮询）
+- **症状与诊断**：点击历史项粘贴偶发失败、但手动 Ctrl+V 能粘上 → 剪贴板写入已成功，失败全在「hide → 盲等 150ms → 注入 Ctrl+V」后半段：`window.hide()` 是异步派发，负载高时 150ms 赌输，`GetForegroundWindow` 仍返回本窗口/NULL → Ctrl+V 注入进已隐藏的自家 WebView；还会污染 file/image 的 class 三分叉。
+- **修复（单变量）**：新增 `wait_foreground_handback(&app, tag)`——10ms 采样至前台「非本窗口且非 NULL」，上限 500ms 超时保底继续，确认后 50ms 落定余量（常量 `FOCUS_HANDBACK_POLL_MS/MAX_MS/SETTLE_MS`；self hwnd 取法同 `start_focus_watch`）；替换 paste/filepaste/imgpaste 三处 `sleep(150ms)`，补齐带 tag 日志（文本路径原先零日志、失败不可诊断）。
+- **已识别未修**（详见 DECISIONS §3 延伸续80）：① show 时未快照原前台 HWND（`SetForegroundWindow(GetForegroundWindow())` 恒等空操作），结构性改流程暂缓；② UIPI 提权目标静默吞 SendInput，无解只能将来提示；③ 物理修饰键未中和。若再偶发失败，先看 `[paste]/[filepaste]/[imgpaste] handback` 日志的 timeout 与 fg class 定位是①还是②。
+- **验证**：`cargo clippy` 8 条基线不变、新代码零警告；**GUI 实测（2026-07-02，用户）文本→Chrome 对话框成功**（waited=0ms / timeout=false / fg class 正确，全程 114ms，比旧盲等还快）；file/image 路径与高负载场景待日常观察。
+- **文件**：`src-tauri/src/clipboard.rs`。文档同步：CLAUDE.md 焦点交还铁律改守卫轮询、DECISIONS §3 延伸记根因。同会话应用户要求删除 `AGENTS.md`（Codex 副本，零信息丢失），CLAUDE.md 成唯一规则入口。
 
 ### 续79（2026-07-01，纯前端，GUI 未实测）——设置面板按功能域重构（2026-07-07 续82 迁入）
 - `SETTINGS_TABS` 扩为 常规/启动台/中转站/剪贴板/搜索/快捷键/关于：常规只留背景主题 + 开机自启；启动台页含收藏数量/添加应用/清空/手动排序标注；中转站页承接显示布局 + 清空中转条目；剪贴板页只留历史条数/清空历史/图片原图缓存；搜索页承接呼出默认搜索模式 + 搜索引擎/额外目录。

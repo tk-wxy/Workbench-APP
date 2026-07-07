@@ -21,6 +21,15 @@ static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLoc
 /// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
 static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
 
+/// 供 dragout「保持界面」模式在拖动中轮询当前热键键态用（用户拖动中按热键 → 手动隐藏 overlay 去外部应用）。
+/// 返回同一份 HOTKEY_VK_KEYS 快照，判据与 start_hotkey_monitor 一致；未初始化则返回空（视为无热键、不触发）。
+pub fn current_hotkey_vks() -> Vec<u16> {
+    HOTKEY_VK_KEYS
+        .get()
+        .and_then(|m| m.lock().ok().map(|k| k.clone()))
+        .unwrap_or_default()
+}
+
 // ── 可调参数 ───────────────────────────────────────────────
 /// 热键键态轮询间隔（25ms ≈ 40Hz；松开沿延迟上界即此值。读电平故无需防抖）
 const HOTKEY_POLL_MS: u64 = 25;
@@ -371,6 +380,16 @@ fn start_hotkey_monitor(app: AppHandle) {
                 keys.iter().all(|vk| is_down(*vk))
             };
 
+            // 拖动期间让路：窗口可见性由 dragout 独占（自动隐藏 / 自轮询手动隐藏）。此处只跟踪键态、
+            // 不做 show/hide toggle，避免"保持界面"模式下拖动中按热键去外部时 monitor 并发操作窗口→白闪。
+            // 更新 prev_combo 保证拖动结束恢复时不产生虚假边沿；清空 down_at 防遗留按下态误判。
+            if dragout::drag_in_progress() {
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
             if combo && !prev_combo {
                 // ── 按下沿 ──
                 down_at = Some(std::time::Instant::now());
@@ -483,6 +502,7 @@ pub fn run() {
             filesearch::set_search_engine, filesearch::set_search_dirs,
             everything::reload_everything,
             dragout::start_drag_out,
+            dragout::get_dragout_auto_close, dragout::set_dragout_auto_close,
             set_hotkey
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
