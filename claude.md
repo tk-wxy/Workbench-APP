@@ -35,7 +35,7 @@ npm run tauri build    # 打包
 - `src-tauri/src/clipboard.rs` — 剪贴板子系统（历史/粘贴/复制/janitor/监听；`clipboard::init` 封装 setup 时序）
 - `src-tauri/src/apps.rs` — 应用扫描 / 图标提取（`ExtractIconEx`/`SHGetFileInfoW`）
 - `src-tauri/src/dragdrop.rs` — 中转区拖入（target 侧；setup 一次性自注册 IDropTarget，详见 DECISIONS §14）
-- `src-tauri/src/dragout.rs` — 中转区拖出（source 侧，与拖入正交；`DoDragDrop` 必须**主线程**跑 + hide-after，三条死胡同见 DECISIONS §18。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）
+- `src-tauri/src/dragout.rs` — 中转区拖出（source 侧，与拖入正交；`DoDragDrop` 必须**主线程**跑 + hide-after，三条死胡同见 DECISIONS §18。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）。「拖出后自动关闭」两模式：`开启`=拖动即隐藏去外部；`关闭`=拖动保持界面、区内落点交自窗口 IDropTarget、去外部靠拖动中按热键手动隐藏（续84，详见 DECISIONS §18）
 - `src-tauri/src/filesearch.rs` / `everything.rs` — 文件索引（后台预建）/ 可选 Everything 引擎（详见 DECISIONS §17）
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
@@ -67,6 +67,7 @@ npm run tauri build    # 打包
 - 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。
   - ⚠️ **别再给热键关闭加「淡出再 hide」**（续25 试过已回退）：延迟 hide 破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按误判、热键失灵。淡出仅用于前端点击驱动的关闭（启动/粘贴）。
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 set_focus dance 里抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**。详见 DECISIONS §12。
+- **拖动期间窗口可见性由 dragout 独占**（`DRAG_IN_PROGRESS`，续84）：拖出生命周期内热键 monitor 让路（只跟踪键态、不 toggle），否则并发操作窗口→白闪。新增窗口隐藏机制都要查是否需让路。详见 DECISIONS §18 续84。
 
 ### 剪贴板
 > 可调数值（轮询间隔 / 缩略图尺寸 / aHash 阈值等）均为 `clipboard.rs` 顶部命名常量（`CLIP_POLL_MS` / `MAX_THUMB_DIM` / `AHASH_*` …）。**要调就改常量，别在散落处硬编码。**
@@ -118,6 +119,7 @@ npm run tauri build    # 打包
 | WebView 盖住任务栏顶部一条 | `set_shadow(false)` 后底边越界；需 `clamp_window_bottom` 缩高贴齐；见 DECISIONS §5 延伸 |
 | 拖出后窗口呼不出 / 卡死须重启 | 裸 `ShowWindow` 没同步 tao 缓存 → 下次 `window.show()` 被 diff 成 no-op；收尾改走 Tauri `hide()`；见 DECISIONS §18 续71b |
 | 拖出到 cmd/终端后目标失焦、像卡死 2-3s（点一下才活） | 落点 console 不自我激活、本隐藏窗口仍持前台；drop 成功后 `activate_drop_target` 交还前台（前台锁挡住则 AttachThreadInput 强制）；见 DECISIONS §18 续82 |
+| 「保持界面」模式拖动中按热键手动隐藏、松手落地时白闪一下 | 热键 monitor 在拖动期间抢操作窗口可见性；须 `DRAG_IN_PROGRESS` 时让 monitor 让路（窗口可见性拖动中由 dragout 独占）；见 DECISIONS §18 续84 |
 | 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢手势（且无 `[dragout]` 日志）；需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
 
 ---

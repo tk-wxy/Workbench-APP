@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-07（续82：修复中转区拖出到 cmd/终端后目标失焦「像卡死」——drop 成功后交还前台焦点）
+> **最后更新**：2026-07-07（续84：「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 实测通过，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -17,8 +17,8 @@
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续82，仅 dragout.rs + 文档）**：修「拖出 text/image 到 cmd/PowerShell/Windows Terminal 后目标 2-3s 失焦、像卡死」。诊断定死：drop 干净成功但本隐藏 overlay 仍持前台 2-3s（console 不自我激活）。修复 = drop 成功后 `activate_drop_target` 取落点顶层窗口交还前台，前台锁挡住则 `AttachThreadInput` 强制。**GUI 实测 cmd/终端通过（attached+ok2 true、失焦消失）**；记事本/Paint/Explorer/Esc 回归待用户顺带确认。详见 §0A + DECISIONS §18 续82。
-- **上一状态（续81，纯文档）**：三大 md 优化——新建 `HISTORY.md` 归档全部变更记录与老化详记；MEMORY 瘦身；CLAUDE.md 铁律去叙事；DECISIONS 目录加摘要。
+- **最近状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
+- **上一状态（续82，仅 dragout.rs + 文档）**：修「拖出 text/image 到 cmd/PowerShell/Windows Terminal 后目标 2-3s 失焦、像卡死」。诊断定死：drop 干净成功但本隐藏 overlay 仍持前台 2-3s（console 不自我激活）。修复 = drop 成功后 `activate_drop_target` 取落点顶层窗口交还前台，前台锁挡住则 `AttachThreadInput` 强制。**GUI 实测 cmd/终端通过（attached+ok2 true、失焦消失）**；记事本/Paint/Explorer/Esc 回归待用户顺带确认。详见 DECISIONS §18 续82。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
   - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
@@ -27,6 +27,25 @@
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
 
+### 续84（2026-07-07，dragout.rs + lib.rs + App.tsx）——重构「拖出后自动关闭=关闭」为"拖动保持界面"模型（Phase 1+1b，待 GUI 复测）
+- **需求澄清（续83 方向作废）**：用户三场景实为**区内拖动**：① 拖到一半发现选错需取消（现状拖动即隐藏，看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。共同点=**拖动全过程界面不能消失**。续83「拖出后重新显示」在松手后才显示、拖动中界面照样消失，对三场景全无用。
+- **统一模型（用户敲定）**：拖动仍是唯一手段（OLE DoDragDrop），只改"何时隐藏界面"。`关闭`=拖动全程不隐藏，区内落点交给窗口自身 IDropTarget；拖到外部应用由用户**拖动中手动按热键隐藏**再松手（"与原版相比只是界面关闭改为手动"）。
+- **Phase 1（界面不消失 + 区内落点）**：`dragout.rs` 撤续83 re-show；`auto_close=false` 时不 spawn 60ms SW_HIDE、DoDragDrop 返回后不 hide、延迟 50ms set_focus。`App.tsx`：`files-dropped` 加 `internalDrag`（`dragOutRef.draggedIds` 非空）判定，区内落回中转暂 no-op（避免重复添加，区内重排=Phase 2）、落启动台走既有添加；`drag-out-done` 单 text `copyAndPaste` 回退在 keepOpen 时跳过；新增 `dragoutAutoCloseRef`。
+- **Phase 1b（拖动中手动隐藏去外部）**：`lib.rs` 加 `pub current_hotkey_vks()`（读 HOTKEY_VK_KEYS 快照）；`dragout.rs` `auto_close=false` 时改 spawn **自轮询线程**（20ms 读 GetAsyncKeyState，热键上升沿 → SW_HIDE + `manually_hidden`=true + emit hotkey-hide，触发一次即退；`drag_done` 兜底退出）。收尾分支改为 `if auto_close || manually_hidden { hide+同步 tao+activate_drop_target } else { 保持可见+set_focus }`。热键 monitor **不改**——它只在用户按热键（=想隐藏）时才 queue 一个 hide()，与本模型同向，无害。
+- **GUI 实测（续84 首轮，用户）**：核心前提**已验证成立**——日志 `[dragdrop] Drop 1 path(s) at (…)`＋`DoDragDrop end hr=0x40100 effect=1→copy` 证明**自前 OLE 拖动能被自窗口 IDropTarget 收到**（场景③启动台成立）。首轮"失败"实为测了当时未实现的外部流程。
+- **GUI 实测（续84 次轮，用户）**：**主流程合格**——`关闭`模式拖动中按热键→界面隐藏→松手到 Windows Terminal(CASCADIA)成功落地粘贴（日志见"保持界面模式：拖动中按热键→手动隐藏 overlay"+ activate 交还 CASCADIA）。**残留缺陷：手动隐藏后松手落地时白闪一下**。诊断：两模式唯一差异=手动隐藏流程有用户按热键→**热键 monitor 介入**（并发 toggle 操作窗口可见性）；`开启`自动隐藏 monitor 不介入、无白闪。
+- **白闪修复（复测通过）**：加 `DRAG_IN_PROGRESS: AtomicBool`（`do_drag_on_main` 起手置位/收尾清位，`pub drag_in_progress()`）；`lib.rs` 热键 monitor 循环开头判定——拖动期间**只跟踪键态、不做 show/hide toggle**（`prev_combo=combo; down_at=None; continue`），窗口可见性拖动期间由 dragout 独占。`cargo check` 过、clippy 维持 8 基线。**GUI 复测：白闪已消除**。新铁律「拖动期间窗口可见性由 dragout 独占」已入 CLAUDE.md。
+- **已知窄边界**：keepOpen 下"外部拖单 text 到 Chromium"仍不粘（copyAndPaste 被 keepOpen 跳过、前端无法区分是否已手动隐藏）；区内重排=Phase 2（暂 no-op）；text 项无 CF_HDROP 故不能落启动台（本就不应落）。
+- **验证**：`cargo check --lib` 零 error；`tsc` Phase 1 已过（1b 仅 Rust + hint 字符串）。**待 GUI 复测**：关闭模式下 ①拖到启动台入库、②拖动中按热键→界面隐藏→松手到外部应用文件落地、③中途取消保留、④开启模式回归。
+- **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs` / `src/App.tsx`。
+
+### 续83（2026-07-07，dragout.rs + lib.rs + App.tsx）——新增「拖出后自动关闭」设置
+- **动因**：用户反馈中转区任何超阈值拖动都会触发完整 OLE 拖出并隐藏窗口，但有时拖动只是想调整位置/误触发，不希望窗口消失。中转区目前无独立"区内重排"手势（与启动台纯前端拖拽重排不同），任何拖动一律进 `start_drag_out`→`DoDragDrop`。
+- **设计取舍（已与用户确认）**：设置关闭时**无条件**重新显示窗口——不区分 move/copy/cancel，即使真投放成功到外部窗口窗口也会重新弹出并抢回前台焦点，**覆盖续82 的前台交还修复**（此时跳过 `activate_drop_target`，反正马上被抢回没有意义）。
+- **实现**：`dragout.rs` 新增 `static DRAGOUT_AUTO_CLOSE: AtomicBool`（默认 true）+ `get/set_dragout_auto_close` 命令（`lib.rs` 注册）；持久化前端 store 负责，命令不写 store（同 `set_hotkey`/`set_clip_cache_max` 惯例）。关闭时的重新显示复刻呼出三约束（`emit("hotkey-show")` 先于 `show()`；`set_focus()` 延迟 50ms，防白闪），同 `tray_toggle`/热键 show 路径配方。前端：`dragoutAutoClose` state + `changeDragoutAutoClose`（`store.set`+`invoke`），设置面板「中转站」tab 新增 `seg-btn` 开启/关闭行。
+- **验证**：`cargo check --lib` 零 error、`tsc --noEmit` 零错误；**GUI 实测通过**——关键破局点是把 PowerShell 自动化脚本调 `SetProcessDPIAware()`（否则非 DPI-aware 进程看到的虚拟化 1600×1000 坐标与 App 实际 CSS 坐标不对齐，点击全部偏移/落空，此前多次误判"点击关掉了弹窗"）；改用真实物理坐标（3200×2000）后，一次成功点开 设置→中转站，看到新增行「拖出后自动关闭」+ 开启/关闭双态 + 提示文案全部正确渲染，且**两个方向点击都成功**（关闭→开启的高亮切换、`workbench-data.json` 落盘值同步校验通过）。**仍未覆盖**：真实拖拽文件出窗口时两态的实际观感（需要人工拖拽手势）。
+- **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs`（命令注册）/ `src/App.tsx`。文档同步：DECISIONS §18 续83。
+
 ### 续82（2026-07-07，仅 dragout.rs + 文档）——修拖出到 cmd/终端后目标失焦「像卡死」
 - **症状**：拖 text/image 到 cmd/PowerShell/Windows Terminal，drop 落地成功但目标 2-3s 无焦点、看着像卡死，手动点一下才活；记事本/Word 正常。
 - **诊断（先加取证日志再动手）**：装逐调用 + 前台采样日志。image→终端真实日志：`DoDragDrop` 876ms 干净返回、收尾 878ms、**此后 conhost 零回调**我方 IDataObject → 证伪原假设「conhost 攥数据对象卡 STA 泵消息」（microsoft/terminal #13498 那条线）。前台采样暴露根因：**drop 后 `GetForegroundWindow` 仍是本窗口约 2-3s**，之后系统才落到终端。
@@ -34,23 +53,6 @@
 - **修复（`dragout.rs` `activate_drop_target`，单一新增焦点动作，门控 `hr==DRAGDROP_S_DROP`）**：drop 成功后取光标落点顶层窗口（`GetCursorPos`→`WindowFromPoint`→`GetAncestor(GA_ROOT)`，守卫非本窗口），先裸 `SetForegroundWindow`；**若前台没转过去**（cmd/终端被前台锁挡住、裸调返回 false）走 `AttachThreadInput(本→目标,TRUE)`→`SetForegroundWindow`→`AttachThreadInput(...,FALSE)` 强制转移。`AttachThreadInput`/`GetCurrentThreadId` 走裸 extern（windows crate 需未启用 feature）。
 - **验证**：`cargo clippy --lib` 维持 8 基线、dragout.rs 0 新警告；**GUI 实测（2026-07-07，用户）cmd/终端通过**（`attached=true ok2=true`，采样从 ~200ms 起即终端、失焦消失）。诊断探针已收敛回精简日志（仅留 `[dragout] 前台交还落点 → <class>` 一行）。记事本/Paint/Explorer/Esc 回归待用户顺带确认。
 - **文件**：`src-tauri/src/dragout.rs`。文档同步：CLAUDE.md 反查表 + DECISIONS §18 续82。
-
-### 续81（2026-07-02，纯文档，零代码改动）——三大 md 文档优化
-- **动因**：MEMORY.md 膨胀至 195KB（Read 全文超工具上限），§0A 单条 bullet 长达数千字符；同一事实最多重复 4 处；CLAUDE.md 每会话自动加载且叙事占比高——tokens 消耗大、局部读取失效。
-- **改动**：
-  - 新建 `HISTORY.md`：原 MEMORY §九（全部变更记录）+ §0A 老化详记（续23~续78 等）**逐字迁入，零信息删除**。
-  - `MEMORY.md`：§0 重写为短快照；§0A 改滚动窗口（≤3 会话，多行短 bullet 格式）；§一~八快照保留并修正陈旧项（§五功能清单、§六命令表补新条目）；§九改为一行指针。
-  - `CLAUDE.md`：铁律去叙事——硬规则全保留，踩坑经过压缩为一行 + DECISIONS §指针；会话开始改为渐进式读取协议；「强制记忆更新」升级为完整文档维护约定（滚动窗口/单一真相源/短行原则）。
-  - `DECISIONS.md`：**仅动目录**——每 § 加一行结论摘要、修正编号漂移（旧目录把 §13 git 历史标成 §12、把 §14 拖入标成「废弃」而实际已推翻实现），正文一字未改。
-- **验证**：Grep 抽查关键规则（CLIPBOARD_LOCK / fWide / show 三约束 / 死胡同清单）在 CLAUDE.md 全部命中；归档采用 sed 按行号逐字提取 + 字节数核对，确认迁移完整。
-- **文件**：`CLAUDE.md` / `MEMORY.md` / `DECISIONS.md`（仅目录）/ `HISTORY.md`（新）。
-
-### 续80（2026-07-02，仅 clipboard.rs + 文档）——点击粘贴不稳定修复（焦点交还守卫轮询）
-- **症状与诊断**：点击历史项粘贴偶发失败、但手动 Ctrl+V 能粘上 → 剪贴板写入已成功，失败全在「hide → 盲等 150ms → 注入 Ctrl+V」后半段：`window.hide()` 是异步派发，负载高时 150ms 赌输，`GetForegroundWindow` 仍返回本窗口/NULL → Ctrl+V 注入进已隐藏的自家 WebView；还会污染 file/image 的 class 三分叉。
-- **修复（单变量）**：新增 `wait_foreground_handback(&app, tag)`——10ms 采样至前台「非本窗口且非 NULL」，上限 500ms 超时保底继续，确认后 50ms 落定余量（常量 `FOCUS_HANDBACK_POLL_MS/MAX_MS/SETTLE_MS`；self hwnd 取法同 `start_focus_watch`）；替换 paste/filepaste/imgpaste 三处 `sleep(150ms)`，补齐带 tag 日志（文本路径原先零日志、失败不可诊断）。
-- **已识别未修**（详见 DECISIONS §3 延伸续80）：① show 时未快照原前台 HWND（`SetForegroundWindow(GetForegroundWindow())` 恒等空操作），结构性改流程暂缓；② UIPI 提权目标静默吞 SendInput，无解只能将来提示；③ 物理修饰键未中和。若再偶发失败，先看 `[paste]/[filepaste]/[imgpaste] handback` 日志的 timeout 与 fg class 定位是①还是②。
-- **验证**：`cargo clippy` 8 条基线不变、新代码零警告；**GUI 实测（2026-07-02，用户）文本→Chrome 对话框成功**（waited=0ms / timeout=false / fg class 正确，全程 114ms，比旧盲等还快）；file/image 路径与高负载场景待日常观察。
-- **文件**：`src-tauri/src/clipboard.rs`。文档同步：CLAUDE.md 焦点交还铁律改守卫轮询、DECISIONS §3 延伸记根因。同会话应用户要求删除 `AGENTS.md`（Codex 副本，零信息丢失），CLAUDE.md 成唯一规则入口。
 
 ---
 
@@ -133,7 +135,7 @@ src-tauri/Cargo.toml
 - ✅ 系统托盘常驻 + 开机自启
 - ✅ 启动器收藏托盘：手动策展持久化（app/file/folder），app picker、.lnk 拖入提取图标、拖拽排序（Launchpad 式让路）、放大启动动画
 - ✅ 剪贴板历史（文本/图片/文件三类型）：后台监听 + 粘贴（图片按目标三分叉落地）+「只复制」按钮（seq 水位防回流）+ 持久化 + 条数四档可配 + 原图落盘 & janitor + aHash 去重
-- ✅ 文件中转区：混合条目（file/text/image）、📌钉入、单击取走粘贴/复制/打开/删除、多选/框选/批量、双布局（列表/方格）、原生拖入（IDropTarget）+ 拖出（DoDragDrop）
+- ✅ 文件中转区：混合条目（file/text/image）、📌钉入、单击取走粘贴/复制/打开/删除、多选/框选/批量、双布局（列表/方格）、原生拖入（IDropTarget）+ 拖出（DoDragDrop，拖出后是否自动关闭窗口可配置，续83）
 - ✅ 增强搜索（默认 Ctrl+K，可自定义）：应用 + 中转 + 文件系统（内置索引 / 可选 Everything 双引擎），分组渲染 + 键盘导航 + 系统图标
 - ✅ 顶栏普通搜索：三区就地联动过滤（与增强搜索分工独立）
 - ✅ 快捷入口（常用 Windows 位置快速打开 + 截屏）
@@ -176,6 +178,7 @@ src-tauri/Cargo.toml
 | `set_hotkey` | 运行时切换呼出热键：parse_combo → register(new) 成功 → unregister(old) → 更新 HOTKEY_VK_KEYS/CURRENT_SHORTCUT；失败保留旧组合并 Err；不写 store（持久化前端负责）|
 | `set_clip_cache_max` | 运行时调整剪贴板历史条数上限（四档 10/20/50/100；持久化前端 store 负责）|
 | `start_drag_out` | 中转区拖出：worker 构建 IDataObject 格式 → 主线程 DoDragDrop（DECISIONS §18）|
+| `get_dragout_auto_close` / `set_dragout_auto_close` | 拖出后是否自动关闭窗口（默认 true）；关闭时 DoDragDrop 返回后重新显示 overlay，不区分 move/copy/cancel；持久化前端 store 负责（续83）|
 
 **事件**（Rust `emit` → 前端监听）：
 | 事件 | 用途 |
