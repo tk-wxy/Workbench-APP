@@ -126,6 +126,9 @@ export const EN_DICT: Record<string, string> = {
   "拖出后自动关闭": "Auto-close on drag out",
   "中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。":
     "Stage holds files, text, and images you've pinned or dragged in; left-click takes and pastes. \"On\" (default): dragging an item hides the window immediately, making it easy to drag into external apps (Explorer, etc). \"Off\": the window stays visible while dragging — you can drop onto Launcher or cancel mid-drag (release over empty space / press Esc); to drag into an external app, tap the hotkey mid-drag to hide the window, then release.",
+  "持久化": "Persist Items",
+  "「关闭」（默认）：条目确认成功移出/拖出后自动从中转区移除。「开启」：条目移出/拖出后仍保留在中转区，除非手动删除。":
+    "\"Off\" (default): items are removed from Stage automatically once a move-out/drag-out is confirmed successful. \"On\": items stay in Stage after being moved/dragged out, until you delete them manually.",
 
   // ── 设置：剪贴板 ──
   "历史保存条数": "History Size",
