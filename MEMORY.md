@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-08（续91：多选模式悬浮不露单条操作按钮，待用户确认，见 §0）
+> **最后更新**：2026-07-08（续91：多选模式悬浮不露单条操作按钮，已提交，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,7 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
-- **续91（本次会话，待用户 GUI 确认，未提交）**：中转区多选模式下卡片悬浮不再露出单条操作按钮（`.stage-card-actions`/list 布局的 `.clip-copy-btn` 等），纯 CSS 门控（容器加 `stage-multiselect` class），未动 JS 状态机。`npx tsc --noEmit` 通过。
+- **续91（已提交，用户已确认测试通过）**：中转区多选模式下卡片悬浮不再露出单条操作按钮（`.stage-card-actions`/list 布局的 `.clip-copy-btn` 等），纯 CSS 门控（容器加 `stage-multiselect` class），未动 JS 状态机。版本号 0.3.2→0.3.3（PATCH）。
 - **续90（已提交，用户已确认测试通过）**：①中转站容量从硬编码 20 改为可配置（20/50/100/200，纯前端 store 持久化，无需 Rust 同步）；②`.stage-grid` 从 flex-wrap 改 CSS Grid（`auto-fill` + `justify-content:center`）修复方格卡片左右缝隙不对称。版本号 0.3.1→0.3.2（PATCH）。
 - **续89**：全局 `user-select:none` 加在 `html` 根（`src/App.css`），`input`/`textarea` 例外保留文本编辑；修复此前拖拽/点击时界面文本大片被框选变蓝的观感问题。此前零散加的 `.launcher-reordering`/`.stage-reordering`/`.lasso-active`/`#overlay.dragging` 局部 user-select 规则仍保留（现为冗余但无害，未清理）。版本号 0.3.0→0.3.1（PATCH）。
 - **⚠️ 中转区「区内拖动排位」（续88）功能接近完成，五轮修复"按热键升级为原生拖出并投放"，代码在工作树未提交，等本轮 GUI 复测**——见下条。
@@ -49,7 +49,8 @@
 ### 续91（2026-07-08，src/App.tsx + src/App.css，待用户 GUI 确认）——多选模式下卡片悬浮不再露出单条操作按钮
 - **需求**：中转区多选状态下，光标悬浮卡片时不应再弹出「复制/删除」等单条操作按钮（与批量操作栏语义打架，多选时不该再暴露单条操作入口）。
 - **实现**：`stage-grid`/`stage-list` 容器按 `stageMultiselect` 加条件 class `stage-multiselect`；CSS 新增 `.stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}` 与 list 布局对应的 `.clip-copy-btn/.clip-del-btn/.stage-open-btn` 规则，覆盖非多选态下已有的 `:hover{opacity:1}` 规则。未改任何 JS 逻辑/状态机，纯 CSS 门控。
-- **验证**：`npx tsc --noEmit` 零错误；GUI 待用户实测（悬浮遮罩不出现、多选切换回单选后悬浮操作按钮恢复正常）。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测确认通过（悬浮遮罩不出现、多选切换回单选后悬浮操作按钮恢复正常）。
+- **提交**：`57242b1`（fix）+ 版本号 0.3.2→0.3.3（PATCH，随后单独提交）。
 - **文件**：`src/App.tsx`（两处 className 拼接）、`src/App.css`（两条新增规则）。
 
 （续88「中转区拖动排位」详记已迁入 HISTORY.md，功能仍未完成，见上方 §0 阻塞项）
