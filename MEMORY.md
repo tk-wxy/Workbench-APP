@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-08（续88 五轮：补"按热键升级为原生拖出"触发器，修复"拖动中按热键关界面成功但松手无文件落地"，见 §0）
+> **最后更新**：2026-07-08（续89：全局禁用文本框选，修复界面拖拽时文字大片变蓝，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续89（本次会话，已提交，用户已确认测试通过）**：全局 `user-select:none` 加在 `html` 根（`src/App.css`），`input`/`textarea` 例外保留文本编辑；修复此前拖拽/点击时界面文本大片被框选变蓝的观感问题。此前零散加的 `.launcher-reordering`/`.stage-reordering`/`.lasso-active`/`#overlay.dragging` 局部 user-select 规则仍保留（现为冗余但无害，未清理）。版本号 0.3.0→0.3.1（PATCH）。
 - **⚠️ 中转区「区内拖动排位」（续88）功能接近完成，五轮修复"按热键升级为原生拖出并投放"，代码在工作树未提交，等本轮 GUI 复测**——见下条。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
 - **最近状态（续88 五轮，本次会话）——补"按热键升级为原生拖出"触发器**：GUI 实测确认四轮的②（热键关界面）已生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地"**。根因：用户转移手势是"拖起→按热键隐藏→拖到目标松手"，全程不越 drop-area 边界；而续88 只在"越界"时才把纯 JS 区内重排升级为原生 DoDragDrop——按热键那刻还没有任何原生拖，直接 hide 就把手势取消了（且隐藏后 DoDragDrop 的 SetCapture 必失败，隐藏必须晚于起手）。修复：把"按热键"也作为升级触发器——monitor 在 `stage_reorder_active()` 期间改为 emit `stage-drag-hotkey`（不 hide 不让路），前端据此 `cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；`start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，且**先起手 DoDragDrop 再隐藏**）；`STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接（`cancelStageReorder` 只清 JS 现场、do_drag_on_main 先置 DRAG_IN_PROGRESS 再清 STAGE_REORDER，防交接空窗被提前 hide）。三处 build 零错误，GUI 待复测。详见 §0A 续88 五轮 / DECISIONS §18。
@@ -28,6 +29,13 @@
 - **阻塞 / 待决策**：中转区「区内拖动排位」（续88）等本轮 GUI 复测——重点验证"拖起条目→按热键隐藏→拖到外部松手→文件落地"整条转移链是否闭合（devtools console 看 `[stage-drag] hotkey during reorder → 升级…` + `[dragout] DoDragDrop begin … force_hide=true` + `drag-out-done effect=…`）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续89（2026-07-08，src/App.css，用户已确认测试通过并提交）——修复界面拖拽时文本被意外框选变蓝
+- **症状**：日常操作（拖动卡片、在顶栏/列表上按住鼠标移动等）容易触发浏览器原生文字框选，界面文本大片变蓝，观感不像桌面应用。
+- **根因**：此前只在特定拖拽场景（启动台/中转区重排、剪贴板长按拖拽、框选）零散加了局部 `user-select:none`，未覆盖的普通点击拖动路径（如顶栏、按钮间隙误触发的原生文字选择）没有防护。
+- **修复**：`src/App.css` 顶部 `html{user-select:none;-webkit-user-select:none;}` 全局禁用，`input,textarea{user-select:text;-webkit-user-select:text;}` 例外保留搜索框/热键录入框等正常文本编辑。此前局部规则未删（冗余但无害）。
+- **验证**：`npm run build` 通过（含版本一致性检查）；用户手动测试拖拽启动台/中转卡片/顶栏/剪贴板列表确认不再泛蓝，搜索框/热键输入框文本选择正常。
+- **提交**：`0711893`（fix）+ `03941b4`（chore 版本号 0.3.0→0.3.1，PATCH）。
 
 ### 续88（2026-07-08，App.tsx + App.css + dragout.rs + lib.rs，三轮 GUI 反馈后**暂停归档**，未完成）——中转区拖动排位（Phase 2 补完）
 - **需求**：中转区参照启动台（§16）补上拖动排位功能——续84 时明确留了这个缺口（"区内重排暂 no-op（Phase 2）"）。
