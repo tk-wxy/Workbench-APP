@@ -21,6 +21,7 @@ const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
+const STAGE_REORDER_ESCAPE_PX = 6; // 中转区内重排：光标离开 .drop-area 边界超过此距离才升级为真实拖出（防边缘抖动误触发）
 
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
@@ -333,8 +334,16 @@ export default function App() {
   const lassoStateRef = useRef(lassoState); lassoStateRef.current = lassoState; // 供 move/up 闭包读最新值（仿 stageSelRef 渲染时同步）
   const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
-  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[] }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [] });
+  // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
+  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
+  // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动、光标仍在 .drop-area 内时走此逻辑；
+  // 光标离开区域边界 → 升级为原生 OLE 拖出（沿用既有 start_drag_out 链路，见 beginNativeDragOut）。
+  const stageReorderRef = useRef<{
+    active: boolean; tiles: HTMLElement[]; rects: { left: number; top: number; width: number; height: number }[];
+    ghostEl: HTMLElement | null; srcEl: HTMLElement | null; srcIdx: number; insertIdx: number;
+    grabOffsetX: number; grabOffsetY: number;
+  }>({ active: false, tiles: [], rects: [], ghostEl: null, srcEl: null, srcIdx: -1, insertIdx: -1, grabOffsetX: 0, grabOffsetY: 0 });
   // 启动台排序拖拽（续74重写）：全 DOM 直操作 + window 全局监听，绕过 React 渲染保证跟手
   // ghost 也走 DOM clone，不经 React state/ref，确保拖拽预览一定可见。
   const launcherDragActiveRef = useRef(false); // 是否已超阈值激活
@@ -415,7 +424,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; }); // 复位
+        const un2 = await listen("hotkey-hide", () => { if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死）
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -509,6 +518,7 @@ export default function App() {
         // 移除仍严格挂在 Rust 回传的「非 none」（已确认成功投放）之后，只是多加一道门。
         const un9 = await listen<string>("drag-out-done", async (event) => {
           const dr = dragOutRef.current;
+          console.log("[stage-drag] drag-out-done effect=", event.payload, "draggedIds=", dr.draggedIds); // 续88 诊断
           const dropped = event.payload === "move" || event.payload === "copy"; // 真正投放成功；取消/none 一律不算
           // 续72：单个 text 条目拖出且 effect==="copy" 时，回退 copyAndPaste（写剪贴板 + 焦点交还 + Ctrl+V），等同点击取走。
           // 判定依据（别改成「无论 effect 一律回退」，会双粘）：会原生插入文本的目标（Word/写字板）返回 move →
@@ -546,7 +556,19 @@ export default function App() {
           }
           dr.draggedIds = [];
         });
-        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9];
+        // 续88：区内重排期间用户按热键 → Rust monitor emit 此事件（而非直接 hide）。把纯 JS 重排**升级为原生拖出**：
+        // 先起手 DoDragDrop（此刻窗口仍可见，SetCapture 成功），再由 Rust force_hide 隐藏 overlay，用户即可拖到
+        // 外部目标投放。若直接让 monitor hide，DoDragDrop 起手前窗口已隐藏→拖拽不启动→松手无文件落地（四轮反馈根因）。
+        const un10 = await listen("stage-drag-hotkey", () => {
+          const dr = dragOutRef.current;
+          if (dr.mode !== "reorder" || !stageReorderRef.current.active || dr.itemId === null) return;
+          const itemId = dr.itemId;
+          console.log("[stage-drag] hotkey during reorder → 升级为原生拖出 + 隐藏", itemId); // 续88 诊断
+          cancelStageReorder();               // 仅清 JS 重排现场；STAGE_REORDER_ACTIVE 留给 Rust 交接
+          dr.mode = "native";
+          beginNativeDragOut([itemId], true); // force_hide：起手 DoDragDrop（窗口仍可见）后由 dragout 自身隐藏
+        });
+        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
@@ -1019,28 +1041,23 @@ export default function App() {
     // 框中条目 → 保持多选；框中空白（选区为空）→ 退出多选
     if (stageSelRef.current.size === 0) setStageMultiselect(false);
   }, []);
-  // ── 中转条目拖出（续71）──
-  // 条目上按下→拖动超阈值→emit drag-out-begin，Rust 侧 STA 线程跑 DoDragDrop（hide overlay 后接管鼠标）。
+  // ── 中转条目拖出（续71）+ 区内重排（续88）──
+  // 条目上按下→拖动超阈值：光标仍在 .drop-area 内→区内重排（FLIP，仿启动台）；光标离开区域→升级为
+  // 原生 OLE 拖出（emit drag-out-begin，Rust 侧 STA 线程跑 DoDragDrop，hide overlay 后接管鼠标）。
   // 与框选互斥：down 在条目上时 .drop-area 的 lasso 不布防（closest 排除）；与左键取走互斥：未超阈值=普通点击。
-  const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest("button")) return; // 悬浮操作按钮区不触发拖出
-    suppressStageClickRef.current = false; // 每次新交互复位
-    const id = Number((e.currentTarget as HTMLElement).dataset.stageId);
-    if (Number.isNaN(id)) return;
-    // 多选状态下按下选中项 → 拖全部选中（ids 在 move 时按 stageSel 决定）；未超阈值松手仍走 onClick 点选
-    dragOutRef.current = { pressing: true, itemId: id, origin: { x: e.clientX, y: e.clientY }, draggedIds: [] };
-    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+  // 区内重排仅限单项拖动（多选拖多项 / 搜索过滤态 索引对不上）：两种情形直接走原生拖出，行为与重排功能加入前一致。
+  // 续88 bug 修复：重排阶段窗口全程可见、尚未进入 Rust 的 DRAG_IN_PROGRESS——必须另行告知 Rust 侧
+  // light-dismiss/热键 monitor 在此期间也让路，否则前台瞬时切换会被判定为"点了外部应用"提前 hide()，
+  // 打断整个手势（ghost 卡死 + 从未真正调用 start_drag_out，"拖到外部目标"根本没发生）。
+  const setStageReorderActiveNative = useCallback((active: boolean) => {
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_stage_reorder_active", { active })).catch(() => {});
   }, []);
-  const handleStagePointerMove = useCallback((e: React.PointerEvent) => {
+  // forceHide=true：由"区内重排中按热键"升级而来——Rust 侧无视 keepOpen 设置强制隐藏 overlay（用户已明确要隐藏
+  // 去外部投放）。边界越出触发的常规升级传 false，沿用中转站「拖出后自动关闭」设置。
+  const beginNativeDragOut = useCallback((ids: number[], forceHide = false) => {
     const dr = dragOutRef.current;
-    if (!dr.pressing || dr.itemId === null) return;
-    if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < DRAG_OUT_THRESHOLD_PX) return;
-    dr.pressing = false; // 一次性触发
-    suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴
-    // 多选且按下项在选区内 → 拖全部选中项；否则 → 拖当前单项
-    const sel = stageSelRef.current;
-    const ids = (sel.size > 0 && sel.has(dr.itemId)) ? Array.from(sel) : [dr.itemId];
+    console.log("[stage-drag] → native drag-out", ids, "forceHide=", forceHide); // 续88 诊断
+    dr.mode = "native";
     dr.draggedIds = ids;
     const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
       type: s.type,
@@ -1048,12 +1065,175 @@ export default function App() {
       items: s.items?.map(f => f.path) ?? null,
       orig_path: s.orig_path ?? null,
     }));
-    import("@tauri-apps/api/core").then(({ invoke }) => invoke("start_drag_out", { items: dragItems })).catch(() => {});
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("start_drag_out", { items: dragItems, forceHide })).catch(() => {});
   }, []);
+  // FLIP 快照 + ghost 建立：与启动台 handleLauncherPointerDown 的 onMove 激活段同构，选择器按当前 stageLayout 决定。
+  const startStageReorder = useCallback((id: number, srcEl: HTMLElement, clientX: number, clientY: number) => {
+    const container = dropAreaRef.current;
+    const srcIdx = stageRef.current.findIndex(s => s.id === id);
+    if (!container || srcIdx === -1) return;
+    const selector = stageLayout === "grid" ? ".stage-card" : ".stage-item";
+    const tiles = Array.from(container.querySelectorAll<HTMLElement>(selector));
+    const rects = tiles.map(t => { const r = t.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; });
+    const srcStartRect = srcEl.getBoundingClientRect();
+    const grabOffsetX = clientX - srcStartRect.left, grabOffsetY = clientY - srcStartRect.top;
+    tiles.forEach(t => t.classList.add("stage-shift"));
+    const ghostEl = srcEl.cloneNode(true) as HTMLElement;
+    ghostEl.classList.remove("selected");
+    ghostEl.classList.add("stage-drag-ghost");
+    ghostEl.querySelectorAll("img").forEach(img => { (img as HTMLImageElement).draggable = false; });
+    const ghostHost = dragLayerRef.current ?? document.body;
+    const inDragLayer = ghostHost === dragLayerRef.current;
+    Object.assign(ghostEl.style, {
+      position: inDragLayer ? "absolute" : "fixed",
+      left: `${clientX - grabOffsetX}px`,
+      top: `${clientY - grabOffsetY}px`,
+      width: `${srcStartRect.width}px`,
+      height: `${srcStartRect.height}px`,
+      zIndex: inDragLayer ? "" : "100003",
+      opacity: "0.85",
+      visibility: "visible",
+      pointerEvents: "none",
+    });
+    ghostHost.appendChild(ghostEl);
+    srcEl.classList.add("stage-dragging-src");
+    document.getElementById("overlay")?.classList.add("stage-reordering");
+    stageReorderRef.current = { active: true, tiles, rects, ghostEl, srcEl, srcIdx, insertIdx: srcIdx, grabOffsetX, grabOffsetY };
+    console.log("[stage-drag] reorder start id=", id, "srcIdx=", srcIdx); // 续88 诊断
+    setStageReorderActiveNative(true); // 告知 Rust：light-dismiss 本阶段让路（热键 monitor 续88 起不再让路）
+  }, [stageLayout, setStageReorderActiveNative]);
+  const updateStageReorder = useCallback((clientX: number, clientY: number) => {
+    const st = stageReorderRef.current;
+    if (!st.active || !st.ghostEl) return;
+    st.ghostEl.style.left = (clientX - st.grabOffsetX) + "px";
+    st.ghostEl.style.top = (clientY - st.grabOffsetY) + "px";
+    // 按固定槽位快照判断插入点：同启动台 calcInsert（cy 落在某行 → 按 cx 半区决定插入本格前/继续找下一格）
+    let ins = st.rects.length;
+    for (let i = 0; i < st.rects.length; i++) {
+      const r = st.rects[i];
+      if (clientY < r.top) { ins = i; break; }
+      if (clientY <= r.top + r.height && clientX < r.left + r.width / 2) { ins = i; break; }
+    }
+    if (ins !== st.insertIdx) {
+      st.insertIdx = ins;
+      const target = ins > st.srcIdx ? ins - 1 : ins;
+      for (let i = 0; i < st.tiles.length; i++) {
+        if (i === st.srcIdx) continue;
+        const k = i < st.srcIdx ? i : i - 1;
+        const newSlot = k < target ? k : k + 1;
+        const dx = st.rects[newSlot].left - st.rects[i].left;
+        const dy = st.rects[newSlot].top - st.rects[i].top;
+        st.tiles[i].style.transform = dx || dy ? `translate(${dx}px,${dy}px)` : "";
+      }
+    }
+  }, []);
+  // 升级为原生拖出前的清场：无落定动画（马上交给 Rust 接管鼠标），立即复原让路 transform + 清 ghost。
+  // ⚠️ 本函数只做 JS 侧清场（ghost / 让路 transform / class），**不**清 Rust 的 STAGE_REORDER_ACTIVE 让路标志。
+  // 清标志的时机分两类，别在这里一刀切：
+  //   ① 升级为原生拖出（边界越出 / 热键触发）→ 标志必须**保持为真**直到 Rust do_drag_on_main 置位 DRAG_IN_PROGRESS
+  //      后再由 Rust 清（两标志无缝交接、中间无空窗，防 monitor/light-dismiss 在交接瞬间钻空 hide 窗口 →
+  //      DoDragDrop 起手 SetCapture 失败 → 松手无文件落地，续88 四轮反馈根因）；
+  //   ② 非升级的终止（重排落定 commit / 意外丢 pointer capture）→ 由各自调用点显式 setStageReorderActiveNative(false)。
+  const cancelStageReorder = useCallback(() => {
+    const st = stageReorderRef.current;
+    if (!st.active) return;
+    console.log("[stage-drag] reorder cancel (仅 JS 清场，标志留待 Rust/调用点处理)"); // 续88 诊断
+    st.tiles.forEach(t => { t.style.transform = ""; t.classList.remove("stage-shift"); });
+    st.srcEl?.classList.remove("stage-dragging-src");
+    document.getElementById("overlay")?.classList.remove("stage-reordering");
+    st.ghostEl?.remove();
+    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
+  }, []);
+  // 松手提交：ghost 飞回落点空槽，180ms 落定后统一 commit（同启动台 onUp 收尾节奏）。
+  const commitStageReorder = useCallback(() => {
+    const st = stageReorderRef.current;
+    if (!st.active) return;
+    const { srcIdx, tiles, ghostEl, srcEl } = st;
+    const target = st.insertIdx > srcIdx ? st.insertIdx - 1 : st.insertIdx;
+    const landing = st.rects[target] ?? st.rects[srcIdx];
+    if (ghostEl && landing) {
+      ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
+      ghostEl.style.left = landing.left + "px";
+      ghostEl.style.top = landing.top + "px";
+    }
+    stageReorderRef.current = { ...st, active: false };
+    setStageReorderActiveNative(false); // 重排结束（落定动画只是视觉收尾，与 Rust 让路无关，可立即清）
+    window.setTimeout(() => {
+      tiles.forEach(t => { t.style.transform = ""; t.classList.remove("stage-shift"); });
+      srcEl?.classList.remove("stage-dragging-src");
+      document.getElementById("overlay")?.classList.remove("stage-reordering");
+      ghostEl?.remove();
+      const list = [...stageRef.current];
+      const [moved] = list.splice(srcIdx, 1);
+      const tgt = Math.max(0, Math.min(target, list.length));
+      list.splice(tgt, 0, moved);
+      const unchanged = list.every((x, i) => x.id === stageRef.current[i]?.id);
+      if (!unchanged) saveStage(list); // 位置不变则跳过 I/O
+    }, 180);
+  }, [saveStage, setStageReorderActiveNative]);
+  const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest("button")) return; // 悬浮操作按钮区不触发拖出
+    suppressStageClickRef.current = false; // 每次新交互复位
+    const id = Number((e.currentTarget as HTMLElement).dataset.stageId);
+    if (Number.isNaN(id)) return;
+    // 多选状态下按下选中项 → 拖全部选中（ids 在 move 时按 stageSel 决定）；未超阈值松手仍走 onClick 点选
+    dragOutRef.current = { pressing: true, itemId: id, origin: { x: e.clientX, y: e.clientY }, draggedIds: [], mode: "idle" };
+    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
+  }, []);
+  const handleStagePointerMove = useCallback((e: React.PointerEvent) => {
+    const dr = dragOutRef.current;
+    const itemId = dr.itemId;
+    // 注意：进入 reorder/native 后 dr.pressing 会置 false（表示"一次性阈值判定"已完成），
+    // 但重排/原生拖出仍需继续吃后续 move 事件——门槛判据只能用 itemId + mode，不能查 pressing。
+    if (itemId === null || dr.mode === "native") return; // native：已交给 Rust，JS 侧不再处理
+    if (dr.mode === "idle") {
+      if (!dr.pressing) return;
+      if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < DRAG_OUT_THRESHOLD_PX) return;
+      dr.pressing = false; // 一次性阈值判定，避免重复进入下面的分支决策
+      suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴
+      // 多选且按下项在选区内 → 拖全部选中项；否则 → 拖当前单项（与原有 ids 判定一致）
+      const sel = stageSelRef.current;
+      const ids = (sel.size > 0 && sel.has(itemId)) ? Array.from(sel) : [itemId];
+      if (ids.length > 1 || search.trim()) { // 多项 / 搜索过滤态：索引对不上重排快照，直接走原生拖出（原有行为不变）
+        dr.mode = "native";
+        beginNativeDragOut(ids);
+        return;
+      }
+      dr.mode = "reorder";
+      startStageReorder(itemId, e.currentTarget as HTMLElement, e.clientX, e.clientY);
+      return;
+    }
+    if (dr.mode === "reorder") {
+      const rect = dropAreaRef.current?.getBoundingClientRect();
+      const outside = !rect || e.clientX < rect.left - STAGE_REORDER_ESCAPE_PX || e.clientX > rect.right + STAGE_REORDER_ESCAPE_PX
+        || e.clientY < rect.top - STAGE_REORDER_ESCAPE_PX || e.clientY > rect.bottom + STAGE_REORDER_ESCAPE_PX;
+      if (outside) { // 光标离开中转区：放弃重排、升级为原生拖出（单项，重排只处理单项拖动）
+        cancelStageReorder();
+        dr.mode = "native";
+        beginNativeDragOut([itemId]);
+        return;
+      }
+      updateStageReorder(e.clientX, e.clientY);
+    }
+  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder]);
   const handleStagePointerUp = useCallback((e: React.PointerEvent) => {
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    if (dragOutRef.current.mode === "reorder") commitStageReorder();
     dragOutRef.current.pressing = false; // 未超阈值=普通点击，交给 onClick（取走/选中）
-  }, []);
+    dragOutRef.current.mode = "idle";
+  }, [commitStageReorder]);
+  // 安全网（续88）：capture 被外部原因（而非我们自己的 pointerup/releasePointerCapture）中途撤销时兜底清场。
+  // 典型触发场景：重排阶段窗口本应由 light-dismiss/热键 monitor 让路（见 dragout.rs stage_reorder_active），
+  // 但如果因未预见的原因窗口仍被意外隐藏，浏览器会静默丢弃 capture 而不发 pointerup——不兜底就会永久
+  // 卡住 ghost/让路 transform（下次呼出时"卡片悬浮"）。无论根因是否已堵上，这层兜底都应保留。
+  const handleStageLostPointerCapture = useCallback(() => {
+    console.log("[stage-drag] lost pointer capture", { mode: dragOutRef.current.mode, reorderActive: stageReorderRef.current.active }); // 续88 诊断
+    if (stageReorderRef.current.active) cancelStageReorder();
+    dragOutRef.current.pressing = false;
+    dragOutRef.current.mode = "idle";
+    setStageReorderActiveNative(false);
+  }, [cancelStageReorder, setStageReorderActiveNative]);
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
@@ -1460,7 +1640,7 @@ export default function App() {
                     : s.type==="text" ? t("文本")
                     : (isAnyDir ? t("文件夹") : (rawExt ? `.${rawExt}` : t("文件")));
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用"))}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用"))}>
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
@@ -1507,7 +1687,7 @@ export default function App() {
               : <div className="stage-list">{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||t("文本")):s.type==="image"?t("图片"):(s.count!==1?t("{n} 个文件", {n: s.count ?? 0}):(s.name||s.items?.[0]?.name||t("文件")));
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）"))}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）"))}>
                     {s.type==="image"
                       ?<img className="stage-thumb" draggable={false} src={s.content} alt=""/>
                       :s.type==="file" && s.items?.[0]?.icon

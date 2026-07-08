@@ -69,6 +69,24 @@ pub fn drag_in_progress() -> bool {
     DRAG_IN_PROGRESS.load(Ordering::Relaxed)
 }
 
+// 续88 区内重排：JS 侧纯前端 FLIP 重排阶段（尚未升级为原生 DoDragDrop 之前）——此时窗口仍完全可见，
+// DRAG_IN_PROGRESS 尚未置位（只在 do_drag_on_main 真正起手时才置位）。这段时间窗口可见性同样必须由
+// 拖动独占：若此时 light-dismiss（start_focus_watch，lib.rs）检测到前台瞬时切走就自行 hide()，会在
+// 升级到原生拖出之前就打断整个手势——JS 侧从未收到「窗口已被别人关闭」的通知，ghost/让路 transform
+// 永久卡死；且因为从未真正调用 start_drag_out，「拖到外部目标」这个操作本身也根本没发生。
+// 前端进入/退出重排时调 set_stage_reorder_active 同步此标志，light-dismiss 与之一并检查后让路。
+static STAGE_REORDER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 是否正处于中转区区内重排阶段（供 lib.rs light-dismiss / 热键 monitor 判定是否让路）。
+pub fn stage_reorder_active() -> bool {
+    STAGE_REORDER_ACTIVE.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_stage_reorder_active(active: bool) {
+    STAGE_REORDER_ACTIVE.store(active, Ordering::Relaxed);
+}
+
 #[tauri::command]
 pub fn get_dragout_auto_close() -> bool {
     DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed)
@@ -467,40 +485,54 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 /// 关键：`DoDragDrop` **必须在主线程**跑——主线程已 `OleInitialize`（STA，dragdrop setup 时）、
 /// 拥有前台窗口、且 mousedown 起手已持有鼠标 capture。放在 worker 线程（无窗口/无 capture）会让
 /// DoDragDrop 起手 SetCapture 失败、拖拽不启动（续71 首版症状：界面消失但什么都没投放）。
+/// force_hide：本次拖出由"区内重排中按热键"升级而来——用户已明确要隐藏 overlay 去外部投放，故无视 keepOpen
+/// 设置强制走隐藏收场（详见 do_drag_on_main）。边界越出触发的常规拖出传 None/false，沿用 DRAGOUT_AUTO_CLOSE。
 #[tauri::command]
-pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>) {
-    std::thread::spawn(move || run_drag_out(app, items));
+pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: Option<bool>) {
+    let force_hide = force_hide.unwrap_or(false);
+    std::thread::spawn(move || run_drag_out(app, items, force_hide));
 }
 
-fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>) {
+fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
     let (formats, temp_files) = build_formats(&items);
-    println!("[dragout] start: {} item(s) → {} format(s)", items.len(), formats.len());
+    println!("[dragout] start: {} item(s) → {} format(s) force_hide={force_hide}", items.len(), formats.len());
+    // 若本次是从区内重排升级来的（STAGE_REORDER_ACTIVE 仍为真），任何"没走到 do_drag_on_main"的中止路径都必须
+    // 在此清掉该让路标志——否则标志永久悬置，monitor/light-dismiss 永远让路、窗口再也无法正常隐藏/关闭。
     if formats.is_empty() {
         eprintln!("[dragout] 无可拖出格式，放弃");
+        STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
         return;
     }
     let hwnd = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
         Some(h) => h.0 as isize,
         None => {
             eprintln!("[dragout] 取主窗口 HWND 失败");
+            STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
             return;
         }
     };
     let app_main = app.clone();
     // 切到主线程跑 DoDragDrop（阻塞其模态循环，期间 tao 窗口仍收消息——同文件对话框 idiom）
-    if let Err(e) = app.run_on_main_thread(move || do_drag_on_main(app_main, formats, temp_files, hwnd)) {
+    if let Err(e) = app.run_on_main_thread(move || do_drag_on_main(app_main, formats, temp_files, hwnd, force_hide)) {
         eprintln!("[dragout] run_on_main_thread 调度失败: {e}");
+        STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
     }
 }
 
 /// 在主线程执行：构建 COM 对象 → 起手 DoDragDrop（持有 capture）→ 延迟隐藏 overlay → 阻塞至投放/取消。
 /// 主线程已是 OLE STA（dragdrop setup 的 OleInitialize），**不再 init/uninit**（否则破坏拖入的 OLE 状态）。
-fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec<PathBuf>, hwnd: isize) {
+fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec<PathBuf>, hwnd: isize, force_hide: bool) {
     let data_obj: IDataObject = DragOutDataObject { formats }.into();
     let drop_src: IDropSource = DragOutDropSource.into();
-    let auto_close = DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed);
-    println!("[dragout] DoDragDrop begin (main thread) auto_close={auto_close}");
+    // force_hide（区内重排中按热键升级来的拖出）：用户已明确要隐藏 overlay，无视 keepOpen 设置强制走隐藏收场。
+    let auto_close = force_hide || DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed);
+    println!("[dragout] DoDragDrop begin (main thread) auto_close={auto_close} force_hide={force_hide}");
     DRAG_IN_PROGRESS.store(true, Ordering::Relaxed); // 拖动期间热键 monitor 让路（见 static 注释）
+    // 续88：DRAG_IN_PROGRESS 已接管让路职责，此刻才清 STAGE_REORDER_ACTIVE（本次若由区内重排升级而来）。
+    // 顺序关键——**先置 DRAG_IN_PROGRESS 再清 STAGE_REORDER_ACTIVE**：两标志在此无缝交接、任一时刻至少一个为真，
+    // 中间无空窗可被 monitor / light-dismiss 钻空提前 hide 窗口（否则 DoDragDrop 尚未起手就被隐藏→SetCapture
+    // 失败→松手无文件落地，正是续88 四轮反馈的症状）。非重排来源（多选/搜索直出）本就为 false，这里清是无害幂等。
+    STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
 
     // "保持界面"模式的拖动中手动隐藏协调：manually_hidden=用户按热键触发过 SW_HIDE（去外部应用）；
     // drag_done=DoDragDrop 已返回、通知自轮询线程退出。
