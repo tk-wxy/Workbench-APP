@@ -129,7 +129,10 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
 /* ── 中转区方格卡片（固定 80px 绝对尺寸，对齐启动台节奏，预留设置可配置）── */
-.stage-grid{display:flex;flex-wrap:wrap;gap:8px;align-content:start;}
+/* CSS Grid 而非 flex-wrap：flex-wrap 每行各自左对齐，行尾剩余空间只堆在右侧（左右缝隙不对称）；
+   grid 的 auto-fill 列数对整个网格只算一次，justify-content:center 把"整块网格"居中，
+   剩余空间对称分给左右两侧，且不会让局部行（如末行只有一张卡）单独居中导致观感突兀。 */
+.stage-grid{display:grid;grid-template-columns:repeat(auto-fill,80px);justify-content:center;gap:8px;align-content:start;}
 /* 卡片壳：固定宽度 + flex-shrink:0 防压缩 */
 .stage-card{position:relative;width:80px;min-width:80px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:10px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
 .stage-card:hover{border-color:var(--card-border-hover-c);}
