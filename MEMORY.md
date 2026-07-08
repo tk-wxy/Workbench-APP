@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-08（续89：全局禁用文本框选，修复界面拖拽时文字大片变蓝，见 §0）
+> **最后更新**：2026-07-08（续90：中转站容量可配置 + 方格卡片间距对称修复，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -15,13 +15,12 @@
 
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
-- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
-- **续89（本次会话，已提交，用户已确认测试通过）**：全局 `user-select:none` 加在 `html` 根（`src/App.css`），`input`/`textarea` 例外保留文本编辑；修复此前拖拽/点击时界面文本大片被框选变蓝的观感问题。此前零散加的 `.launcher-reordering`/`.stage-reordering`/`.lasso-active`/`#overlay.dragging` 局部 user-select 规则仍保留（现为冗余但无害，未清理）。版本号 0.3.0→0.3.1（PATCH）。
+- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续90（本次会话，已提交，用户已确认测试通过）**：①中转站容量从硬编码 20 改为可配置（20/50/100/200，纯前端 store 持久化，无需 Rust 同步）；②`.stage-grid` 从 flex-wrap 改 CSS Grid（`auto-fill` + `justify-content:center`）修复方格卡片左右缝隙不对称。版本号 0.3.1→0.3.2（PATCH）。
+- **续89**：全局 `user-select:none` 加在 `html` 根（`src/App.css`），`input`/`textarea` 例外保留文本编辑；修复此前拖拽/点击时界面文本大片被框选变蓝的观感问题。此前零散加的 `.launcher-reordering`/`.stage-reordering`/`.lasso-active`/`#overlay.dragging` 局部 user-select 规则仍保留（现为冗余但无害，未清理）。版本号 0.3.0→0.3.1（PATCH）。
 - **⚠️ 中转区「区内拖动排位」（续88）功能接近完成，五轮修复"按热键升级为原生拖出并投放"，代码在工作树未提交，等本轮 GUI 复测**——见下条。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
 - **最近状态（续88 五轮，本次会话）——补"按热键升级为原生拖出"触发器**：GUI 实测确认四轮的②（热键关界面）已生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地"**。根因：用户转移手势是"拖起→按热键隐藏→拖到目标松手"，全程不越 drop-area 边界；而续88 只在"越界"时才把纯 JS 区内重排升级为原生 DoDragDrop——按热键那刻还没有任何原生拖，直接 hide 就把手势取消了（且隐藏后 DoDragDrop 的 SetCapture 必失败，隐藏必须晚于起手）。修复：把"按热键"也作为升级触发器——monitor 在 `stage_reorder_active()` 期间改为 emit `stage-drag-hotkey`（不 hide 不让路），前端据此 `cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；`start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，且**先起手 DoDragDrop 再隐藏**）；`STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接（`cancelStageReorder` 只清 JS 现场、do_drag_on_main 先置 DRAG_IN_PROGRESS 再清 STAGE_REORDER，防交接空窗被提前 hide）。三处 build 零错误，GUI 待复测。详见 §0A 续88 五轮 / DECISIONS §18。
-- **上一状态（续87）——修复系统托盘两个图标问题**：`tauri.conf.json` 的 `app.trayIcon` 配置项与 `lib.rs` 手写的 `TrayIconBuilder`（含菜单/点击事件）同时存在，Tauri 启动时各自创建一个托盘图标——配置项那个无菜单无事件绑定（即用户看到的"蓝色不可操作"那个）。修复：删掉 `tauri.conf.json` 里的 `trayIcon` 块，只保留代码手写版。用户已确认符合预期。详见 §0A 续87。
-- **上一状态（续86）——中转站新增「持久化」开关 + 修正 move/copy 移除判定，GUI 二轮复测待用户**：`stagePersist` 开关门控 `drag-out-done` 监听器里的自动移除逻辑；首轮 GUI 反馈 text/image 拖出成功后仍留在中转区（根因：旧逻辑仅 `effect==="move"` 才移除，而 image/text/跨盘 file 拖出多数回传 `copy`），已修正为 move/copy 均视为成功移出。详见 §0A 续86。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
   - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
@@ -29,6 +28,15 @@
 - **阻塞 / 待决策**：中转区「区内拖动排位」（续88）等本轮 GUI 复测——重点验证"拖起条目→按热键隐藏→拖到外部松手→文件落地"整条转移链是否闭合（devtools console 看 `[stage-drag] hotkey during reorder → 升级…` + `[dragout] DoDragDrop begin … force_hide=true` + `drag-out-done effect=…`）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续90（2026-07-08，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转站容量可配置 + 方格卡片间距对称修复
+- **需求 1**：中转站容量扩张，此前硬编码仅 20 个条目上限。
+- **实现**：`STAGE_MAX`（前端硬编码常量，Rust 侧无对应数组/上限）改为可配置——`STAGE_MAX_DEFAULT=20`+`STAGE_MAX_OPTIONS=[20,50,100,200]`；新增 `stageMax` state + `stageMaxRef`（供 `files-dropped` 一次性事件监听闭包读最新值，同 `clipCacheMaxRef` 惯例）；`changeStageMax` 持久化到 store（`"stage-max"`），无需 invoke 同步 Rust；缩小上限时用 `stage.slice(0,n)` 立即截断（保留较新的）。设置面板「中转站」新增「上限条数」`seg` 控件（20/50/100/200）。选 200 而非对齐剪贴板的 100 上限：中转 file 条目只存路径+小图标，比剪贴板可能内联的整张缩略图/全文轻得多，扩容成本更低。
+- **需求 2**：中转区最右边文件卡片到右边缘的缝隙大于最左边到左边缘，要求对称。
+- **根因**：`.stage-grid` 原用 `display:flex;flex-wrap:wrap`——flex-wrap 逐行独立左对齐，行尾剩余空间只堆在右侧。
+- **修复**：改用 CSS Grid（`grid-template-columns:repeat(auto-fill,80px)` + `justify-content:center`）——列数对整个网格只算一次并整体居中，剩余空间对称分给左右两侧；末行只有一张卡时仍按原列位靠左，不会被单独居中显得突兀。
+- **验证**：`npm run build`（含 tsc + 版本一致性检查）通过；FLIP 拖动重排逻辑（`getBoundingClientRect` 驱动，与 flex/grid 无关）确认不受影响。用户 GUI 实测两项均确认符合预期。
+- **提交**：`41e7eb9`（feat 容量可配置）+ `e7edb56`（fix 网格对称）+ `981aa88`（chore 版本号 0.3.1→0.3.2，PATCH）。
 
 ### 续89（2026-07-08，src/App.css，用户已确认测试通过并提交）——修复界面拖拽时文本被意外框选变蓝
 - **症状**：日常操作（拖动卡片、在顶栏/列表上按住鼠标移动等）容易触发浏览器原生文字框选，界面文本大片变蓝，观感不像桌面应用。
@@ -60,22 +68,6 @@
   - **教训**：区分"重排 vs 转移"的触发器必须匹配用户真实手势（原设计只认"越界"，漏了"热键隐藏后投放"）；任何"先隐藏窗口"的路径都必须先确认原生拖已起手。
   - **验证**：三处 build 零错误；GUI 待复测（区内落定 / 热键升级转移 / 越界升级转移 / auto-close×keepOpen）。
 - **文件**：`src/App.tsx` / `src/App.css` / `src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs`。文档同步：claude.md 铁律（热键让路→emit 升级 + 无缝交接）+ 反查表 2 行 + dragout.rs 结构行 `force_hide` + DECISIONS §18 续88「四轮/五轮修复」。
-
-### 续87（2026-07-08，仅 tauri.conf.json，用户已确认符合预期）——修复系统托盘出现两个图标
-- **症状**：运行后系统托盘出现两个图标，绿色可操作、蓝色点了没反应。
-- **根因**：`tauri.conf.json` 里配了 `app.trayIcon`（`iconPath`+`iconAsTemplate:true`），Tauri 启动时会据此**自动创建一个默认托盘图标**；`lib.rs:561` 的 setup 里又手写了一个 `TrayIconBuilder`（带菜单/`on_menu_event`）。两者互相独立、同时存在→两个图标。配置项那个没绑任何菜单/事件，就是那个"蓝色不可操作"的。
-- **修复**：删掉 `tauri.conf.json` 的 `trayIcon` 配置块，只保留代码手写版（唯一有菜单和事件处理的那个）。
-- **验证**：JSON 校验通过；用户实测确认只剩一个可操作图标。
-- **文件**：`src-tauri/tauri.conf.json`。
-
-### 续86（2026-07-08，纯前端 App.tsx，GUI 首轮反馈已修复，二轮待复测）——新增中转站「持久化」开关 + 修正 move/copy 移除判定
-- **需求**：中转区当前拖出成功后条目会自动消失（符合中转语义）；新增设置开关，开启后除非用户手动删除，条目移出/拖出后不再自动消失；关闭（默认）保持现状——确认成功移出后才消失。
-- **前置排查**：确认现有"消失"只发生在拖出（`drag-out-done` 事件里 `event.payload==="move"` 分支 + 单 text 非 move 的 copyAndPaste 回退分支），点击"取走"/批量"取走"从不移除条目（只粘贴，早已如此，非本次改动范围）。
-- **实现（纯前端，无需 Rust 同步，因为移除逻辑本就在 `App.tsx` 的 JS 事件监听里）**：新增 `stagePersist` state + `stagePersistRef`（供事件监听闭包读最新值）+ `changeStagePersist`（`store.set("stage-persist",v)`，无 invoke）；启动时从 store 读取回填。设置面板「中转站」tab 新增开启/关闭行（`seg-btn`，复用 `dragoutAutoClose` 同款样式，On/Off 直写而非查字典——沿用续85 撞 key 教训）。
-- **GUI 首轮反馈（用户）**：test 未通过——text/image 条目移出后仍留在中转区。**根因**：`drag-out-done` 沿用续71 老逻辑「仅 `effect==="move"` 才移除、`copy` 保留」，但文件跨盘拖出、image/text 拖到绝大多数非 Explorer 目标 OS 回传的几乎都是 `copy`（`move` 只在同盘 Explorer 间搬移等少数场景出现）——旧逻辑下这些条目哪怕投放成功也从不消失，与本次「移出即消失」的直觉不符。
-- **修正**：移除判据从 `event.payload==="move"` 放宽为 `event.payload==="move"||"copy"`（新变量 `dropped`，取消/`"none"` 除外）——**任何成功投放**都算移出，是否真移除仍受 `stagePersistRef` 门控（「确保成功移出再消失」语义不变，只是"成功"的定义从"仅 move"扩到"move 或 copy"）。顺手修正单 text 回退分支的取消场景误触发（原条件在 `"none"` 时也会误进分支多按一次粘贴）。副作用：内部拖入启动台等区内落点场景现在也会因此让条目移出中转区（此前 copy 效果不移除、条目会同时留在中转区和启动台）——判定为合理一致行为。
-- **验证**：`npx tsc --noEmit` 零错误。**GUI 二轮复测待用户**（无法模拟真实拖拽手势，见〔铁律〕不模拟输入约定）：需覆盖 move/copy 两种效果 × `stagePersist` 开/关两态 × text/image/file 三类型。
-- **文件**：`src/App.tsx`。文档同步：DECISIONS §18 续86（标注旧「effect 语义」表废弃）。
 
 ---
 
