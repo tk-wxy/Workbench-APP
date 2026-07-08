@@ -9,6 +9,22 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续87（2026-07-08，仅 tauri.conf.json，用户已确认符合预期，2026-07-08 续90 迁入）——修复系统托盘出现两个图标
+- **症状**：运行后系统托盘出现两个图标，绿色可操作、蓝色点了没反应。
+- **根因**：`tauri.conf.json` 里配了 `app.trayIcon`（`iconPath`+`iconAsTemplate:true`），Tauri 启动时会据此**自动创建一个默认托盘图标**；`lib.rs:561` 的 setup 里又手写了一个 `TrayIconBuilder`（带菜单/`on_menu_event`）。两者互相独立、同时存在→两个图标。配置项那个没绑任何菜单/事件，就是那个"蓝色不可操作"的。
+- **修复**：删掉 `tauri.conf.json` 的 `trayIcon` 配置块，只保留代码手写版（唯一有菜单和事件处理的那个）。
+- **验证**：JSON 校验通过；用户实测确认只剩一个可操作图标。
+- **文件**：`src-tauri/tauri.conf.json`。
+
+### 续86（2026-07-08，纯前端 App.tsx，GUI 首轮反馈已修复，二轮已由续90 确认通过，2026-07-08 续90 迁入）——新增中转站「持久化」开关 + 修正 move/copy 移除判定
+- **需求**：中转区当前拖出成功后条目会自动消失（符合中转语义）；新增设置开关，开启后除非用户手动删除，条目移出/拖出后不再自动消失；关闭（默认）保持现状——确认成功移出后才消失。
+- **前置排查**：确认现有"消失"只发生在拖出（`drag-out-done` 事件里 `event.payload==="move"` 分支 + 单 text 非 move 的 copyAndPaste 回退分支），点击"取走"/批量"取走"从不移除条目（只粘贴，早已如此，非本次改动范围）。
+- **实现（纯前端，无需 Rust 同步，因为移除逻辑本就在 `App.tsx` 的 JS 事件监听里）**：新增 `stagePersist` state + `stagePersistRef`（供事件监听闭包读最新值）+ `changeStagePersist`（`store.set("stage-persist",v)`，无 invoke）；启动时从 store 读取回填。设置面板「中转站」tab 新增开启/关闭行（`seg-btn`，复用 `dragoutAutoClose` 同款样式，On/Off 直写而非查字典——沿用续85 撞 key 教训）。
+- **GUI 首轮反馈（用户）**：test 未通过——text/image 条目移出后仍留在中转区。**根因**：`drag-out-done` 沿用续71 老逻辑「仅 `effect==="move"` 才移除、`copy` 保留」，但文件跨盘拖出、image/text 拖到绝大多数非 Explorer 目标 OS 回传的几乎都是 `copy`（`move` 只在同盘 Explorer 间搬移等少数场景出现）——旧逻辑下这些条目哪怕投放成功也从不消失，与本次「移出即消失」的直觉不符。
+- **修正**：移除判据从 `event.payload==="move"` 放宽为 `event.payload==="move"||"copy"`（新变量 `dropped`，取消/`"none"` 除外）——**任何成功投放**都算移出，是否真移除仍受 `stagePersistRef` 门控（「确保成功移出再消失」语义不变，只是"成功"的定义从"仅 move"扩到"move 或 copy"）。顺手修正单 text 回退分支的取消场景误触发（原条件在 `"none"` 时也会误进分支多按一次粘贴）。副作用：内部拖入启动台等区内落点场景现在也会因此让条目移出中转区（此前 copy 效果不移除、条目会同时留在中转区和启动台）——判定为合理一致行为。
+- **验证**：`npx tsc --noEmit` 零错误。GUI 二轮复测已随续90 一并确认通过（覆盖 move/copy 两种效果 × `stagePersist` 开/关两态 × text/image/file 三类型）。
+- **文件**：`src/App.tsx`。文档同步：DECISIONS §18 续86（标注旧「effect 语义」表废弃）。
+
 ### 续85（2026-07-07，src/i18n.ts 新增 + App.tsx + lib.rs，2026-07-08 续88 迁入）——新增中/英文界面语言切换
 - **需求**：设置里可切换界面语言，默认中文，新增英文。`App.tsx` 单文件 ~1860 行，UI 文本几乎全硬编码中文。
 - **方案**：新文件 `src/i18n.ts` — 字典式 `EN_DICT: Record<中文,英文>`，key 直接用中文原文（不发明语义 key）；`makeT(lang)` 返回 `t(zh, vars?)`，缺项 fallback 回中文（不会白屏）；动态文案（`ago()`/"已选 {n} 项"）用 `{占位符}` 模板复用同一套字典。
