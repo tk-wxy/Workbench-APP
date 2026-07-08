@@ -9,6 +9,29 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续88（2026-07-08，App.tsx + App.css + dragout.rs + lib.rs，三轮 GUI 反馈后**暂停归档**，未完成，2026-07-08 续91 迁入）——中转区拖动排位（Phase 2 补完）
+- **需求**：中转区参照启动台（§16）补上拖动排位功能——续84 时明确留了这个缺口（"区内重排暂 no-op（Phase 2）"）。
+- **核心设计**：按下拖动超阈值（`DRAG_OUT_THRESHOLD_PX`=12px）后不再一律立即触发原生 `start_drag_out`，先判定：多选拖多项 或 搜索过滤态（`filteredStage` 索引对不上 `stage`）→ 维持原行为直出；否则单项 → 进入纯前端「区内重排」（`stageReorderRef` 持有 FLIP 快照 + DOM clone ghost，算法与启动台 `handleLauncherPointerDown` 同构，直接复用 `calcInsert`/`applyShift` 逻辑）。光标只要还在 `.drop-area` 边界内（留 `STAGE_REORDER_ESCAPE_PX`=6px 余量防抖动）就纯前端重排；一旦越界，立即清场（无落定动画）并调用与直出分支同一个 `beginNativeDragOut([itemId])` 升级为真实 OLE 拖出——两条路径复用同一段 Rust 调用代码。
+- **状态机**：`dragOutRef` 加 `mode:"idle"|"reorder"|"native"` 字段路由；重排本身状态（tiles/rects/ghost/insertIdx）单独放 `stageReorderRef`，两个 ref 职责正交。
+- **范围取舍**：不支持多选群体重排（与"多选=准备批量拖出"的既有直觉冲突，且实现复杂度高很多）——多选/搜索过滤态一律走原生拖出，行为与加入本功能前一致。
+- **CSS**：新增 `.stage-card/.stage-item` 的 `.stage-dragging-src`/`.stage-shift`/`.stage-drag-ghost`/`.stage-reordering`，镜像启动台同名 class（`.app-tile.launcher-*`）。
+- **一轮 GUI 反馈（用户）**：拖动项目有放大动画（ghost pop-in）但卡在原处不跟手。**根因**：`handleStagePointerMove` 顶部门槛 `if (!dr.pressing || itemId === null) return;` 里的 `dr.pressing` 本是"一次性阈值判定"标志——进入 reorder/native 分支时会被置 `false`；但激活后的**所有后续 move 事件**都会先撞上这行顶部门槛而直接 return，`updateStageReorder` 从未被再次调用。**修正**：门槛判据改为只查 `itemId===null || dr.mode==="native"`。
+- **二轮 GUI 反馈（用户）**：①拖文件到外部目标失败（等同没发生过）；②重开界面后有张卡片一直悬浮卡死、点不动。用户自己的判断"拖动时开关页面导致失去对鼠标控制"精确命中根因。**根因**：`lib.rs` 的 `start_focus_watch`（light-dismiss，50ms 轮询前台窗口）**完全不知道"区内重排"这个新阶段的存在**——重排期间窗口全程可见、`dragout::DRAG_IN_PROGRESS` 尚未置位（那个标志只在真正调用 `start_drag_out` 后、`do_drag_on_main` 起手时才置位），若此时用户的拖动手势恰好导致前台窗口瞬间切走（哪怕只是一瞬），light-dismiss 会立刻 `hide()`——**在我们升级到原生拖出之前就把窗口关了**：`start_drag_out` 从未被调用（"拖到外部目标"这个动作根本没发生，①因此失败），且 JS 侧从未收到"窗口被关"的通知（浏览器把 pointer capture 静默撤销、不发 `pointerup`），`ghost`/让路 transform 永久卡死在 DOM 里（drag-layer 是持久节点、React 不会重新挂载，②因此卡死）。这正是 CLAUDE.md 铁律"新增窗口隐藏机制都要查是否需要让路"——本次实现漏查了 light-dismiss 这一条。
+- **修正**：①`dragout.rs` 新增 `STAGE_REORDER_ACTIVE` + `stage_reorder_active()` + `set_stage_reorder_active` 命令，`lib.rs` 的 `start_focus_watch` 与 `start_hotkey_monitor` 均在 `dragout::drag_in_progress() || dragout::stage_reorder_active()` 时让路（同 `DRAG_IN_PROGRESS` 惯例）；前端 `startStageReorder`/`cancelStageReorder`/`commitStageReorder` 对应调用该命令同步。②双重前端安全网（不管根因是否堵严实，兜底都该在）：`onLostPointerCapture`（capture 被外部原因静默撤销时兜底清场）+ `hotkey-hide` 监听器里补一句"若有活跃重排则强制 cancel"。
+- **验证**：`cargo check --lib`、`npx tsc --noEmit`、`npx vite build` 均零错误。
+- **三轮 GUI 反馈（用户，2026-07-08）**：区内重排本身已经跑通（不再卡死、能跟手拖动），但①原生拖出仍异常、②拖动文件时"界面关闭快捷键"失效。
+- **四轮修复（本次会话，2026-07-08，采纳三轮的静态推断）**：
+  - **②根因确认并修复**：二轮修复把 `dragout::stage_reorder_active()` 错误地**同时**加进了 `start_hotkey_monitor` 让路判断（lib.rs ~407）。对原生拖出阶段是对的（`do_drag_on_main` keepOpen 分支有 Rust 自轮询线程顶替 hotkey monitor，见 dragout.rs ~528），但纯 JS 区内重排阶段**无替代者**，让路 = 拖动期间热键关界面整段失效。改回 `if dragout::drag_in_progress() { ...continue; }`（去掉 `|| stage_reorder_active()`）；`start_focus_watch` 保持 `|| stage_reorder_active()`（它让路安全且必需，是二轮真正要修的对象）。
+  - **关键区分（教训）**："是否让路"标志不能在 hotkey monitor / light-dismiss 之间无差别复用同一判断——light-dismiss 让路只是暂停"自动隐藏"一个动作、无需替代者；hotkey monitor 让路的前提是**有别的机制顶替其核心职责**（检测按键 show/hide）。给新阶段接让路判断时须逐个让路方核对"这个阶段里它需不需要让、能不能被替代"。
+  - **诊断日志**：App.tsx 的 `startStageReorder`/`beginNativeDragOut`/`cancelStageReorder`/`handleStageLostPointerCapture`/`drag-out-done` 监听器加 `console.log("[stage-drag] …")`，供①下一轮 GUI 取证。
+  - **①现状**：最可能是②的连锁（重排期间热键被吞、用户按热键脱困未遂扰乱手势），②修后应连带缓解；若日志显示①独立（`[stage-drag] → native drag-out` 有打印但 drag-out-done effect=none），下一步查 reorder→native 交接的 `STAGE_REORDER_ACTIVE=false`→`DRAG_IN_PROGRESS=true` 空窗是否被 light-dismiss 钻空提前 hide（`cancelStageReorder` 先清标志再异步 `start_drag_out`，理论有 gap，但 button-held 拖动前台通常仍是本窗口、未必致命）。
+  - **验证**：`cargo check --lib` / `npx tsc --noEmit` / `npx vite build` 三处零错误；GUI 待用户实测（不模拟输入）。
+- **五轮修复（本次会话，2026-07-08，GUI 实测后）**：四轮的②确实生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地，中转转移失效"**。
+  - **根因坐实**：用户转移手势="拖起→按热键隐藏 overlay→拖到目标松手投放"，**全程不越出 drop-area 边界**；续88 只在"越界"时才把纯 JS 区内重排升级为原生 `DoDragDrop`。按热键那刻还处在纯 JS 重排（ghost 只是 DOM 元素、无原生 OLE 拖），四轮把 monitor 改成正常 toggle 后按热键→`hide()`→丢 pointer capture→`onLostPointerCapture`→`cancelStageReorder` 手势取消，从未起手 DoDragDrop。核心矛盾：转移到外部必须先隐藏才看得见目标，但隐藏后 `DoDragDrop` 的 SetCapture 必失败（续71 已录）——隐藏必须**晚于**起手。
+  - **修复**（把"按热键"也作为升级为原生拖出的触发器，与"越界"并列）：① `lib.rs` monitor 在 `stage_reorder_active()` 期间**不 hide 不让路**、改按下沿 emit `stage-drag-hotkey`；② `App.tsx` 新增该事件监听→`cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；③ `start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，先起手 DoDragDrop 再隐藏）；④ **无缝交接**：`cancelStageReorder` 改为只清 JS 现场、**不动 STAGE_REORDER_ACTIVE**，由 `do_drag_on_main` 先置 `DRAG_IN_PROGRESS=true` 再清 `STAGE_REORDER_ACTIVE`（任一时刻至少一真、无空窗被提前 hide）；升级中止路径在 `run_drag_out` 补清标志防悬置；非升级终止（commit/lost-capture/hotkey-hide 安全网）由调用点显式清。
+  - **教训**：区分"重排 vs 转移"的触发器必须匹配用户真实手势（原设计只认"越界"，漏了"热键隐藏后投放"）；任何"先隐藏窗口"的路径都必须先确认原生拖已起手。
+  - **验证**：三处 build 零错误；GUI 待复测（区内落定 / 热键升级转移 / 越界升级转移 / auto-close×keepOpen）。
+
 ### 续87（2026-07-08，仅 tauri.conf.json，用户已确认符合预期，2026-07-08 续90 迁入）——修复系统托盘出现两个图标
 - **症状**：运行后系统托盘出现两个图标，绿色可操作、蓝色点了没反应。
 - **根因**：`tauri.conf.json` 里配了 `app.trayIcon`（`iconPath`+`iconAsTemplate:true`），Tauri 启动时会据此**自动创建一个默认托盘图标**；`lib.rs:561` 的 setup 里又手写了一个 `TrayIconBuilder`（带菜单/`on_menu_event`）。两者互相独立、同时存在→两个图标。配置项那个没绑任何菜单/事件，就是那个"蓝色不可操作"的。

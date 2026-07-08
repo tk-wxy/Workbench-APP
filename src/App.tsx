@@ -1634,7 +1634,7 @@ export default function App() {
               }}/>;
             })()}
             {filteredStage.length ? (stageLayout==="grid"
-              ? <div className="stage-grid">{filteredStage.map((s,idx)=>{
+              ? <div className={`stage-grid${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
                   const rawExt = (s.ext||s.items?.[0]?.ext||"").replace(/^\./,"");
                   const isAnyDir = !!s.isDir;
                   const cardName = s.type==="image" ? t("图片")
@@ -1688,7 +1688,7 @@ export default function App() {
                     </div>
                   </div>
                 );})}</div>
-              : <div className="stage-list">{filteredStage.map((s,idx)=>{
+              : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||t("文本")):s.type==="image"?t("图片"):(s.count!==1?t("{n} 个文件", {n: s.count ?? 0}):(s.name||s.items?.[0]?.name||t("文件")));
                   return (
                   <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）"))}>

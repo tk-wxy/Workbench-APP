@@ -126,6 +126,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-actions{display:flex;gap:2px;flex-shrink:0;}
 .stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
+/* 多选模式下卡片悬浮不露出单条操作按钮（避免与批量操作栏语义打架，见 MEMORY §0A）*/
+.stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
 /* ── 中转区方格卡片（固定 80px 绝对尺寸，对齐启动台节奏，预留设置可配置）── */
@@ -157,6 +159,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 /* 悬浮操作栏：只覆盖标签区（bottom:0，高度=标签区高度），不遮 thumb */
 .stage-card-actions{position:absolute;bottom:0;left:0;width:80px;height:36px;background:rgba(30,30,30,0.90);border-radius:0 0 10px 10px;display:flex;align-items:center;justify-content:center;gap:4px;opacity:0;transition:opacity 0.12s;pointer-events:none;}
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
+/* 多选模式下卡片悬浮不露出单条操作按钮，避免与批量操作栏语义打架 */
+.stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}
 .stage-card-act-btn{width:24px;height:24px;border-radius:6px;border:none;background:rgba(255,255,255,0.15);color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background 80ms;}
 .stage-card-act-btn:hover{background:rgba(255,255,255,0.25);}
 /* 中转区内重排（续87，仿启动台 FLIP 方案）*/
