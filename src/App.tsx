@@ -14,7 +14,8 @@ interface ClipItem { type: "text" | "image" | "file"; content?: string; time: nu
 interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
-const STAGE_MAX = 20; // 中转区上限
+const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
+const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
 // 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
 const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
@@ -291,6 +292,7 @@ export default function App() {
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
+  const [stageMax, setStageMax] = useState(STAGE_MAX_DEFAULT); // 中转区上限（纯前端，无需 Rust 同步）
   const [hotkeyCombo, setHotkeyCombo] = useState("ctrl+space"); // 呼出热键（与 Rust HOTKEY_VK_KEYS 同步）
   const [hotkeyInput, setHotkeyInput] = useState("ctrl+space"); // 设置面板输入框编辑态
   const [hotkeyError, setHotkeyError] = useState(""); // 切换失败提示（如被其他应用占用），3s 后自动清
@@ -302,6 +304,7 @@ export default function App() {
   const [autostartEnabled, setAutostartEnabled] = useState(false); // 开机自启
   const ctxMenuRef = useRef<CtxMenu>(null); // Esc 处理用（闭包快照避免加入 keydown deps）
   const clipCacheMaxRef = useRef(20); clipCacheMaxRef.current = clipCacheMax; // 供 clipboard-update 闭包读最新值
+  const stageMaxRef = useRef(STAGE_MAX_DEFAULT); stageMaxRef.current = stageMax; // 供 files-dropped 闭包读最新值
   const searchRef = useRef<HTMLInputElement>(null);
   const loadedRef = useRef(false);
   const appsRef = useRef<AppInfo[]>(apps); appsRef.current = apps; // 供 [visible] 兜底扫描闭包读最新 apps（apps-ready 是否已填充）
@@ -403,7 +406,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,STAGE_MAX)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,STAGE_MAX)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ setStage(savedStage.slice(0,stageMaxLoaded)); } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -413,6 +416,7 @@ export default function App() {
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
   const changeStagePersist = useCallback(async (v:boolean) => { setStagePersist(v); if(store){ await store.set("stage-persist",v); await store.save(); } }, [store]);
+  const changeStageMax = useCallback(async (n:number) => { setStageMax(n); if(store){ await store.set("stage-max",n); await store.save(); } if(stage.length>n){ await saveStage(stage.slice(0,n)); } }, [store,stage,saveStage]);
   const changeSearchDefaultMode = useCallback(async (v:"page"|"enhanced") => { setSearchDefaultMode(v); if(store){ await store.set("search-default-mode",v); await store.save(); } }, [store]);
   const recordUse = useCallback(async (p:string) => { const cur=appUsage[p]; const u={...appUsage,[p]:{count:(cur?.count??0)+1,last_used:Math.floor(Date.now()/1000)}}; setAppUsage(u); if(store){ await store.set("app-frequency",u); await store.save(); } }, [appUsage,store]);
 
@@ -482,11 +486,11 @@ export default function App() {
             if (!built.length) return;
             let next = [...stageRef.current];
             for (const it of built) {
-              if (next.length >= STAGE_MAX) break;
+              if (next.length >= stageMaxRef.current) break;
               if (next.some(s => s.type === "file" && s.items?.[0]?.path === it.items?.[0]?.path)) continue;
               next.push(it);
             }
-            next = next.slice(0, STAGE_MAX);
+            next = next.slice(0, stageMaxRef.current);
             setStage(next);
             if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
             dropAreaRef.current?.classList.add("drop-flash");
@@ -919,8 +923,8 @@ export default function App() {
       icon = info.icon ?? null;
     } catch {}
     const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
-    saveStage([item, ...stage].slice(0, STAGE_MAX));
-  }, [stage, saveStage]);
+    saveStage([item, ...stage].slice(0, stageMax));
+  }, [stage, saveStage, stageMax]);
   // 增强搜索 fs 结果加入启动台（按 path 去重）
   const addFsToLauncher = useCallback((r:{path:string;name:string;ext?:string;isDir:boolean}) => {
     if (launcher.some(x => x.path === r.path)) return;
@@ -942,8 +946,8 @@ export default function App() {
         if (info.icon) item = { ...item, items: [{ ...item.items![0], icon: info.icon }] };
       } catch {}
     }
-    saveStage([item, ...stage].slice(0,STAGE_MAX));
-  }, [stage,saveStage]);
+    saveStage([item, ...stage].slice(0,stageMax));
+  }, [stage,saveStage,stageMax]);
   // 拖拽：按下记录起点（不立刻激活，等移动超阈值），但跳过 .clip-actions 内的按钮区，且仅左键
   const handleClipPointerDown = useCallback((e: React.PointerEvent, c: ClipItem) => {
     if (e.button !== 0) return;
@@ -1884,8 +1888,16 @@ export default function App() {
                     </div>
                   </div>
                   <div className="settings-row">
-                    <span className="settings-row-label">{t("中转条目")}<span className="settings-row-sub">{stage.length} / {STAGE_MAX}</span></span>
+                    <span className="settings-row-label">{t("中转条目")}<span className="settings-row-sub">{stage.length} / {stageMax}</span></span>
                     <button className="settings-action danger" onClick={clearStage} disabled={!stage.length}>{t("清空")}</button>
+                  </div>
+                  <div className="settings-row">
+                    <span className="settings-row-label">{t("上限条数")}</span>
+                    <div className="seg">
+                      {STAGE_MAX_OPTIONS.map(n=>(
+                        <button key={n} className={`seg-btn${stageMax===n?" seg-active":""}`} onClick={()=>changeStageMax(n)}>{n}</button>
+                      ))}
+                    </div>
                   </div>
                   <div className="settings-row">
                     <span className="settings-row-label">{t("拖出后自动关闭")}</span>
