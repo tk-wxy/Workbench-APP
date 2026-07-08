@@ -566,7 +566,7 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 
 **前端**：`dragOutRef`（useRef，不触发重渲染）记录 pressing/itemId/origin/draggedIds；条目 `onPointerDown`（setPointerCapture + 读 `data-stage-id`）/`onPointerMove`（超阈值→按 `stageSel` 决定 ids[多选含按下项→全选 / 否则单项]→`invoke("start_drag_out",{items})`，置 `suppressStageClickRef` 防误触取走）/`onPointerUp`（未超阈值=普通点击，交 onClick）。与框选（续70，挂 `.drop-area`）天然互斥：down 在条目上时 lasso 的 `closest` 排除判定不布防。`drag-out-done` 监听：`effect==="move"` → 按 `draggedIds`（拖出触发时已快照，非 done 时重读 sel）从 `stageRef.current` 过滤移除 + 落盘 + 退出多选；copy/取消/none → 保留。
 
-**effect 语义**：`DROPEFFECT_MOVE`→移除（如拖到 Explorer 默认移动/部分目标按 Shift）；`DROPEFFECT_COPY`/`DRAGDROP_S_CANCEL`(Esc)/`DROPEFFECT_NONE`→保留。读 effect 用位与（`effect.0 & DROPEFFECT_MOVE.0`）而非等值，兼容目标回传组合 flag。
+**effect 语义（⚠️ 续86 已推翻，见下方续86 条目）**：~~`DROPEFFECT_MOVE`→移除（如拖到 Explorer 默认移动/部分目标按 Shift）；`DROPEFFECT_COPY`/`DRAGDROP_S_CANCEL`(Esc)/`DROPEFFECT_NONE`→保留。~~ Rust 侧读 effect 仍用位与（`effect.0 & DROPEFFECT_MOVE.0`）而非等值、兼容目标回传组合 flag——这条不变，变的是**前端**据此决定是否从中转区移除的判断条件（`move`-only → `move`|`copy` 均移除）。
 
 **💀 续71b 两个 GUI 实测才暴露的根因（已修，GUI 实测通过 2026-06-29）**：
 
@@ -605,6 +605,15 @@ c04585c  稳定版：Ctrl+Space 热键 + 粘贴 100% 成功
 **根因**：`lib.rs` 的 `start_focus_watch`（light-dismiss，50ms 轮询 `GetForegroundWindow`）完全不知道 `DRAGOUT_AUTO_CLOSE` 这个新设置的存在，是与 `dragout.rs` 独立的第二套隐藏机制（本文件 §18 开头即注明"与 dragdrop.rs 正交"，但没人告诉 light-dismiss 拖出流程也有个"重新显示"分支）。拖拽期间 overlay 靠裸 `ShowWindow(SW_HIDE)` 隐藏——**不同步 tao 可见性缓存**（本文件续71b 已记录的通用教训）——所以 light-dismiss 里 `window.is_visible()` 读到的是**过期缓存**（仍=true），没有 disarm。当「关闭」档触发 `dragout.rs` 重新 `win.show()` 时，`set_focus()` 按呼出三约束故意延迟 50ms（防白闪），这个空窗期恰好被 light-dismiss 的下一次轮询逮到「可见但前台不是本窗口」→ 立即调用 `hide()`，把刚重新弹出的窗口又关掉——**两个独立的隐藏机制打架，light-dismiss 赢**，用户看到的现象就是"设置了关闭也没用，窗口照样消失"。
 
 ~~**待修方向**（下次会话动手前先读这段）：需让 `start_focus_watch` 感知 `DRAGOUT_AUTO_CLOSE`，或者在 dragout 重新 show 后给 light-dismiss 加一段短暂 grace period……~~ **⚠️ 本"待修方向"已作废**：续84 没有沿"重新显示 + 让 light-dismiss 感知"这条路，而是整体改为"拖动全程保持界面可见、只在拖动中手动隐藏"的模型（见上方续84），根本不存在"重新显示"这一步、也就没有 light-dismiss 抢跑的空窗期。其中"任何隐藏机制拖动期间必须让路"的教训在续84 以 `DRAG_IN_PROGRESS` 落地。
+
+**续86（2026-07-08，仅 App.tsx）新增中转站「持久化」开关 + 修正 move/copy 移除判定（GUI 实测发现并修复）**：
+
+- **需求**：设置新增「持久化」开关（`stagePersist`，默认关闭=现状）。关闭：条目确认移出/拖出成功后自动从中转区移除；开启：条目永不自动移除，仅手动删除。纯前端改动（移除逻辑本就在 `drag-out-done` 前端监听里，无需 Rust 侧配合），`stagePersistRef` 供事件监听闭包读最新值，持久化到 store `stage-persist` key。
+- **首版 bug（GUI 实测发现）**：text/image 条目拖出成功后仍留在中转区。根因——`drag-out-done` 监听沿用续71 老逻辑「仅 `effect==="move"` 才移除，`copy` 保留」；但**文件跨盘拖出、image/text 拖到绝大多数非 Explorer 目标，OS 回传的几乎都是 `copy` 而非 `move`**（`move` 只在同盘 Explorer 间搬移等少数场景出现，续84 日志也印证内部拖入自窗口 `effect=1→copy`）。旧逻辑下 copy 效果的条目即使成功投放也从不消失，用户体感即"移出后仍在中转区"。
+- **修正**：把移除判据从 `event.payload==="move"` 放宽为 `event.payload==="move"||"copy"`（新变量 `dropped`）——**任何成功投放**（区别于取消 Esc / `DROPEFFECT_NONE` 的 `"none"`）都视为已移出，是否真移除仍受 `stagePersistRef` 门控。单 text 的 `copyAndPaste` 回退分支同步补上 `dropped` 前置条件（原条件 `event.payload!=="move"` 在取消场景下也会误进分支触发一次多余的粘贴，顺手补的边界修正，非本次主动需求）。
+- **影响面确认**：`event.payload` 只有 Rust `dragout.rs::run_drag_out` 回传的 `"move"|"copy"|"none"` 三种字符串（`hr==DRAGDROP_S_DROP` 才可能是前两者，否则恒为 `"none"`），改动不涉及 Rust。内部拖入启动台等「区内落点」场景现在也会因 `dropped` 命中而使条目移出中转区（此前 copy 效果不移除、条目会同时留在中转区和启动台）——判定为合理的一致行为，非本次刻意需求但顺带修正。
+- **验证**：`npx tsc --noEmit` 零错误。GUI 实测：本条目待用户复测确认 text/image/file 在 move 和 copy 两种效果下、`stagePersist` 开/关两态下均符合预期。
+- **文件**：`src/App.tsx`。DECISIONS §18 line 569 的旧「effect 语义」表已标注废弃并指回本条。
 
 ---
 

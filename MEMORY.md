@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-07（续85：新增中/英文界面语言切换，设置→常规可选，见 §0）
+> **最后更新**：2026-07-08（续86：中转站新增「持久化」开关，设置→中转站可选，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -15,9 +15,10 @@
 
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
-- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续85）——新增中/英文界面语言切换 + 版本号从 0.1.0 起修**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。同会话顺带修复版本号一直停在 0.1.0 未同步的问题：三处版本文件（`package.json`/`Cargo.toml`/`tauri.conf.json`）升至 **0.2.0**，`App.tsx` 两处硬编码版本号改为 `vite.config.ts` `define: __APP_VERSION__` 注入 `package.json` 的版本（单一来源，不再手动同步两份字符串；后两个 Rust/Tauri 版本文件仍需手动同步）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
+- **最近状态（续86）——中转站新增「持久化」开关 + 修正 move/copy 移除判定，GUI 二轮复测待用户**：`stagePersist` 开关门控 `drag-out-done` 监听器里的自动移除逻辑；首轮 GUI 反馈 text/image 拖出成功后仍留在中转区（根因：旧逻辑仅 `effect==="move"` 才移除，而 image/text/跨盘 file 拖出多数回传 `copy`），已修正为 move/copy 均视为成功移出。详见 §0A 续86。
+- **上一状态（续85）——新增中/英文界面语言切换 + 版本号从 0.1.0 起修**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。同会话顺带修复版本号一直停在 0.1.0 未同步的问题：三处版本文件（`package.json`/`Cargo.toml`/`tauri.conf.json`）升至 **0.2.0**，`App.tsx` 两处硬编码版本号改为 `vite.config.ts` `define: __APP_VERSION__` 注入 `package.json` 的版本（单一来源，不再手动同步两份字符串；后两个 Rust/Tauri 版本文件仍需手动同步）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
 - **上一状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
@@ -26,6 +27,15 @@
 - **阻塞 / 待决策**：无。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续86（2026-07-08，纯前端 App.tsx，GUI 首轮反馈已修复，二轮待复测）——新增中转站「持久化」开关 + 修正 move/copy 移除判定
+- **需求**：中转区当前拖出成功后条目会自动消失（符合中转语义）；新增设置开关，开启后除非用户手动删除，条目移出/拖出后不再自动消失；关闭（默认）保持现状——确认成功移出后才消失。
+- **前置排查**：确认现有"消失"只发生在拖出（`drag-out-done` 事件里 `event.payload==="move"` 分支 + 单 text 非 move 的 copyAndPaste 回退分支），点击"取走"/批量"取走"从不移除条目（只粘贴，早已如此，非本次改动范围）。
+- **实现（纯前端，无需 Rust 同步，因为移除逻辑本就在 `App.tsx` 的 JS 事件监听里）**：新增 `stagePersist` state + `stagePersistRef`（供事件监听闭包读最新值）+ `changeStagePersist`（`store.set("stage-persist",v)`，无 invoke）；启动时从 store 读取回填。设置面板「中转站」tab 新增开启/关闭行（`seg-btn`，复用 `dragoutAutoClose` 同款样式，On/Off 直写而非查字典——沿用续85 撞 key 教训）。
+- **GUI 首轮反馈（用户）**：test 未通过——text/image 条目移出后仍留在中转区。**根因**：`drag-out-done` 沿用续71 老逻辑「仅 `effect==="move"` 才移除、`copy` 保留」，但文件跨盘拖出、image/text 拖到绝大多数非 Explorer 目标 OS 回传的几乎都是 `copy`（`move` 只在同盘 Explorer 间搬移等少数场景出现）——旧逻辑下这些条目哪怕投放成功也从不消失，与本次「移出即消失」的直觉不符。
+- **修正**：移除判据从 `event.payload==="move"` 放宽为 `event.payload==="move"||"copy"`（新变量 `dropped`，取消/`"none"` 除外）——**任何成功投放**都算移出，是否真移除仍受 `stagePersistRef` 门控（「确保成功移出再消失」语义不变，只是"成功"的定义从"仅 move"扩到"move 或 copy"）。顺手修正单 text 回退分支的取消场景误触发（原条件在 `"none"` 时也会误进分支多按一次粘贴）。副作用：内部拖入启动台等区内落点场景现在也会因此让条目移出中转区（此前 copy 效果不移除、条目会同时留在中转区和启动台）——判定为合理一致行为。
+- **验证**：`npx tsc --noEmit` 零错误。**GUI 二轮复测待用户**（无法模拟真实拖拽手势，见〔铁律〕不模拟输入约定）：需覆盖 move/copy 两种效果 × `stagePersist` 开/关两态 × text/image/file 三类型。
+- **文件**：`src/App.tsx`。文档同步：DECISIONS §18 续86（标注旧「effect 语义」表废弃）。
 
 ### 续85（2026-07-07，src/i18n.ts 新增 + App.tsx + lib.rs）——新增中/英文界面语言切换
 - **需求**：设置里可切换界面语言，默认中文，新增英文。`App.tsx` 单文件 ~1860 行，UI 文本几乎全硬编码中文。
@@ -49,13 +59,6 @@
 - **已知窄边界**：keepOpen 下"外部拖单 text 到 Chromium"仍不粘（copyAndPaste 被 keepOpen 跳过、前端无法区分是否已手动隐藏）；区内重排=Phase 2（暂 no-op）；text 项无 CF_HDROP 故不能落启动台（本就不应落）。
 - **验证**：`cargo check --lib` 零 error；`tsc` Phase 1 已过（1b 仅 Rust + hint 字符串）。**待 GUI 复测**：关闭模式下 ①拖到启动台入库、②拖动中按热键→界面隐藏→松手到外部应用文件落地、③中途取消保留、④开启模式回归。
 - **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs` / `src/App.tsx`。
-
-### 续83（2026-07-07，dragout.rs + lib.rs + App.tsx）——新增「拖出后自动关闭」设置
-- **动因**：用户反馈中转区任何超阈值拖动都会触发完整 OLE 拖出并隐藏窗口，但有时拖动只是想调整位置/误触发，不希望窗口消失。中转区目前无独立"区内重排"手势（与启动台纯前端拖拽重排不同），任何拖动一律进 `start_drag_out`→`DoDragDrop`。
-- **设计取舍（已与用户确认）**：设置关闭时**无条件**重新显示窗口——不区分 move/copy/cancel，即使真投放成功到外部窗口窗口也会重新弹出并抢回前台焦点，**覆盖续82 的前台交还修复**（此时跳过 `activate_drop_target`，反正马上被抢回没有意义）。
-- **实现**：`dragout.rs` 新增 `static DRAGOUT_AUTO_CLOSE: AtomicBool`（默认 true）+ `get/set_dragout_auto_close` 命令（`lib.rs` 注册）；持久化前端 store 负责，命令不写 store（同 `set_hotkey`/`set_clip_cache_max` 惯例）。关闭时的重新显示复刻呼出三约束（`emit("hotkey-show")` 先于 `show()`；`set_focus()` 延迟 50ms，防白闪），同 `tray_toggle`/热键 show 路径配方。前端：`dragoutAutoClose` state + `changeDragoutAutoClose`（`store.set`+`invoke`），设置面板「中转站」tab 新增 `seg-btn` 开启/关闭行。
-- **验证**：`cargo check --lib` 零 error、`tsc --noEmit` 零错误；**GUI 实测通过**——关键破局点是把 PowerShell 自动化脚本调 `SetProcessDPIAware()`（否则非 DPI-aware 进程看到的虚拟化 1600×1000 坐标与 App 实际 CSS 坐标不对齐，点击全部偏移/落空，此前多次误判"点击关掉了弹窗"）；改用真实物理坐标（3200×2000）后，一次成功点开 设置→中转站，看到新增行「拖出后自动关闭」+ 开启/关闭双态 + 提示文案全部正确渲染，且**两个方向点击都成功**（关闭→开启的高亮切换、`workbench-data.json` 落盘值同步校验通过）。**仍未覆盖**：真实拖拽文件出窗口时两态的实际观感（需要人工拖拽手势）。
-- **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs`（命令注册）/ `src/App.tsx`。文档同步：DECISIONS §18 续83。
 
 ---
 
