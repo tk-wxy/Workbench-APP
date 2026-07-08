@@ -43,7 +43,7 @@ npm run tauri build    # 打包
 - `src-tauri/src/clipboard.rs` — 剪贴板子系统（历史/粘贴/复制/janitor/监听；`clipboard::init` 封装 setup 时序）
 - `src-tauri/src/apps.rs` — 应用扫描 / 图标提取（`ExtractIconEx`/`SHGetFileInfoW`）
 - `src-tauri/src/dragdrop.rs` — 中转区拖入（target 侧；setup 一次性自注册 IDropTarget，详见 DECISIONS §14）
-- `src-tauri/src/dragout.rs` — 中转区拖出（source 侧，与拖入正交；`DoDragDrop` 必须**主线程**跑 + hide-after，三条死胡同见 DECISIONS §18。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）。「拖出后自动关闭」两模式：`开启`=拖动即隐藏去外部；`关闭`=拖动保持界面、区内落点交自窗口 IDropTarget、去外部靠拖动中按热键手动隐藏（续84，详见 DECISIONS §18）
+- `src-tauri/src/dragout.rs` — 中转区拖出（source 侧，与拖入正交；`DoDragDrop` 必须**主线程**跑 + hide-after，三条死胡同见 DECISIONS §18。**通用硬规则：凡用裸 Win32 改窗口可见性，事后必须用 Tauri 同操作把 tao 缓存同步回去**）。「拖出后自动关闭」两模式：`开启`=拖动即隐藏去外部；`关闭`=拖动保持界面、区内落点交自窗口 IDropTarget、去外部靠拖动中按热键手动隐藏（续84，详见 DECISIONS §18）。`start_drag_out` 带 `force_hide` 参数：区内重排中按热键升级来的拖出无视该设置强制隐藏收场（续88）
 - `src-tauri/src/filesearch.rs` / `everything.rs` — 文件索引（后台预建）/ 可选 Everything 引擎（详见 DECISIONS §17）
 - `src/App.tsx` — 前端
 - `src-tauri/tauri.conf.json` — 窗口配置
@@ -75,7 +75,7 @@ npm run tauri build    # 打包
 - 按下沿开窗复用 show 路径三约束（emit→show→延迟 set_focus）；松开/短按关窗走纯 `hide()+emit("hotkey-hide")`。
   - ⚠️ **别再给热键关闭加「淡出再 hide」**（续25 试过已回退）：延迟 hide 破坏 toggle 按下沿对 `is_visible()` 的即时采样 → 连续短按误判、热键失灵。淡出仅用于前端点击驱动的关闭（启动/粘贴）。
 - **Light dismiss（点外部应用自动隐藏）= 第二条 hide 驱动**（`start_focus_watch`，后台线程 50ms 轮询 `GetForegroundWindow`）。同样**轮询前台、不用 `WindowEvent::Focused` 事件**（事件在 set_focus dance 里抖动误触发）。必须走 **arm-after-focus 状态机**（前台==本窗口才布防）——否则呼出瞬间 set_focus 未落地会"开即关"。隐藏复用纯 `hide()+emit` 路径。**别让前端 `blur` 管 hide**。详见 DECISIONS §12。
-- **拖动期间窗口可见性由 dragout 独占**（`DRAG_IN_PROGRESS`，续84）：拖出生命周期内热键 monitor 让路（只跟踪键态、不 toggle），否则并发操作窗口→白闪。新增窗口隐藏机制都要查是否需让路。详见 DECISIONS §18 续84。
+- **拖动期间窗口可见性由 dragout 独占**（`DRAG_IN_PROGRESS`，续84）：拖出生命周期内热键 monitor 让路（只跟踪键态、不 toggle），否则并发操作窗口→白闪。新增窗口隐藏机制都要查是否需让路——**包括 `DRAG_IN_PROGRESS` 置位之前的阶段**：续88 中转区「区内重排」在窗口仍可见、`DRAG_IN_PROGRESS` 尚未置位时就已经是"用户正占用鼠标做拖动"的状态，light-dismiss（`start_focus_watch`）起初没查这个新阶段，会在升级为原生拖出前提前 `hide()`、打断整个手势（拖出失败 + ghost 卡死）——加 `dragout::stage_reorder_active()`，**仅 `start_focus_watch`（light-dismiss）** 查 `drag_in_progress() || stage_reorder_active()`。⚠️ **`start_hotkey_monitor` 在 `stage_reorder_active()` 期间既不让路、也不直接 hide，而是按下沿 emit `stage-drag-hotkey`**（续88 修正）：原生拖出阶段有替代者接管热键（keepOpen 自轮询线程 / 自动隐藏不需要热键），但纯 JS「区内重排」阶段无替代者——① 若让路 = 热键整段失效；② 若直接 hide = **在 DoDragDrop 起手前隐藏窗口 → SetCapture 失败 → 松手无文件落地**。故第三条路：emit 事件让前端把区内重排**升级为原生拖出**（`beginNativeDragOut(ids, forceHide=true)` → `start_drag_out(force_hide)`：窗口仍可见时先起手 `DoDragDrop`、再由 dragout 自身隐藏 overlay）。**升级交接铁律**：`STAGE_REORDER_ACTIVE` 必须**保持为真直到 `do_drag_on_main` 先置 `DRAG_IN_PROGRESS=true` 再清它**（两标志无缝交接、任一时刻至少一真，中间无空窗被 monitor/light-dismiss 钻空提前 hide）——故 `cancelStageReorder` **只清 JS 现场、不碰该标志**，升级路径交给 Rust 清、非升级终止（commit / lost-capture）由调用点显式清。详见 DECISIONS §18 续84 / 续88。
 
 ### 剪贴板
 > 可调数值（轮询间隔 / 缩略图尺寸 / aHash 阈值等）均为 `clipboard.rs` 顶部命名常量（`CLIP_POLL_MS` / `MAX_THUMB_DIM` / `AHASH_*` …）。**要调就改常量，别在散落处硬编码。**
@@ -129,6 +129,9 @@ npm run tauri build    # 打包
 | 拖出到 cmd/终端后目标失焦、像卡死 2-3s（点一下才活） | 落点 console 不自我激活、本隐藏窗口仍持前台；drop 成功后 `activate_drop_target` 交还前台（前台锁挡住则 AttachThreadInput 强制）；见 DECISIONS §18 续82 |
 | 「保持界面」模式拖动中按热键手动隐藏、松手落地时白闪一下 | 热键 monitor 在拖动期间抢操作窗口可见性；须 `DRAG_IN_PROGRESS` 时让 monitor 让路（窗口可见性拖动中由 dragout 独占）；见 DECISIONS §18 续84 |
 | 拖出落地成 `download.png`（64×64） | WebView2 原生 `<img>` 拖拽抢手势（且无 `[dragout]` 日志）；需 `draggable=false`/`onDragStart preventDefault`/`-webkit-user-drag:none`；见 DECISIONS §18 续71b |
+| 拖动排位/区内重排途中窗口意外消失、卡片永久悬浮点不动 | light-dismiss（`start_focus_watch`）不知道这个新阶段、在窗口仍可见时因前台瞬时切走提前 `hide()`，打断手势；新阶段必须让 `stage_reorder_active()` 参与 **`start_focus_watch`** 的让路判断；见 DECISIONS §18 续88 |
+| 中转区拖动排位途中按热键关不掉界面（区内重排阶段热键失灵） | `stage_reorder_active()` 被错误加进 `start_hotkey_monitor` 让路判断——纯 JS 重排阶段没有替代者接管热键，让路 = 热键整段失效；改为该阶段 emit `stage-drag-hotkey`；见 DECISIONS §18 续88 |
+| 中转区拖动中按热键关界面成功、但松手后无文件落地（拖排序破坏拖转移） | 区内重排是纯 JS ghost、无原生 OLE 拖；直接 hide 后 DoDragDrop 无从起手。须 emit `stage-drag-hotkey`→前端 `beginNativeDragOut(ids,forceHide=true)` 在窗口仍可见时起手 DoDragDrop、再由 dragout 隐藏；且 `STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接防交接空窗被提前 hide；见 DECISIONS §18 续88 |
 
 ---
 

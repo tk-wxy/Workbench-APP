@@ -9,6 +9,29 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续85（2026-07-07，src/i18n.ts 新增 + App.tsx + lib.rs，2026-07-08 续88 迁入）——新增中/英文界面语言切换
+- **需求**：设置里可切换界面语言，默认中文，新增英文。`App.tsx` 单文件 ~1860 行，UI 文本几乎全硬编码中文。
+- **方案**：新文件 `src/i18n.ts` — 字典式 `EN_DICT: Record<中文,英文>`，key 直接用中文原文（不发明语义 key）；`makeT(lang)` 返回 `t(zh, vars?)`，缺项 fallback 回中文（不会白屏）；动态文案（`ago()`/"已选 {n} 项"）用 `{占位符}` 模板复用同一套字典。
+- **App.tsx**：新增 `lang`/`t` state（`useMemo(makeT)`），持久化到 store `"language"` key（同 `theme` 惯例）；`changeLang` 同时 invoke `set_tray_language` 同步托盘；时钟 `toLocaleTimeString` 按 lang 切 `zh-CN`/`en-US`；委派 subagent 做机械替换——全文件 ~230 处 `t(...)` 包裹 + ~145 条字典项（设置面板 7 个 tab、主界面、右键菜单、toast、空状态全覆盖）。
+- **Rust（`lib.rs`）**：托盘菜单"显示窗口"/"退出"是唯一 `t()` 管不到的用户可见文案——`MenuItem<Wry>` 存进 `app.manage(TrayMenuItems)`，新增 `set_tray_language` 命令 `.set_text()` 运行时切换；前端读取语言设置后主动 invoke 一次同步。3 条热键校验 Rust `Err(String)` 不改 Rust，原文录入字典，渲染时 `t(hotkeyError)` 包一层复用。
+- **人工 review 修正 2 处撞 key**（字典 key=中文原文的固有代价，详见 DECISIONS §19）：①`"关闭"` 本兼有 Esc-关闭 与 开关 Off 两义，开关按钮改为调用点直写 `lang==="en"?"Off":"关闭"`，不查字典；连带修正中转站设置提示段落里引用的 "Open"/"Close" 改回 "On"/"Off" 保持与按钮一致。②`"应用"` 本兼有名词 App 与动词 Apply 两义，搜索结果徽章同样绕开字典直写 `lang==="en"?"App":"应用"`。
+- **验证**：`npx tsc --noEmit` + `cargo check --lib` 均零错误；人工逐段 review 全量 diff（设置面板七个 tab/主界面/剪贴板/中转区/启动台/增强搜索/右键菜单）。**语言切换 GUI 实测已由用户完成并确认提交**（commit `9f5a01f`）。
+- **版本号追加修复（同会话，用户提出）**：本次定为 v0.2.0（新功能：语言切换）。`package.json`/`Cargo.toml`/`tauri.conf.json` 三处同步改 0.2.0；`vite.config.ts` 新增 `define: { __APP_VERSION__: JSON.stringify(pkg.version) }`（Node 侧 `readFileSync` 读 `package.json`），`src/vite-env.d.ts` 声明该全局，`App.tsx` 两处 `v0.1.0` 硬编码改用 `__APP_VERSION__`。`npm run build` 验证过产物 JS 里确实内联出 "0.2.0" 两处。
+- **版本号规则正式落地 + 用户 review 后二次加固（同会话，写入 `CLAUDE.md`「版本号规则」）**：用户确认改动已验证/测试通过后，agent 自行判断 MINOR/PATCH 幅度、bump 三处版本文件、提交为**紧跟功能提交之后的独立 commit**（参考先例 `9f5a01f`→`3123a6d`，不强制合并进同一 commit），不用再单独问"要不要顺便改版本号"（对"未要求不擅自提交"铁律的明确例外，仅限版本号提交）；**MAJOR 永远先问用户**，不得自主判断。用户 review 后指出的 3 处不足已修：①新增 `scripts/check-version-sync.mjs` + `npm run version:check`，`npm run build` 前置跑它——三处版本号不一致直接报错中止（此前"无自动校验"的空档已堵上，脚本用 sabotage 测试验证过确实会在不一致时退出码非 0）；②规则文字改精确为"独立 commit"而非易读成"合并进同一 commit"；③规则里加一句明确「续N」会话计数与 SemVer 版本号是两套独立编号、不对应，避免误读。
+- **文件**：`src/i18n.ts`（新）/ `src/App.tsx` / `src-tauri/src/lib.rs` / `package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` / `vite.config.ts` / `src/vite-env.d.ts` / `scripts/check-version-sync.mjs`（新）/ `CLAUDE.md`。
+
+### 续84（2026-07-07，dragout.rs + lib.rs + App.tsx，2026-07-08 续87 迁入）——重构「拖出后自动关闭=关闭」为"拖动保持界面"模型（Phase 1+1b，GUI 复测通过）
+- **需求澄清（续83 方向作废）**：用户三场景实为**区内拖动**：① 拖到一半发现选错需取消（现状拖动即隐藏，看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。共同点=**拖动全过程界面不能消失**。续83「拖出后重新显示」在松手后才显示、拖动中界面照样消失，对三场景全无用。
+- **统一模型（用户敲定）**：拖动仍是唯一手段（OLE DoDragDrop），只改"何时隐藏界面"。`关闭`=拖动全程不隐藏，区内落点交给窗口自身 IDropTarget；拖到外部应用由用户**拖动中手动按热键隐藏**再松手（"与原版相比只是界面关闭改为手动"）。
+- **Phase 1（界面不消失 + 区内落点）**：`dragout.rs` 撤续83 re-show；`auto_close=false` 时不 spawn 60ms SW_HIDE、DoDragDrop 返回后不 hide、延迟 50ms set_focus。`App.tsx`：`files-dropped` 加 `internalDrag`（`dragOutRef.draggedIds` 非空）判定，区内落回中转暂 no-op（避免重复添加，区内重排=Phase 2）、落启动台走既有添加；`drag-out-done` 单 text `copyAndPaste` 回退在 keepOpen 时跳过；新增 `dragoutAutoCloseRef`。
+- **Phase 1b（拖动中手动隐藏去外部）**：`lib.rs` 加 `pub current_hotkey_vks()`（读 HOTKEY_VK_KEYS 快照）；`dragout.rs` `auto_close=false` 时改 spawn **自轮询线程**（20ms 读 GetAsyncKeyState，热键上升沿 → SW_HIDE + `manually_hidden`=true + emit hotkey-hide，触发一次即退；`drag_done` 兜底退出）。收尾分支改为 `if auto_close || manually_hidden { hide+同步 tao+activate_drop_target } else { 保持可见+set_focus }`。热键 monitor **不改**——它只在用户按热键（=想隐藏）时才 queue 一个 hide()，与本模型同向，无害。
+- **GUI 实测（首轮）**：核心前提**已验证成立**——日志 `[dragdrop] Drop 1 path(s) at (…)`＋`DoDragDrop end hr=0x40100 effect=1→copy` 证明**自前 OLE 拖动能被自窗口 IDropTarget 收到**（场景③启动台成立）。首轮"失败"实为测了当时未实现的外部流程。
+- **GUI 实测（次轮）**：**主流程合格**——`关闭`模式拖动中按热键→界面隐藏→松手到 Windows Terminal(CASCADIA)成功落地粘贴（日志见"保持界面模式：拖动中按热键→手动隐藏 overlay"+ activate 交还 CASCADIA）。**残留缺陷：手动隐藏后松手落地时白闪一下**。诊断：两模式唯一差异=手动隐藏流程有用户按热键→**热键 monitor 介入**（并发 toggle 操作窗口可见性）；`开启`自动隐藏 monitor 不介入、无白闪。
+- **白闪修复（复测通过）**：加 `DRAG_IN_PROGRESS: AtomicBool`（`do_drag_on_main` 起手置位/收尾清位，`pub drag_in_progress()`）；`lib.rs` 热键 monitor 循环开头判定——拖动期间**只跟踪键态、不做 show/hide toggle**（`prev_combo=combo; down_at=None; continue`），窗口可见性拖动期间由 dragout 独占。`cargo check` 过、clippy 维持 8 基线。**GUI 复测：白闪已消除**。新铁律「拖动期间窗口可见性由 dragout 独占」已入 CLAUDE.md。
+- **已知窄边界**：keepOpen 下"外部拖单 text 到 Chromium"仍不粘（copyAndPaste 被 keepOpen 跳过、前端无法区分是否已手动隐藏）；区内重排=Phase 2（暂 no-op）；text 项无 CF_HDROP 故不能落启动台（本就不应落）。
+- **验证**：`cargo check --lib` 零 error；`tsc` Phase 1 已过（1b 仅 Rust + hint 字符串）。GUI 复测：①拖到启动台入库 ②拖动中按热键→界面隐藏→松手到外部应用文件落地 ③中途取消保留 ④开启模式回归——均通过。
+- **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs` / `src/App.tsx`。
+
 ### 续83（2026-07-07，dragout.rs + lib.rs + App.tsx，2026-07-08 续86 迁入）——新增「拖出后自动关闭」设置
 - **动因**：用户反馈中转区任何超阈值拖动都会触发完整 OLE 拖出并隐藏窗口，但有时拖动只是想调整位置/误触发，不希望窗口消失。中转区目前无独立"区内重排"手势（与启动台纯前端拖拽重排不同），任何拖动一律进 `start_drag_out`→`DoDragDrop`。
 - **设计取舍（已与用户确认）**：设置关闭时**无条件**重新显示窗口——不区分 move/copy/cancel，即使真投放成功到外部窗口窗口也会重新弹出并抢回前台焦点，**覆盖续82 的前台交还修复**（此时跳过 `activate_drop_target`，反正马上被抢回没有意义）。

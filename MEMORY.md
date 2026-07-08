@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-08（续86：中转站新增「持久化」开关，设置→中转站可选，见 §0）
+> **最后更新**：2026-07-08（续88 五轮：补"按热键升级为原生拖出"触发器，修复"拖动中按热键关界面成功但松手无文件落地"，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,17 +16,49 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **⚠️ 中转区「区内拖动排位」（续88）功能接近完成，五轮修复"按热键升级为原生拖出并投放"，代码在工作树未提交，等本轮 GUI 复测**——见下条。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续86）——中转站新增「持久化」开关 + 修正 move/copy 移除判定，GUI 二轮复测待用户**：`stagePersist` 开关门控 `drag-out-done` 监听器里的自动移除逻辑；首轮 GUI 反馈 text/image 拖出成功后仍留在中转区（根因：旧逻辑仅 `effect==="move"` 才移除，而 image/text/跨盘 file 拖出多数回传 `copy`），已修正为 move/copy 均视为成功移出。详见 §0A 续86。
-- **上一状态（续85）——新增中/英文界面语言切换 + 版本号从 0.1.0 起修**：`src/i18n.ts` 字典式 `t()`（key=中文原文），设置→常规新增语言行；Rust 托盘菜单经 `set_tray_language` 命令同步；`tsc`/`cargo check` 均通过，人工 review 修正 2 处撞 key（"关闭"/"应用"一词多义）。同会话顺带修复版本号一直停在 0.1.0 未同步的问题：三处版本文件（`package.json`/`Cargo.toml`/`tauri.conf.json`）升至 **0.2.0**，`App.tsx` 两处硬编码版本号改为 `vite.config.ts` `define: __APP_VERSION__` 注入 `package.json` 的版本（单一来源，不再手动同步两份字符串；后两个 Rust/Tauri 版本文件仍需手动同步）。GUI 实测待用户操作。详见 §0A 续85 / DECISIONS §19。
-- **上一状态（续84）——「拖出后自动关闭=关闭」重构为"拖动保持界面"模型，GUI 三轮通过**：`关闭`时拖动全程界面可见（区内落点交自窗口 IDropTarget）、去外部靠拖动中按热键手动隐藏、`DRAG_IN_PROGRESS` 让热键 monitor 让路防白闪；`开启`维持原样。未做（非 bug）：区内重排（Phase 2）、keepOpen 外部拖单 text 到 Chromium 不粘。详见 §0A 续84 / DECISIONS §18 续84。
+- **最近状态（续88 五轮，本次会话）——补"按热键升级为原生拖出"触发器**：GUI 实测确认四轮的②（热键关界面）已生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地"**。根因：用户转移手势是"拖起→按热键隐藏→拖到目标松手"，全程不越 drop-area 边界；而续88 只在"越界"时才把纯 JS 区内重排升级为原生 DoDragDrop——按热键那刻还没有任何原生拖，直接 hide 就把手势取消了（且隐藏后 DoDragDrop 的 SetCapture 必失败，隐藏必须晚于起手）。修复：把"按热键"也作为升级触发器——monitor 在 `stage_reorder_active()` 期间改为 emit `stage-drag-hotkey`（不 hide 不让路），前端据此 `cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；`start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，且**先起手 DoDragDrop 再隐藏**）；`STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接（`cancelStageReorder` 只清 JS 现场、do_drag_on_main 先置 DRAG_IN_PROGRESS 再清 STAGE_REORDER，防交接空窗被提前 hide）。三处 build 零错误，GUI 待复测。详见 §0A 续88 五轮 / DECISIONS §18。
+- **上一状态（续87）——修复系统托盘两个图标问题**：`tauri.conf.json` 的 `app.trayIcon` 配置项与 `lib.rs` 手写的 `TrayIconBuilder`（含菜单/点击事件）同时存在，Tauri 启动时各自创建一个托盘图标——配置项那个无菜单无事件绑定（即用户看到的"蓝色不可操作"那个）。修复：删掉 `tauri.conf.json` 里的 `trayIcon` 块，只保留代码手写版。用户已确认符合预期。详见 §0A 续87。
+- **上一状态（续86）——中转站新增「持久化」开关 + 修正 move/copy 移除判定，GUI 二轮复测待用户**：`stagePersist` 开关门控 `drag-out-done` 监听器里的自动移除逻辑；首轮 GUI 反馈 text/image 拖出成功后仍留在中转区（根因：旧逻辑仅 `effect==="move"` 才移除，而 image/text/跨盘 file 拖出多数回传 `copy`），已修正为 move/copy 均视为成功移出。详见 §0A 续86。
 - **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
   - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
   - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
 - **下一步候选（无阻塞）**：① 启动器键盘导航；② 文件结果右键「打开所在目录」+ 命中高亮回传；③ 索引目录可配置；④ 增强搜索纳入剪贴板条目；⑤ file/folder 收藏的非拖入入口；⑥ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑦ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
-- **阻塞 / 待决策**：无。
+- **阻塞 / 待决策**：中转区「区内拖动排位」（续88）等本轮 GUI 复测——重点验证"拖起条目→按热键隐藏→拖到外部松手→文件落地"整条转移链是否闭合（devtools console 看 `[stage-drag] hotkey during reorder → 升级…` + `[dragout] DoDragDrop begin … force_hide=true` + `drag-out-done effect=…`）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续88（2026-07-08，App.tsx + App.css + dragout.rs + lib.rs，三轮 GUI 反馈后**暂停归档**，未完成）——中转区拖动排位（Phase 2 补完）
+- **需求**：中转区参照启动台（§16）补上拖动排位功能——续84 时明确留了这个缺口（"区内重排暂 no-op（Phase 2）"）。
+- **核心设计**：按下拖动超阈值（`DRAG_OUT_THRESHOLD_PX`=12px）后不再一律立即触发原生 `start_drag_out`，先判定：多选拖多项 或 搜索过滤态（`filteredStage` 索引对不上 `stage`）→ 维持原行为直出；否则单项 → 进入纯前端「区内重排」（`stageReorderRef` 持有 FLIP 快照 + DOM clone ghost，算法与启动台 `handleLauncherPointerDown` 同构，直接复用 `calcInsert`/`applyShift` 逻辑）。光标只要还在 `.drop-area` 边界内（留 `STAGE_REORDER_ESCAPE_PX`=6px 余量防抖动）就纯前端重排；一旦越界，立即清场（无落定动画）并调用与直出分支同一个 `beginNativeDragOut([itemId])` 升级为真实 OLE 拖出——两条路径复用同一段 Rust 调用代码。
+- **状态机**：`dragOutRef` 加 `mode:"idle"|"reorder"|"native"` 字段路由；重排本身状态（tiles/rects/ghost/insertIdx）单独放 `stageReorderRef`，两个 ref 职责正交。
+- **范围取舍**：不支持多选群体重排（与"多选=准备批量拖出"的既有直觉冲突，且实现复杂度高很多）——多选/搜索过滤态一律走原生拖出，行为与加入本功能前一致。
+- **CSS**：新增 `.stage-card/.stage-item` 的 `.stage-dragging-src`/`.stage-shift`/`.stage-drag-ghost`/`.stage-reordering`，镜像启动台同名 class（`.app-tile.launcher-*`）。
+- **一轮 GUI 反馈（用户）**：拖动项目有放大动画（ghost pop-in）但卡在原处不跟手。**根因**：`handleStagePointerMove` 顶部门槛 `if (!dr.pressing || itemId === null) return;` 里的 `dr.pressing` 本是"一次性阈值判定"标志——进入 reorder/native 分支时会被置 `false`；但激活后的**所有后续 move 事件**都会先撞上这行顶部门槛而直接 return，`updateStageReorder` 从未被再次调用。**修正**：门槛判据改为只查 `itemId===null || dr.mode==="native"`。
+- **二轮 GUI 反馈（用户）**：①拖文件到外部目标失败（等同没发生过）；②重开界面后有张卡片一直悬浮卡死、点不动。用户自己的判断"拖动时开关页面导致失去对鼠标控制"精确命中根因。**根因**：`lib.rs` 的 `start_focus_watch`（light-dismiss，50ms 轮询前台窗口）**完全不知道"区内重排"这个新阶段的存在**——重排期间窗口全程可见、`dragout::DRAG_IN_PROGRESS` 尚未置位（那个标志只在真正调用 `start_drag_out` 后、`do_drag_on_main` 起手时才置位），若此时用户的拖动手势恰好导致前台窗口瞬间切走（哪怕只是一瞬），light-dismiss 会立刻 `hide()`——**在我们升级到原生拖出之前就把窗口关了**：`start_drag_out` 从未被调用（"拖到外部目标"这个动作根本没发生，①因此失败），且 JS 侧从未收到"窗口被关"的通知（浏览器把 pointer capture 静默撤销、不发 `pointerup`），`ghost`/让路 transform 永久卡死在 DOM 里（drag-layer 是持久节点、React 不会重新挂载，②因此卡死）。这正是 CLAUDE.md 铁律"新增窗口隐藏机制都要查是否需要让路"——本次实现漏查了 light-dismiss 这一条。
+- **修正**：①`dragout.rs` 新增 `STAGE_REORDER_ACTIVE` + `stage_reorder_active()` + `set_stage_reorder_active` 命令，`lib.rs` 的 `start_focus_watch` 与 `start_hotkey_monitor` 均在 `dragout::drag_in_progress() || dragout::stage_reorder_active()` 时让路（同 `DRAG_IN_PROGRESS` 惯例）；前端 `startStageReorder`/`cancelStageReorder`/`commitStageReorder` 对应调用该命令同步。②双重前端安全网（不管根因是否堵严实，兜底都该在）：`onLostPointerCapture`（capture 被外部原因静默撤销时兜底清场）+ `hotkey-hide` 监听器里补一句"若有活跃重排则强制 cancel"。
+- **验证**：`cargo check --lib`、`npx tsc --noEmit`、`npx vite build` 均零错误。
+- **三轮 GUI 反馈（用户，2026-07-08）**：区内重排本身已经跑通（不再卡死、能跟手拖动），但①原生拖出仍异常、②拖动文件时"界面关闭快捷键"失效。
+- **四轮修复（本次会话，2026-07-08，采纳三轮的静态推断）**：
+  - **②根因确认并修复**：二轮修复把 `dragout::stage_reorder_active()` 错误地**同时**加进了 `start_hotkey_monitor` 让路判断（lib.rs ~407）。对原生拖出阶段是对的（`do_drag_on_main` keepOpen 分支有 Rust 自轮询线程顶替 hotkey monitor，见 dragout.rs ~528），但纯 JS 区内重排阶段**无替代者**，让路 = 拖动期间热键关界面整段失效。改回 `if dragout::drag_in_progress() { ...continue; }`（去掉 `|| stage_reorder_active()`）；`start_focus_watch` 保持 `|| stage_reorder_active()`（它让路安全且必需，是二轮真正要修的对象）。
+  - **关键区分（教训）**："是否让路"标志不能在 hotkey monitor / light-dismiss 之间无差别复用同一判断——light-dismiss 让路只是暂停"自动隐藏"一个动作、无需替代者；hotkey monitor 让路的前提是**有别的机制顶替其核心职责**（检测按键 show/hide）。给新阶段接让路判断时须逐个让路方核对"这个阶段里它需不需要让、能不能被替代"。
+  - **诊断日志**：App.tsx 的 `startStageReorder`/`beginNativeDragOut`/`cancelStageReorder`/`handleStageLostPointerCapture`/`drag-out-done` 监听器加 `console.log("[stage-drag] …")`，供①下一轮 GUI 取证。
+  - **①现状**：最可能是②的连锁（重排期间热键被吞、用户按热键脱困未遂扰乱手势），②修后应连带缓解；若日志显示①独立（`[stage-drag] → native drag-out` 有打印但 drag-out-done effect=none），下一步查 reorder→native 交接的 `STAGE_REORDER_ACTIVE=false`→`DRAG_IN_PROGRESS=true` 空窗是否被 light-dismiss 钻空提前 hide（`cancelStageReorder` 先清标志再异步 `start_drag_out`，理论有 gap，但 button-held 拖动前台通常仍是本窗口、未必致命）。
+  - **验证**：`cargo check --lib` / `npx tsc --noEmit` / `npx vite build` 三处零错误；GUI 待用户实测（不模拟输入）。
+- **五轮修复（本次会话，2026-07-08，GUI 实测后）**：四轮的②确实生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地，中转转移失效"**。
+  - **根因坐实**：用户转移手势="拖起→按热键隐藏 overlay→拖到目标松手投放"，**全程不越出 drop-area 边界**；续88 只在"越界"时才把纯 JS 区内重排升级为原生 `DoDragDrop`。按热键那刻还处在纯 JS 重排（ghost 只是 DOM 元素、无原生 OLE 拖），四轮把 monitor 改成正常 toggle 后按热键→`hide()`→丢 pointer capture→`onLostPointerCapture`→`cancelStageReorder` 手势取消，从未起手 DoDragDrop。核心矛盾：转移到外部必须先隐藏才看得见目标，但隐藏后 `DoDragDrop` 的 SetCapture 必失败（续71 已录）——隐藏必须**晚于**起手。
+  - **修复**（把"按热键"也作为升级为原生拖出的触发器，与"越界"并列）：① `lib.rs` monitor 在 `stage_reorder_active()` 期间**不 hide 不让路**、改按下沿 emit `stage-drag-hotkey`；② `App.tsx` 新增该事件监听→`cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；③ `start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，先起手 DoDragDrop 再隐藏）；④ **无缝交接**：`cancelStageReorder` 改为只清 JS 现场、**不动 STAGE_REORDER_ACTIVE**，由 `do_drag_on_main` 先置 `DRAG_IN_PROGRESS=true` 再清 `STAGE_REORDER_ACTIVE`（任一时刻至少一真、无空窗被提前 hide）；升级中止路径在 `run_drag_out` 补清标志防悬置；非升级终止（commit/lost-capture/hotkey-hide 安全网）由调用点显式清。
+  - **教训**：区分"重排 vs 转移"的触发器必须匹配用户真实手势（原设计只认"越界"，漏了"热键隐藏后投放"）；任何"先隐藏窗口"的路径都必须先确认原生拖已起手。
+  - **验证**：三处 build 零错误；GUI 待复测（区内落定 / 热键升级转移 / 越界升级转移 / auto-close×keepOpen）。
+- **文件**：`src/App.tsx` / `src/App.css` / `src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs`。文档同步：claude.md 铁律（热键让路→emit 升级 + 无缝交接）+ 反查表 2 行 + dragout.rs 结构行 `force_hide` + DECISIONS §18 续88「四轮/五轮修复」。
+
+### 续87（2026-07-08，仅 tauri.conf.json，用户已确认符合预期）——修复系统托盘出现两个图标
+- **症状**：运行后系统托盘出现两个图标，绿色可操作、蓝色点了没反应。
+- **根因**：`tauri.conf.json` 里配了 `app.trayIcon`（`iconPath`+`iconAsTemplate:true`），Tauri 启动时会据此**自动创建一个默认托盘图标**；`lib.rs:561` 的 setup 里又手写了一个 `TrayIconBuilder`（带菜单/`on_menu_event`）。两者互相独立、同时存在→两个图标。配置项那个没绑任何菜单/事件，就是那个"蓝色不可操作"的。
+- **修复**：删掉 `tauri.conf.json` 的 `trayIcon` 配置块，只保留代码手写版（唯一有菜单和事件处理的那个）。
+- **验证**：JSON 校验通过；用户实测确认只剩一个可操作图标。
+- **文件**：`src-tauri/tauri.conf.json`。
 
 ### 续86（2026-07-08，纯前端 App.tsx，GUI 首轮反馈已修复，二轮待复测）——新增中转站「持久化」开关 + 修正 move/copy 移除判定
 - **需求**：中转区当前拖出成功后条目会自动消失（符合中转语义）；新增设置开关，开启后除非用户手动删除，条目移出/拖出后不再自动消失；关闭（默认）保持现状——确认成功移出后才消失。
@@ -36,29 +68,6 @@
 - **修正**：移除判据从 `event.payload==="move"` 放宽为 `event.payload==="move"||"copy"`（新变量 `dropped`，取消/`"none"` 除外）——**任何成功投放**都算移出，是否真移除仍受 `stagePersistRef` 门控（「确保成功移出再消失」语义不变，只是"成功"的定义从"仅 move"扩到"move 或 copy"）。顺手修正单 text 回退分支的取消场景误触发（原条件在 `"none"` 时也会误进分支多按一次粘贴）。副作用：内部拖入启动台等区内落点场景现在也会因此让条目移出中转区（此前 copy 效果不移除、条目会同时留在中转区和启动台）——判定为合理一致行为。
 - **验证**：`npx tsc --noEmit` 零错误。**GUI 二轮复测待用户**（无法模拟真实拖拽手势，见〔铁律〕不模拟输入约定）：需覆盖 move/copy 两种效果 × `stagePersist` 开/关两态 × text/image/file 三类型。
 - **文件**：`src/App.tsx`。文档同步：DECISIONS §18 续86（标注旧「effect 语义」表废弃）。
-
-### 续85（2026-07-07，src/i18n.ts 新增 + App.tsx + lib.rs）——新增中/英文界面语言切换
-- **需求**：设置里可切换界面语言，默认中文，新增英文。`App.tsx` 单文件 ~1860 行，UI 文本几乎全硬编码中文。
-- **方案**：新文件 `src/i18n.ts` — 字典式 `EN_DICT: Record<中文,英文>`，key 直接用中文原文（不发明语义 key）；`makeT(lang)` 返回 `t(zh, vars?)`，缺项 fallback 回中文（不会白屏）；动态文案（`ago()`/"已选 {n} 项"）用 `{占位符}` 模板复用同一套字典。
-- **App.tsx**：新增 `lang`/`t` state（`useMemo(makeT)`），持久化到 store `"language"` key（同 `theme` 惯例）；`changeLang` 同时 invoke `set_tray_language` 同步托盘；时钟 `toLocaleTimeString` 按 lang 切 `zh-CN`/`en-US`；委派 subagent 做机械替换——全文件 ~230 处 `t(...)` 包裹 + ~145 条字典项（设置面板 7 个 tab、主界面、右键菜单、toast、空状态全覆盖）。
-- **Rust（`lib.rs`）**：托盘菜单"显示窗口"/"退出"是唯一 `t()` 管不到的用户可见文案——`MenuItem<Wry>` 存进 `app.manage(TrayMenuItems)`，新增 `set_tray_language` 命令 `.set_text()` 运行时切换；前端读取语言设置后主动 invoke 一次同步。3 条热键校验 Rust `Err(String)` 不改 Rust，原文录入字典，渲染时 `t(hotkeyError)` 包一层复用。
-- **人工 review 修正 2 处撞 key**（字典 key=中文原文的固有代价，详见 DECISIONS §19）：①`"关闭"` 本兼有 Esc-关闭 与 开关 Off 两义，开关按钮改为调用点直写 `lang==="en"?"Off":"关闭"`，不查字典；连带修正中转站设置提示段落里引用的 "Open"/"Close" 改回 "On"/"Off" 保持与按钮一致。②`"应用"` 本兼有名词 App 与动词 Apply 两义，搜索结果徽章同样绕开字典直写 `lang==="en"?"App":"应用"`。
-- **验证**：`npx tsc --noEmit` + `cargo check --lib` 均零错误；人工逐段 review 全量 diff（设置面板七个 tab/主界面/剪贴板/中转区/启动台/增强搜索/右键菜单）。**语言切换 GUI 实测已由用户完成并确认提交**（commit `9f5a01f`）。
-- **版本号追加修复（同会话，用户提出）**：本次定为 v0.2.0（新功能：语言切换）。`package.json`/`Cargo.toml`/`tauri.conf.json` 三处同步改 0.2.0；`vite.config.ts` 新增 `define: { __APP_VERSION__: JSON.stringify(pkg.version) }`（Node 侧 `readFileSync` 读 `package.json`），`src/vite-env.d.ts` 声明该全局，`App.tsx` 两处 `v0.1.0` 硬编码改用 `__APP_VERSION__`。`npm run build` 验证过产物 JS 里确实内联出 "0.2.0" 两处。
-- **版本号规则正式落地 + 用户 review 后二次加固（同会话，写入 `CLAUDE.md`「版本号规则」）**：用户确认改动已验证/测试通过后，agent 自行判断 MINOR/PATCH 幅度、bump 三处版本文件、提交为**紧跟功能提交之后的独立 commit**（参考先例 `9f5a01f`→`3123a6d`，不强制合并进同一 commit），不用再单独问"要不要顺便改版本号"（对"未要求不擅自提交"铁律的明确例外，仅限版本号提交）；**MAJOR 永远先问用户**，不得自主判断。用户 review 后指出的 3 处不足已修：①新增 `scripts/check-version-sync.mjs` + `npm run version:check`，`npm run build` 前置跑它——三处版本号不一致直接报错中止（此前"无自动校验"的空档已堵上，脚本用 sabotage 测试验证过确实会在不一致时退出码非 0）；②规则文字改精确为"独立 commit"而非易读成"合并进同一 commit"；③规则里加一句明确「续N」会话计数与 SemVer 版本号是两套独立编号、不对应，避免误读。
-- **文件**：`src/i18n.ts`（新）/ `src/App.tsx` / `src-tauri/src/lib.rs` / `package.json` / `src-tauri/Cargo.toml` / `src-tauri/tauri.conf.json` / `vite.config.ts` / `src/vite-env.d.ts` / `scripts/check-version-sync.mjs`（新）/ `CLAUDE.md`。
-
-### 续84（2026-07-07，dragout.rs + lib.rs + App.tsx）——重构「拖出后自动关闭=关闭」为"拖动保持界面"模型（Phase 1+1b，待 GUI 复测）
-- **需求澄清（续83 方向作废）**：用户三场景实为**区内拖动**：① 拖到一半发现选错需取消（现状拖动即隐藏，看不到没法取消）；② 拖动调整卡片顺序；③ 框选+拖动到启动台。共同点=**拖动全过程界面不能消失**。续83「拖出后重新显示」在松手后才显示、拖动中界面照样消失，对三场景全无用。
-- **统一模型（用户敲定）**：拖动仍是唯一手段（OLE DoDragDrop），只改"何时隐藏界面"。`关闭`=拖动全程不隐藏，区内落点交给窗口自身 IDropTarget；拖到外部应用由用户**拖动中手动按热键隐藏**再松手（"与原版相比只是界面关闭改为手动"）。
-- **Phase 1（界面不消失 + 区内落点）**：`dragout.rs` 撤续83 re-show；`auto_close=false` 时不 spawn 60ms SW_HIDE、DoDragDrop 返回后不 hide、延迟 50ms set_focus。`App.tsx`：`files-dropped` 加 `internalDrag`（`dragOutRef.draggedIds` 非空）判定，区内落回中转暂 no-op（避免重复添加，区内重排=Phase 2）、落启动台走既有添加；`drag-out-done` 单 text `copyAndPaste` 回退在 keepOpen 时跳过；新增 `dragoutAutoCloseRef`。
-- **Phase 1b（拖动中手动隐藏去外部）**：`lib.rs` 加 `pub current_hotkey_vks()`（读 HOTKEY_VK_KEYS 快照）；`dragout.rs` `auto_close=false` 时改 spawn **自轮询线程**（20ms 读 GetAsyncKeyState，热键上升沿 → SW_HIDE + `manually_hidden`=true + emit hotkey-hide，触发一次即退；`drag_done` 兜底退出）。收尾分支改为 `if auto_close || manually_hidden { hide+同步 tao+activate_drop_target } else { 保持可见+set_focus }`。热键 monitor **不改**——它只在用户按热键（=想隐藏）时才 queue 一个 hide()，与本模型同向，无害。
-- **GUI 实测（续84 首轮，用户）**：核心前提**已验证成立**——日志 `[dragdrop] Drop 1 path(s) at (…)`＋`DoDragDrop end hr=0x40100 effect=1→copy` 证明**自前 OLE 拖动能被自窗口 IDropTarget 收到**（场景③启动台成立）。首轮"失败"实为测了当时未实现的外部流程。
-- **GUI 实测（续84 次轮，用户）**：**主流程合格**——`关闭`模式拖动中按热键→界面隐藏→松手到 Windows Terminal(CASCADIA)成功落地粘贴（日志见"保持界面模式：拖动中按热键→手动隐藏 overlay"+ activate 交还 CASCADIA）。**残留缺陷：手动隐藏后松手落地时白闪一下**。诊断：两模式唯一差异=手动隐藏流程有用户按热键→**热键 monitor 介入**（并发 toggle 操作窗口可见性）；`开启`自动隐藏 monitor 不介入、无白闪。
-- **白闪修复（复测通过）**：加 `DRAG_IN_PROGRESS: AtomicBool`（`do_drag_on_main` 起手置位/收尾清位，`pub drag_in_progress()`）；`lib.rs` 热键 monitor 循环开头判定——拖动期间**只跟踪键态、不做 show/hide toggle**（`prev_combo=combo; down_at=None; continue`），窗口可见性拖动期间由 dragout 独占。`cargo check` 过、clippy 维持 8 基线。**GUI 复测：白闪已消除**。新铁律「拖动期间窗口可见性由 dragout 独占」已入 CLAUDE.md。
-- **已知窄边界**：keepOpen 下"外部拖单 text 到 Chromium"仍不粘（copyAndPaste 被 keepOpen 跳过、前端无法区分是否已手动隐藏）；区内重排=Phase 2（暂 no-op）；text 项无 CF_HDROP 故不能落启动台（本就不应落）。
-- **验证**：`cargo check --lib` 零 error；`tsc` Phase 1 已过（1b 仅 Rust + hint 字符串）。**待 GUI 复测**：关闭模式下 ①拖到启动台入库、②拖动中按热键→界面隐藏→松手到外部应用文件落地、③中途取消保留、④开启模式回归。
-- **文件**：`src-tauri/src/dragout.rs` / `src-tauri/src/lib.rs` / `src/App.tsx`。
 
 ---
 

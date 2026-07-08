@@ -151,6 +151,11 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
 .stage-card-act-btn{width:24px;height:24px;border-radius:6px;border:none;background:rgba(255,255,255,0.15);color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;transition:background 80ms;}
 .stage-card-act-btn:hover{background:rgba(255,255,255,0.25);}
+/* 中转区内重排（续87，仿启动台 FLIP 方案）*/
+.stage-card.stage-dragging-src,.stage-item.stage-dragging-src{opacity:0;pointer-events:none;}
+.stage-card.stage-shift,.stage-item.stage-shift{transition:transform 200ms cubic-bezier(.2,.8,.2,1);will-change:transform;}
+.stage-reordering,.stage-reordering *{user-select:none!important;-webkit-user-select:none!important;}
+.stage-drag-ghost{position:absolute;pointer-events:none;box-sizing:border-box;transform:scale(1.04);box-shadow:0 6px 18px rgba(0,0,0,0.35);opacity:0.85;will-change:left,top;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
 
 /* 快捷入口芯片 */
 .shortcut-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 4px 8px;}

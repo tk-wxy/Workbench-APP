@@ -401,9 +401,30 @@ fn start_hotkey_monitor(app: AppHandle) {
                 keys.iter().all(|vk| is_down(*vk))
             };
 
-            // 拖动期间让路：窗口可见性由 dragout 独占（自动隐藏 / 自轮询手动隐藏）。此处只跟踪键态、
-            // 不做 show/hide toggle，避免"保持界面"模式下拖动中按热键去外部时 monitor 并发操作窗口→白闪。
-            // 更新 prev_combo 保证拖动结束恢复时不产生虚假边沿；清空 down_at 防遗留按下态误判。
+            // 续88：区内重排期间按热键 = "取出并隐藏"（把当前拖动的条目转移到外部应用）。此处**既不能直接 hide、
+            // 也不能像原生拖出那样单纯让路**：
+            //   · 直接 hide → 会在 DoDragDrop 起手前隐藏窗口 → SetCapture 失败 → 拖拽根本不启动 → 松手无文件落地
+            //     （续88 四轮反馈的确切症状）；
+            //   · 单纯让路 → 热键在整个区内重排期间彻底失效（续88 三轮反馈②）。
+            // 正确做法：**按下沿 emit "stage-drag-hotkey"**，由前端把纯 JS 区内重排升级为原生拖出——
+            // start_drag_out(force_hide=true) 会在窗口仍可见时先起手 DoDragDrop、随后由 dragout 自身隐藏 overlay。
+            // monitor 在整个重排期间只 emit、绝不 toggle（含松开沿也不 hide），窗口可见性交由后续原生拖出独占。
+            // 升级完成后 STAGE_REORDER_ACTIVE 转为 DRAG_IN_PROGRESS（见 dragout::do_drag_on_main 的无缝交接），
+            // 下一拍即落入下方 drag_in_progress 让路分支。
+            if dragout::stage_reorder_active() {
+                if combo && !prev_combo {
+                    let _ = app.emit("stage-drag-hotkey", ());
+                    println!("[hotkey] 区内重排 + 热键 → emit stage-drag-hotkey（升级为原生拖出并隐藏）");
+                }
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
+            // 原生拖出期间（DRAG_IN_PROGRESS）让路：窗口可见性由 dragout 独占（自动隐藏 / keepOpen 自轮询
+            // 手动隐藏），此处只跟踪键态、不做 show/hide toggle，避免拖动中按热键去外部时 monitor 并发操作
+            // 窗口→白闪。更新 prev_combo 保证拖动结束恢复时不产生虚假边沿；清空 down_at 防遗留按下态误判。
             if dragout::drag_in_progress() {
                 prev_combo = combo;
                 down_at = None;
@@ -473,6 +494,14 @@ fn start_focus_watch(app: AppHandle) {
         println!("[focus] light-dismiss watch started poll={FOCUS_POLL_MS}ms");
 
         loop {
+            // 续88：区内重排阶段窗口全程可见、由拖动独占——light-dismiss 若在升级为原生拖出之前
+            // 就因前台瞬时切走而自行 hide()，会打断整个手势（ghost/让路 transform 永久卡死，且
+            // 因从未真正调用 start_drag_out，「拖到外部目标」这个操作本身也没发生）。让路但保持
+            // armed 状态，重排结束后继续正常侦测（不清 armed，防止重排期间的假前台切换污染状态）。
+            if dragout::drag_in_progress() || dragout::stage_reorder_active() {
+                std::thread::sleep(std::time::Duration::from_millis(FOCUS_POLL_MS));
+                continue;
+            }
             if window.is_visible().unwrap_or(false) {
                 let fg = unsafe { GetForegroundWindow() }.0 as isize;
                 if fg == my_hwnd {
@@ -523,7 +552,7 @@ pub fn run() {
             filesearch::set_search_engine, filesearch::set_search_dirs,
             everything::reload_everything,
             dragout::start_drag_out,
-            dragout::get_dragout_auto_close, dragout::set_dragout_auto_close,
+            dragout::get_dragout_auto_close, dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
             set_hotkey, set_tray_language
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
