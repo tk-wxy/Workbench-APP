@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-08（续91：多选模式悬浮不露单条操作按钮，已提交，见 §0）
+> **最后更新**：2026-07-09（续92：增强搜索结果右键菜单，已提交，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,19 +16,27 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续92（已提交，用户已确认测试通过）**：增强搜索（Ctrl+K）结果新增右键菜单——打开/复制到剪贴板/打开所在目录/加入启动台/加入中转区，按 kind 取可用子集，全部复用现有 `ctxMenu` 基础设施 + 动作 handler（零新增 Rust/剪贴板/i18n）。附带修复：键盘/热键操作（Ctrl+Space 关页、Ctrl+K 切页等）现在会自动关闭该右键菜单。版本号 0.3.3→0.3.4（PATCH）。
 - **续91（已提交，用户已确认测试通过）**：中转区多选模式下卡片悬浮不再露出单条操作按钮（`.stage-card-actions`/list 布局的 `.clip-copy-btn` 等），纯 CSS 门控（容器加 `stage-multiselect` class），未动 JS 状态机。版本号 0.3.2→0.3.3（PATCH）。
 - **续90（已提交，用户已确认测试通过）**：①中转站容量从硬编码 20 改为可配置（20/50/100/200，纯前端 store 持久化，无需 Rust 同步）；②`.stage-grid` 从 flex-wrap 改 CSS Grid（`auto-fill` + `justify-content:center`）修复方格卡片左右缝隙不对称。版本号 0.3.1→0.3.2（PATCH）。
 - **续89**：全局 `user-select:none` 加在 `html` 根（`src/App.css`），`input`/`textarea` 例外保留文本编辑；修复此前拖拽/点击时界面文本大片被框选变蓝的观感问题。此前零散加的 `.launcher-reordering`/`.stage-reordering`/`.lasso-active`/`#overlay.dragging` 局部 user-select 规则仍保留（现为冗余但无害，未清理）。版本号 0.3.0→0.3.1（PATCH）。
-- **⚠️ 中转区「区内拖动排位」（续88）功能接近完成，五轮修复"按热键升级为原生拖出并投放"，代码在工作树未提交，等本轮 GUI 复测**——见下条。
+- **续88（已提交 `e218c93`/`093bb4f`，五轮 GUI 修复）**：中转区「区内拖动排位」+ 与拖出转移共存，含"按热键升级为原生拖出并投放"。代码已完整提交，非工作树遗留（此前 §0 的"工作树未提交"记录为过时笔误，续90/续91 文档更新时漏改，现已订正）。详见 §0A / DECISIONS §18。
 - **最高危提醒**：窗口/焦点/热键/剪贴板改动前必须重读 `CLAUDE.md` 铁律。尤其：别改 `tauri.conf.json` 的 `transparent:true`/`focus:false`；别让前端管 hide；别回退 RegisterHotKey 事件驱动 show/hide；新增剪贴板读写必须过 `CLIPBOARD_LOCK`。
-- **最近状态（续88 五轮，本次会话）——补"按热键升级为原生拖出"触发器**：GUI 实测确认四轮的②（热键关界面）已生效，但暴露①真面目=**"拖动中按热键关界面成功、但松手后无文件落地"**。根因：用户转移手势是"拖起→按热键隐藏→拖到目标松手"，全程不越 drop-area 边界；而续88 只在"越界"时才把纯 JS 区内重排升级为原生 DoDragDrop——按热键那刻还没有任何原生拖，直接 hide 就把手势取消了（且隐藏后 DoDragDrop 的 SetCapture 必失败，隐藏必须晚于起手）。修复：把"按热键"也作为升级触发器——monitor 在 `stage_reorder_active()` 期间改为 emit `stage-drag-hotkey`（不 hide 不让路），前端据此 `cancelStageReorder()`+`beginNativeDragOut([id], forceHide=true)`；`start_drag_out`/`do_drag_on_main` 加 `force_hide` 参数（无视 keepOpen 强制隐藏收场，且**先起手 DoDragDrop 再隐藏**）；`STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接（`cancelStageReorder` 只清 JS 现场、do_drag_on_main 先置 DRAG_IN_PROGRESS 再清 STAGE_REORDER，防交接空窗被提前 hide）。三处 build 零错误，GUI 待复测。详见 §0A 续88 五轮 / DECISIONS §18。
-- **待办（续75 GUI 反馈遗留，启动台拖拽打磨）**：
-  - ⓪a 舍去抓手光标——grab/grabbing 实测卡顿，回退光标改动（`.app-tile` cursor 恢复默认、`.launcher-reordering` 去 grabbing）。
-  - ⓪b 被拖项目跟随观感——源 `opacity:0` 后拖动中项目"消失"；先在真实拖拽下加日志确认 ghost 是否跟手到位，再决定强化跟随还是让源半可见。
+- **续75 GUI 反馈遗留已核实为完成态**（`9ff95c7`/`be03400`，早于续88 即已合入 master，此前未随「续N」命名记录，MEMORY 长期漏更）：
+  - ⓪a 抓手光标已舍去——`.app-tile` 无 cursor 覆盖，`.launcher-reordering` 无 grabbing，仅保留 `user-select:none`（见 `App.css` 行 101 注释）。
+  - ⓪b 拖动跟随已实现——`launcher-drag-ghost`：`cloneNode` 生成 fixed 定位副本、指针移动直接写 DOM style 跟手（零 React 渲染），源格改 `opacity:0` 由 ghost 代替，松手 180ms 回落后再清 ghost/class。
 - **下一步候选（无阻塞）**：① 启动器键盘导航；② 文件结果右键「打开所在目录」+ 命中高亮回传；③ 索引目录可配置；④ 增强搜索纳入剪贴板条目；⑤ file/folder 收藏的非拖入入口；⑥ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑦ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
-- **阻塞 / 待决策**：中转区「区内拖动排位」（续88）等本轮 GUI 复测——重点验证"拖起条目→按热键隐藏→拖到外部松手→文件落地"整条转移链是否闭合（devtools console 看 `[stage-drag] hotkey during reorder → 升级…` + `[dragout] DoDragDrop begin … force_hide=true` + `drag-out-done effect=…`）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续92（2026-07-09，src/App.tsx，用户已确认测试通过并提交）——增强搜索结果新增右键菜单
+- **需求**：增强搜索（Ctrl+K）条目加右键菜单，菜单项：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区。
+- **实现**：新增 `openEnhCtxMenu(e,r)`，`onContextMenu` 挂到 `.enh-result` div。复用现有 `ctxMenu` 基础设施（`openCtxMenu`/`CtxMenuItem`）+ 已有动作 handler（`activateEnh`/`writeItemToClipboard`/`reveal_in_explorer`/`addFsToLauncher`/`addFsToStage`/`addAppToLauncher`/`copyStageToClipboard`）——**零新增 Rust 命令 / 剪贴板路径 / i18n 词条**（全部复用已有翻译键）。抽了 `revealPath` 小 helper 去重。
+- **按 kind 取可用子集**：`fs` 全 5 项；`app` 无「加入中转区」（中转=文件转移语义，应用不适用），复制到剪贴板复制其 .lnk/.exe 路径；`stage`（enhTier1 已过滤恒 file 类型）无「加入中转区」（已在中转区）。stage 恒 file → `activateEnh` 的 `items[0].path` 恒有效，无崩溃风险。
+- **小缺陷修复（用户 GUI 反馈）**：右键菜单是纯鼠标浮层（无键盘交互），原本键盘/热键操作不关它、导致切页/关页后残留悬浮。补两处 `setCtxMenu(null)`：① keydown 处理器顶部 blanket 关闭（`ctxMenuRef.current && e.key!=="Escape"` → 关菜单但不 return，让按键照常执行，如 Ctrl+K 关菜单+切页一气呵成；Esc 走既有分层分支，第一次只关菜单）；② `hotkey-hide` 事件批量复位（全局热键 Ctrl+Space 关页被 Rust 消费、不经前端 keydown，只能在此事件清）。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测右键三类条目菜单 + Ctrl+Space/Ctrl+K/Esc/方向键关闭菜单均确认通过。
+- **提交**：`aa06635`（feat，含小缺陷修复）+ `643d29f`（chore 版本号 0.3.3→0.3.4，PATCH）。
+- **文件**：`src/App.tsx`（`openEnhCtxMenu`/`revealPath`/keydown blanket/hotkey-hide 复位/`.enh-result` onContextMenu）。
 
 ### 续90（2026-07-08，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转站容量可配置 + 方格卡片间距对称修复
 - **需求 1**：中转站容量扩张，此前硬编码仅 20 个条目上限。
@@ -39,14 +47,7 @@
 - **验证**：`npm run build`（含 tsc + 版本一致性检查）通过；FLIP 拖动重排逻辑（`getBoundingClientRect` 驱动，与 flex/grid 无关）确认不受影响。用户 GUI 实测两项均确认符合预期。
 - **提交**：`41e7eb9`（feat 容量可配置）+ `e7edb56`（fix 网格对称）+ `981aa88`（chore 版本号 0.3.1→0.3.2，PATCH）。
 
-### 续89（2026-07-08，src/App.css，用户已确认测试通过并提交）——修复界面拖拽时文本被意外框选变蓝
-- **症状**：日常操作（拖动卡片、在顶栏/列表上按住鼠标移动等）容易触发浏览器原生文字框选，界面文本大片变蓝，观感不像桌面应用。
-- **根因**：此前只在特定拖拽场景（启动台/中转区重排、剪贴板长按拖拽、框选）零散加了局部 `user-select:none`，未覆盖的普通点击拖动路径（如顶栏、按钮间隙误触发的原生文字选择）没有防护。
-- **修复**：`src/App.css` 顶部 `html{user-select:none;-webkit-user-select:none;}` 全局禁用，`input,textarea{user-select:text;-webkit-user-select:text;}` 例外保留搜索框/热键录入框等正常文本编辑。此前局部规则未删（冗余但无害）。
-- **验证**：`npm run build` 通过（含版本一致性检查）；用户手动测试拖拽启动台/中转卡片/顶栏/剪贴板列表确认不再泛蓝，搜索框/热键输入框文本选择正常。
-- **提交**：`0711893`（fix）+ `03941b4`（chore 版本号 0.3.0→0.3.1，PATCH）。
-
-### 续91（2026-07-08，src/App.tsx + src/App.css，待用户 GUI 确认）——多选模式下卡片悬浮不再露出单条操作按钮
+### 续91（2026-07-08，src/App.tsx + src/App.css，用户已确认测试通过并提交）——多选模式下卡片悬浮不再露出单条操作按钮
 - **需求**：中转区多选状态下，光标悬浮卡片时不应再弹出「复制/删除」等单条操作按钮（与批量操作栏语义打架，多选时不该再暴露单条操作入口）。
 - **实现**：`stage-grid`/`stage-list` 容器按 `stageMultiselect` 加条件 class `stage-multiselect`；CSS 新增 `.stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}` 与 list 布局对应的 `.clip-copy-btn/.clip-del-btn/.stage-open-btn` 规则，覆盖非多选态下已有的 `:hover{opacity:1}` 规则。未改任何 JS 逻辑/状态机，纯 CSS 门控。
 - **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测确认通过（悬浮遮罩不出现、多选切换回单选后悬浮操作按钮恢复正常）。

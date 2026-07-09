@@ -9,6 +9,13 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续89（2026-07-08，src/App.css，用户已确认测试通过并提交，2026-07-09 续92 迁入）——修复界面拖拽时文本被意外框选变蓝
+- **症状**：日常操作（拖动卡片、在顶栏/列表上按住鼠标移动等）容易触发浏览器原生文字框选，界面文本大片变蓝，观感不像桌面应用。
+- **根因**：此前只在特定拖拽场景（启动台/中转区重排、剪贴板长按拖拽、框选）零散加了局部 `user-select:none`，未覆盖的普通点击拖动路径（如顶栏、按钮间隙误触发的原生文字选择）没有防护。
+- **修复**：`src/App.css` 顶部 `html{user-select:none;-webkit-user-select:none;}` 全局禁用，`input,textarea{user-select:text;-webkit-user-select:text;}` 例外保留搜索框/热键录入框等正常文本编辑。此前局部规则未删（冗余但无害）。
+- **验证**：`npm run build` 通过（含版本一致性检查）；用户手动测试拖拽启动台/中转卡片/顶栏/剪贴板列表确认不再泛蓝，搜索框/热键输入框文本选择正常。
+- **提交**：`0711893`（fix）+ `03941b4`（chore 版本号 0.3.0→0.3.1，PATCH）。
+
 ### 续88（2026-07-08，App.tsx + App.css + dragout.rs + lib.rs，三轮 GUI 反馈后**暂停归档**，未完成，2026-07-08 续91 迁入）——中转区拖动排位（Phase 2 补完）
 - **需求**：中转区参照启动台（§16）补上拖动排位功能——续84 时明确留了这个缺口（"区内重排暂 no-op（Phase 2）"）。
 - **核心设计**：按下拖动超阈值（`DRAG_OUT_THRESHOLD_PX`=12px）后不再一律立即触发原生 `start_drag_out`，先判定：多选拖多项 或 搜索过滤态（`filteredStage` 索引对不上 `stage`）→ 维持原行为直出；否则单项 → 进入纯前端「区内重排」（`stageReorderRef` 持有 FLIP 快照 + DOM clone ghost，算法与启动台 `handleLauncherPointerDown` 同构，直接复用 `calcInsert`/`applyShift` 逻辑）。光标只要还在 `.drop-area` 边界内（留 `STAGE_REORDER_ESCAPE_PX`=6px 余量防抖动）就纯前端重排；一旦越界，立即清场（无落定动画）并调用与直出分支同一个 `beginNativeDragOut([itemId])` 升级为真实 OLE 拖出——两条路径复用同一段 Rust 调用代码。
