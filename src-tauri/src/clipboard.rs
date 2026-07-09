@@ -801,6 +801,46 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         return Ok(());
     }
 
+    // 控制台窗口（cmd 经典宿主 / Windows Terminal）：文本终端只认 CF_TEXT，位图对它没有任何可
+    // 解释的含义——不是 bug，是控制台本身的能力边界（脱离本应用手动复制图片再到 cmd 里 Ctrl+V 同样
+    // 毫无反应）。退化为粘贴该图片的落盘路径（文本），至少给出一个可用结果而非静默无反应。
+    // 落盘路径选取逻辑与上面 CabinetWClass 分支一致：大图复用已有 orig_path，小图现解一份 PNG。
+    if class1 == "ConsoleWindowClass" || class1 == "CASCADIA_HOSTING_WINDOW_CLASS" {
+        let png_path: String = match orig_path.as_deref() {
+            Some(p) if std::path::Path::new(p).exists() => p.to_string(),
+            _ if !base64.is_empty() => {
+                let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+                let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
+                let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
+                let tmp = dir.join(format!("workbench_clip_{}.png", now_ms()));
+                std::fs::write(&tmp, &bytes).map_err(|e| format!("写临时文件: {}", e))?;
+                tmp.to_string_lossy().into_owned()
+            }
+            _ => return Err("无图片数据".into()),
+        };
+
+        // 文本写回 idiom 同 paste_clipboard：锁仅罩写入临界区，SKIP_CLIP_EVENTS + suppress 防自写回流。
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        {
+            let _g = CLIPBOARD_LOCK.lock().unwrap();
+            let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
+            cb.set_text(&png_path).map_err(|e| format!("剪贴板写入失败: {}", e))?;
+        }
+        suppress_clip_until_now();
+
+        let target = unsafe { GetForegroundWindow() };
+        unsafe { let _ = SetForegroundWindow(target); }
+        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
+        let _ = enigo.key(enigo::Key::Control, Press);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::V, Press);
+        let _ = enigo.key(enigo::Key::V, Release);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = enigo.key(enigo::Key::Control, Release);
+
+        return Ok(());
+    }
+
     // ── 分支③：其余 app（Paint / 聊天框等真吃位图的目标）──────────────────────────
     // 续55：整段「解码 + set_image + 焦点交还 + Ctrl+V」搬入子线程，命令本体 spawn 后立即返回。
     // 根因：大图全分辨率 RGBA 解码（3200×1998 ≈ 25MB）原在主线程同步跑，堵住热键键态轮询

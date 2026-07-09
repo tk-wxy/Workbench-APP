@@ -86,7 +86,7 @@ npm run tauri build    # 打包
 - **所有剪贴板读写必须走 `CLIPBOARD_LOCK` 串行化**（监听读 + 全部写入者：copy/paste × 文本/图片/文件，含桌面分支读当前图的 `get_image`）。根因：并发抢 `OpenClipboard` 句柄 → `os error 1418`。锁粒度**仅限 `OpenClipboard…CloseClipboard` 临界区**——写入者**绝不跨 `hide()`/`sleep()`/焦点交还/`enigo` Ctrl+V 持锁**（阻塞监听、emit 往返可能死锁）。桌面分支 `SHFileOperation`/`desktop_copy_files` 不碰系统剪贴板、不加锁。`write_cf_hdrop` 被 paste 与 copy 共用 → **锁加调用方、别进函数**（否则 copy 重入死锁）。锁序：监听先放 `CLIPBOARD_LOCK` 再取 `CLIP_CACHE`，写入者只取 `CLIPBOARD_LOCK`，无环。**新增任何剪贴板读写路径必须取此锁。**（唯一例外：监听读在剪贴板被外部占用时持锁跨有界 retry-sleep——此时写入者本就进不来，无额外损害；见 DECISIONS §6。）
 - 死循环防御：写回剪贴板前 `SKIP_CLIP_EVENTS.store(2)`（计数器非布尔——get+set 可能触发 2 次 seq 变化）。`CLIPBOARD_LOCK` 防**并发抢句柄(1418)**、`SKIP_CLIP_EVENTS`/seq 水位防**自写回流历史面板**，两层正交防护各管各的。
 - 写文件用 `CF_HDROP` raw FFI（`SetClipboardData`/`DROPFILES`）：**`fWide` 必须 = 1**（UTF-16 路径），清零会导致 Explorer 解析失败。
-- **图片粘贴按目标窗口类三分叉**（`set_clipboard_image`，按前台窗口 class 分流；探针取证见 DECISIONS §6 延伸）：① **桌面**(`WorkerW`/`Progman`)→ SHFileOperation 落地真 PNG；② **资源管理器文件夹**(`CabinetWClass`/`ExploreWClass`)→ CF_HDROP 落地真 PNG（**文件夹只收文件、不收位图**，已探针证实；大图复用已落盘 `clip_images/{time}.png` **零解码**，小图写 `clip_images/workbench_clip_*.png` 由 janitor 孤儿清理兜底）；③ **其余 app**(Paint/聊天框等)→ `set_image` 位图。**只有分支③才解码全分辨率 RGBA**（①②解码 = 卡顿源 + 白解码）。文件夹分支复用文件粘贴 idiom：锁加调用方、写前 `store(2)`、焦点交还流程不变。
+- **图片粘贴按目标窗口类四分叉**（`set_clipboard_image`，按前台窗口 class 分流；探针取证见 DECISIONS §6 延伸）：① **桌面**(`WorkerW`/`Progman`)→ SHFileOperation 落地真 PNG；② **资源管理器文件夹**(`CabinetWClass`/`ExploreWClass`)→ CF_HDROP 落地真 PNG（**文件夹只收文件、不收位图**，已探针证实；大图复用已落盘 `clip_images/{time}.png` **零解码**，小图写 `clip_images/workbench_clip_*.png` 由 janitor 孤儿清理兜底）；③ **控制台**(`ConsoleWindowClass`/`CASCADIA_HOSTING_WINDOW_CLASS`，即 cmd/Windows Terminal)→ **退化为粘贴该图片落盘路径的文本**（控制台只认 CF_TEXT、不识别位图，属于目标程序能力边界，非本应用可修的 bug；续94）；④ **其余 app**(Paint/聊天框等)→ `set_image` 位图。**只有分支④才解码全分辨率 RGBA**（①②③均不解码/仅走文本，卡顿源仅④）。②③分支均复用文件粘贴 idiom：锁加调用方、写前 `store(2)`、焦点交还流程不变。
 - 去重**只在同类型内进行**（跨类型去重会误删）：文件按 `items[0].path`，文本/图片按 `content`，不同类型永久保留。
 - **批量上剪贴板仅限「全选 file」**：多 file 条目可合并成一个 CF_HDROP 一次写入；文本/图片/混合无法合成单一 payload（CF_HDROP §7 架构限制），前端相应置灰。任何新增批量剪贴板功能必须过「能否合并成单一 payload」这道门槛（详见 DECISIONS §6 延伸）。
 - **历史持久化落盘 I/O 绝不进 `CLIPBOARD_LOCK`**（磁盘 I/O 与剪贴板锁正交）。`save_clip_history` 接**快照入参**、自身不持任何锁——调用方必须先释放 `CLIP_CACHE` 锁与 `CLIPBOARD_LOCK` 再调（防重入死锁）。固定模式：`{ 锁 CLIP_CACHE → mutate → let snap = cache.clone(); }` 出锁 → `save_clip_history(snap)`。
@@ -120,6 +120,7 @@ npm run tauri build    # 打包
 | 点击粘贴偶发失败、手动 Ctrl+V 却能粘 | 焦点交还回退成了盲等 sleep / 看 `handback` 日志的 timeout 与 fg class（DECISIONS §3 续80）|
 | 文件粘贴被 Explorer 拒绝 | `DROPFILES.fWide ≠ 1` |
 | 截图不显示缩略图 | 检测顺序没把图片排在 CF_HDROP 之前 |
+| 图片/截图点击后粘不进 cmd/Windows Terminal | 控制台只认 CF_TEXT、不识别位图，非 bug；已退化为粘贴该图片落盘路径（文本），见四分叉③（续94）|
 | 历史项被误删 | 做了跨类型去重（应只在同类型内去重）|
 | 复制/粘贴写剪贴板报 os error 1418 | 写入段没取 `CLIPBOARD_LOCK`，与监听读并发抢 OpenClipboard 句柄 |
 | 桌面粘贴弹冲突框 / 取消 | `SHFileOperation` 缺 `FOF_RENAMEONCOLLISION` |
