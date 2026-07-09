@@ -360,6 +360,7 @@ export default function App() {
   const [enhPinned, setEnhPinned] = useState(false); // true=打字触发（顶栏为输入框，不覆盖顶栏）；false=Ctrl+K触发（全覆盖+独立搜索框）
   const [enhQuery, setEnhQuery] = useState("");
   const [enhSelIdx, setEnhSelIdx] = useState(0);
+  const [launcherSelIdx, setLauncherSelIdx] = useState(-1); // 启动器网格键盘选中项（-1=未选中，焦点在搜索框）
   const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
@@ -678,6 +679,12 @@ export default function App() {
     if (!enhOpen) return;
     document.querySelector(".enh-result.selected")?.scrollIntoView({ block: "nearest" });
   }, [enhSelIdx, enhOpen]);
+
+  // 启动器键盘选中：滚入视野；关闭覆盖层 / 搜索过滤态变化时复位到「未选中」（焦点回搜索框）
+  useEffect(() => {
+    if (launcherSelIdx >= 0) document.querySelector(".app-tile.selected")?.scrollIntoView({ block: "nearest" });
+  }, [launcherSelIdx]);
+  useEffect(() => { setLauncherSelIdx(-1); }, [visible, search]);
 
   // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件，量由引擎决定）在后；索引连续供 ↑↓/Enter 跨组导航 ──
   const enhResults = useMemo<EnhResult[]>(() => {
@@ -1548,7 +1555,7 @@ export default function App() {
       // 右键菜单是纯鼠标浮层（无键盘交互）：任何键盘/热键操作都顺带关掉它，避免切页/关页后残留悬浮。
       // Escape 交由下方分层逻辑处理（第一次 Esc 只关菜单、不关页），故此处排除。
       if(ctxMenuRef.current && e.key!=="Escape") setCtxMenu(null);
-      if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
@@ -1559,12 +1566,29 @@ export default function App() {
         else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
         return;
       }
-      // Enter：顶栏搜索非空时启动排名第一的应用（launcher 键盘导航待后续实现）
+      // ── 启动器网格键盘导航（Start 菜单风）──
+      // 未选中(idx<0)：焦点在搜索框，仅 ↓ 进入网格；←→↑ 留给输入框做文本编辑。
+      // 已选中(idx>=0)：←→↑↓ 二维移动（列数按 DOM offsetTop 动态算），行首←/首行↑ 退回搜索框；Enter 打开。
+      const nL=filteredLauncher.length;
+      if(nL){
+        const grid=launcherDropRef.current;
+        const cols=(()=>{ if(!grid)return 1; const tiles=grid.querySelectorAll<HTMLElement>(".app-tile"); if(tiles.length<2)return tiles.length||1; const top0=tiles[0].offsetTop; let c=0; for(const el of Array.from(tiles)){ if(el.offsetTop===top0)c++; else break;} return c||1; })();
+        if(launcherSelIdx<0){
+          if(e.key==="ArrowDown"){e.preventDefault();setLauncherSelIdx(0);return;}
+        }else{
+          if(e.key==="ArrowRight"){e.preventDefault();setLauncherSelIdx(i=>Math.min(i+1,nL-1));return;}
+          if(e.key==="ArrowLeft"){e.preventDefault();if(launcherSelIdx===0){setLauncherSelIdx(-1);searchRef.current?.focus();}else setLauncherSelIdx(i=>Math.max(i-1,0));return;}
+          if(e.key==="ArrowDown"){e.preventDefault();setLauncherSelIdx(i=>Math.min(i+cols,nL-1));return;}
+          if(e.key==="ArrowUp"){e.preventDefault();if(launcherSelIdx<cols){setLauncherSelIdx(-1);searchRef.current?.focus();}else setLauncherSelIdx(i=>Math.max(i-cols,0));return;}
+          if(e.key==="Enter"){e.preventDefault();const it=filteredLauncher[launcherSelIdx];if(it)openLauncherItem(it, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));return;}
+        }
+      }
+      // Enter：未进入网格且顶栏搜索非空时，启动扫描链排名第一的应用（保留旧兜底行为）
       if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[0];if(a)launchApp(a.app, null);}
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey]);
+  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey, filteredLauncher, launcherSelIdx, openLauncherItem]);
 
   return (
    <>
@@ -1601,9 +1625,9 @@ export default function App() {
           </div>
           <div className="app-grid" ref={launcherDropRef}>
             {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
-            {filteredLauncher.map((it)=>(
+            {filteredLauncher.map((it,i)=>(
               <div key={it.id}
-                className="app-tile"
+                className={`app-tile${i===launcherSelIdx?" selected":""}`}
                 draggable={false}
                 onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
                 onContextMenu={e=>openLauncherCtxMenu(e,it)}
