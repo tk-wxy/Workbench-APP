@@ -1639,7 +1639,7 @@ export default function App() {
                    : it.kind==="file" ? <span>{fi(it.ext??"")}</span>
                    : <span>{it.name[0]}</span>}
                 </div>
-                <span className="app-tile-label">{it.name}</span>
+                <div className="app-tile-label-wrap"><span className="app-tile-label">{it.name}</span></div>
               </div>
             ))}
             {/* 末尾插入指示线：insertIdx === launcher.length 时显示在最后一个元素之后 */}
