@@ -428,7 +428,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => setVisible(true));
-        const un2 = await listen("hotkey-hide", () => { if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死）
+        const un2 = await listen("hotkey-hide", () => { if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留）
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -1500,6 +1500,31 @@ export default function App() {
     openCtxMenu(e, items);
   }, [openCtxMenu, removeLauncherItem, t]);
 
+  // 增强搜索结果右键菜单：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区（按 kind 取可用子集）
+  // stage 结果只有 file 类型（enhTier1 已按 type==="file" 过滤），故其 items[0].path 恒有效
+  const revealPath = useCallback(async (path: string) => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
+  const openEnhCtxMenu = useCallback((e: React.MouseEvent, r: EnhResult) => {
+    const items: CtxMenuItem[] = [{ label: t("打开"), action: () => activateEnh(r) }];
+    if (r.kind === "fs") {
+      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }) });
+      items.push({ label: t("打开所在目录"), action: () => revealPath(r.path) });
+      items.push({ label: t("加入启动台"), action: () => addFsToLauncher(r) });
+      items.push({ label: t("加入中转区"), action: () => addFsToStage(r) });
+    } else if (r.kind === "app") {
+      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }) });
+      items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
+      items.push({ label: t("加入启动台"), action: () => addAppToLauncher(r.app) });
+    } else { // stage（恒 file 类型）
+      const path = r.item.items?.[0]?.path;
+      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(r.item) });
+      if (path) {
+        items.push({ label: t("打开所在目录"), action: () => revealPath(path) });
+        items.push({ label: t("加入启动台"), action: () => addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }) });
+      }
+    }
+    openCtxMenu(e, items);
+  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, t]);
+
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
     hideWorkbench();
@@ -1520,6 +1545,9 @@ export default function App() {
   useEffect(() => {
     if (!visible) return;
     const onKey=(e:KeyboardEvent)=>{
+      // 右键菜单是纯鼠标浮层（无键盘交互）：任何键盘/热键操作都顺带关掉它，避免切页/关页后残留悬浮。
+      // Escape 交由下方分层逻辑处理（第一次 Esc 只关菜单、不关页），故此处排除。
+      if(ctxMenuRef.current && e.key!=="Escape") setCtxMenu(null);
       if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
@@ -1777,6 +1805,7 @@ export default function App() {
                 {divider}
                 <div className={`enh-result${i===enhSelIdx?" selected":""}`}
                   onMouseEnter={()=>setEnhSelIdx(i)}
+                  onContextMenu={e=>openEnhCtxMenu(e,r)}
                   onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
                   <div className="enh-result-icon">{icon}</div>
                   <div className="enh-result-meta">
