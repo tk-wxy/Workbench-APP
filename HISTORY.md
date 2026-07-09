@@ -9,6 +9,13 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续91（2026-07-08，src/App.tsx + src/App.css，用户已确认测试通过并提交，2026-07-09 续94 迁入）——多选模式下卡片悬浮不再露出单条操作按钮
+- **需求**：中转区多选状态下，光标悬浮卡片时不应再弹出「复制/删除」等单条操作按钮（与批量操作栏语义打架，多选时不该再暴露单条操作入口）。
+- **实现**：`stage-grid`/`stage-list` 容器按 `stageMultiselect` 加条件 class `stage-multiselect`；CSS 新增 `.stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}` 与 list 布局对应的 `.clip-copy-btn/.clip-del-btn/.stage-open-btn` 规则，覆盖非多选态下已有的 `:hover{opacity:1}` 规则。未改任何 JS 逻辑/状态机，纯 CSS 门控。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测确认通过（悬浮遮罩不出现、多选切换回单选后悬浮操作按钮恢复正常）。
+- **提交**：`57242b1`（fix）+ 版本号 0.3.2→0.3.3（PATCH，随后单独提交）。
+- **文件**：`src/App.tsx`（两处 className 拼接）、`src/App.css`（两条新增规则）。
+
 ### 续90（2026-07-08，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交，2026-07-09 续93 迁入）——中转站容量可配置 + 方格卡片间距对称修复
 - **需求 1**：中转站容量扩张，此前硬编码仅 20 个条目上限。
 - **实现**：`STAGE_MAX`（前端硬编码常量，Rust 侧无对应数组/上限）改为可配置——`STAGE_MAX_DEFAULT=20`+`STAGE_MAX_OPTIONS=[20,50,100,200]`；新增 `stageMax` state + `stageMaxRef`（供 `files-dropped` 一次性事件监听闭包读最新值，同 `clipCacheMaxRef` 惯例）；`changeStageMax` 持久化到 store（`"stage-max"`），无需 invoke 同步 Rust；缩小上限时用 `stage.slice(0,n)` 立即截断（保留较新的）。设置面板「中转站」新增「上限条数」`seg` 控件（20/50/100/200）。选 200 而非对齐剪贴板的 100 上限：中转 file 条目只存路径+小图标，比剪贴板可能内联的整张缩略图/全文轻得多，扩容成本更低。
