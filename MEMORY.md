@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-09（续92：增强搜索结果右键菜单，已提交，见 §0）
+> **最后更新**：2026-07-09（续93：启动器网格键盘导航，已提交，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续93（已提交，用户已确认测试通过）**：启动器（收藏托盘）网格新增键盘导航（Start 菜单风）——搜索框内 `↓` 进网格，网格内 `←→↑↓` 二维移动（列数按 DOM `offsetTop` 动态算）、`Enter` 打开（复用 `openLauncherItem`+放大动画）、行首`←`/首行`↑`/`Esc` 回搜索框；未进网格时保留旧 `filteredApps[0]` Enter 兜底。复用既有 `.app-tile.selected`（CSS 零新增），未碰窗口/焦点/热键最高危区。版本号 0.3.4→0.3.5（PATCH）。
 - **续92（已提交，用户已确认测试通过）**：增强搜索（Ctrl+K）结果新增右键菜单——打开/复制到剪贴板/打开所在目录/加入启动台/加入中转区，按 kind 取可用子集，全部复用现有 `ctxMenu` 基础设施 + 动作 handler（零新增 Rust/剪贴板/i18n）。附带修复：键盘/热键操作（Ctrl+Space 关页、Ctrl+K 切页等）现在会自动关闭该右键菜单。版本号 0.3.3→0.3.4（PATCH）。
 - **续91（已提交，用户已确认测试通过）**：中转区多选模式下卡片悬浮不再露出单条操作按钮（`.stage-card-actions`/list 布局的 `.clip-copy-btn` 等），纯 CSS 门控（容器加 `stage-multiselect` class），未动 JS 状态机。版本号 0.3.2→0.3.3（PATCH）。
 - **续90（已提交，用户已确认测试通过）**：①中转站容量从硬编码 20 改为可配置（20/50/100/200，纯前端 store 持久化，无需 Rust 同步）；②`.stage-grid` 从 flex-wrap 改 CSS Grid（`auto-fill` + `justify-content:center`）修复方格卡片左右缝隙不对称。版本号 0.3.1→0.3.2（PATCH）。
@@ -25,7 +26,7 @@
 - **续75 GUI 反馈遗留已核实为完成态**（`9ff95c7`/`be03400`，早于续88 即已合入 master，此前未随「续N」命名记录，MEMORY 长期漏更）：
   - ⓪a 抓手光标已舍去——`.app-tile` 无 cursor 覆盖，`.launcher-reordering` 无 grabbing，仅保留 `user-select:none`（见 `App.css` 行 101 注释）。
   - ⓪b 拖动跟随已实现——`launcher-drag-ghost`：`cloneNode` 生成 fixed 定位副本、指针移动直接写 DOM style 跟手（零 React 渲染），源格改 `opacity:0` 由 ghost 代替，松手 180ms 回落后再清 ghost/class。
-- **下一步候选（无阻塞）**：① 启动器键盘导航；② 文件结果右键「打开所在目录」+ 命中高亮回传；③ 索引目录可配置；④ 增强搜索纳入剪贴板条目；⑤ file/folder 收藏的非拖入入口；⑥ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑦ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
+- **下一步候选（无阻塞）**：① 增强搜索结果的键盘导航已具备（↑↓/Enter），启动器键盘导航续93 已完成——可考虑「Ctrl+K 增强搜索也支持 ←→ 或 Tab 在 Tier 间跳」等细化；② 索引目录可配置；③ 增强搜索纳入剪贴板条目（让搜索成唯一入口）；④ file/folder 收藏的非拖入入口；⑤ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑥ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
 
@@ -38,14 +39,19 @@
 - **提交**：`aa06635`（feat，含小缺陷修复）+ `643d29f`（chore 版本号 0.3.3→0.3.4，PATCH）。
 - **文件**：`src/App.tsx`（`openEnhCtxMenu`/`revealPath`/keydown blanket/hotkey-hide 复位/`.enh-result` onContextMenu）。
 
-### 续90（2026-07-08，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转站容量可配置 + 方格卡片间距对称修复
-- **需求 1**：中转站容量扩张，此前硬编码仅 20 个条目上限。
-- **实现**：`STAGE_MAX`（前端硬编码常量，Rust 侧无对应数组/上限）改为可配置——`STAGE_MAX_DEFAULT=20`+`STAGE_MAX_OPTIONS=[20,50,100,200]`；新增 `stageMax` state + `stageMaxRef`（供 `files-dropped` 一次性事件监听闭包读最新值，同 `clipCacheMaxRef` 惯例）；`changeStageMax` 持久化到 store（`"stage-max"`），无需 invoke 同步 Rust；缩小上限时用 `stage.slice(0,n)` 立即截断（保留较新的）。设置面板「中转站」新增「上限条数」`seg` 控件（20/50/100/200）。选 200 而非对齐剪贴板的 100 上限：中转 file 条目只存路径+小图标，比剪贴板可能内联的整张缩略图/全文轻得多，扩容成本更低。
-- **需求 2**：中转区最右边文件卡片到右边缘的缝隙大于最左边到左边缘，要求对称。
-- **根因**：`.stage-grid` 原用 `display:flex;flex-wrap:wrap`——flex-wrap 逐行独立左对齐，行尾剩余空间只堆在右侧。
-- **修复**：改用 CSS Grid（`grid-template-columns:repeat(auto-fill,80px)` + `justify-content:center`）——列数对整个网格只算一次并整体居中，剩余空间对称分给左右两侧；末行只有一张卡时仍按原列位靠左，不会被单独居中显得突兀。
-- **验证**：`npm run build`（含 tsc + 版本一致性检查）通过；FLIP 拖动重排逻辑（`getBoundingClientRect` 驱动，与 flex/grid 无关）确认不受影响。用户 GUI 实测两项均确认符合预期。
-- **提交**：`41e7eb9`（feat 容量可配置）+ `e7edb56`（fix 网格对称）+ `981aa88`（chore 版本号 0.3.1→0.3.2，PATCH）。
+### 续93（2026-07-09，src/App.tsx，用户已确认测试通过并提交）——启动器网格新增键盘导航（Start 菜单风）
+- **需求**：启动器（收藏托盘）加键盘操作——↑↓←→ 移动选中、Enter 打开，此前只有「顶栏搜索非空时 Enter 起动 filteredApps[0]」的兜底。
+- **实现**：新增 `launcherSelIdx` state（-1=未选中/焦点在搜索框）。keydown 处理器加 launcher 网格导航块：
+  - 未选中(idx<0)：仅 `↓` 进入网格（setIdx 0）；`←→↑` 不 preventDefault，留给搜索输入框做光标编辑（Start 菜单式：先打字过滤，↓ 才进结果）。
+  - 已选中(idx>=0)：`←→` ±1、`↑↓` ±cols 二维移动并 clamp；行首 `←`/首行 `↑` 退回搜索框（setIdx -1 + searchRef.focus）；`Enter` 打开选中项（复用 `openLauncherItem`，含放大动画，iconEl 取 `.app-tile.selected .app-tile-icon`）。
+  - **列数 `cols` 按 DOM 动态算**（`.app-tile` 首行同 `offsetTop` 计数），不硬编码——契合高 DPI/响应式铁律。
+- **兜底保留**：未进入网格(idx<0)时 Enter 仍走旧 `filteredApps[0]` 起动路径。
+- **Esc 分层链新增一段**：选中态(idx>=0)先解除选中+回搜索框、再关页（插在 stageSel 之后、settings 之前，用直接值非 ref——已随 idx 入 effect deps）。
+- **复用与零新增**：高亮复用既有 `.app-tile.selected`（CSS 行 91，与 :hover 同背景）→ **CSS 零新增**；两 effect——选中项 `scrollIntoView` + `visible`/`search` 变化复位 idx=-1（打字过滤即退出网格，语义自洽）。`.app-tile` className 加 `${i===launcherSelIdx?" selected":""}`。
+- **未碰最高危区**：呼出 set_focus 不动，纯 JS 键处理。effect deps 补 `filteredLauncher/launcherSelIdx/openLauncherItem`。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测 ↓进网格/四向移动/Enter起动+动画/搜索框内←→编辑不误入网格/首行↑·行首←·Esc 回搜索框 均确认通过。
+- **提交**：`822017f`（feat）+ `3825372`（chore 版本号 0.3.4→0.3.5，PATCH）。
+- **文件**：`src/App.tsx`（`launcherSelIdx` state / 两 effect / keydown 网格导航块 + Esc 一段 / `.app-tile` selected class）。
 
 ### 续91（2026-07-08，src/App.tsx + src/App.css，用户已确认测试通过并提交）——多选模式下卡片悬浮不再露出单条操作按钮
 - **需求**：中转区多选状态下，光标悬浮卡片时不应再弹出「复制/删除」等单条操作按钮（与批量操作栏语义打架，多选时不该再暴露单条操作入口）。
