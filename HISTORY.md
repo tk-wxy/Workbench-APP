@@ -9,6 +9,15 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续92（2026-07-09，src/App.tsx，用户已确认测试通过并提交，2026-07-09 续95 迁入）——增强搜索结果新增右键菜单
+- **需求**：增强搜索（Ctrl+K）条目加右键菜单，菜单项：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区。
+- **实现**：新增 `openEnhCtxMenu(e,r)`，`onContextMenu` 挂到 `.enh-result` div。复用现有 `ctxMenu` 基础设施（`openCtxMenu`/`CtxMenuItem`）+ 已有动作 handler（`activateEnh`/`writeItemToClipboard`/`reveal_in_explorer`/`addFsToLauncher`/`addFsToStage`/`addAppToLauncher`/`copyStageToClipboard`）——**零新增 Rust 命令 / 剪贴板路径 / i18n 词条**（全部复用已有翻译键）。抽了 `revealPath` 小 helper 去重。
+- **按 kind 取可用子集**：`fs` 全 5 项；`app` 无「加入中转区」（中转=文件转移语义，应用不适用），复制到剪贴板复制其 .lnk/.exe 路径；`stage`（enhTier1 已过滤恒 file 类型）无「加入中转区」（已在中转区）。stage 恒 file → `activateEnh` 的 `items[0].path` 恒有效，无崩溃风险。
+- **小缺陷修复（用户 GUI 反馈）**：右键菜单是纯鼠标浮层（无键盘交互），原本键盘/热键操作不关它、导致切页/关页后残留悬浮。补两处 `setCtxMenu(null)`：① keydown 处理器顶部 blanket 关闭（`ctxMenuRef.current && e.key!=="Escape"` → 关菜单但不 return，让按键照常执行，如 Ctrl+K 关菜单+切页一气呵成；Esc 走既有分层分支，第一次只关菜单）；② `hotkey-hide` 事件批量复位（全局热键 Ctrl+Space 关页被 Rust 消费、不经前端 keydown，只能在此事件清）。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测右键三类条目菜单 + Ctrl+Space/Ctrl+K/Esc/方向键关闭菜单均确认通过。
+- **提交**：`aa06635`（feat，含小缺陷修复）+ `643d29f`（chore 版本号 0.3.3→0.3.4，PATCH）。
+- **文件**：`src/App.tsx`（`openEnhCtxMenu`/`revealPath`/keydown blanket/hotkey-hide 复位/`.enh-result` onContextMenu）。
+
 ### 续91（2026-07-08，src/App.tsx + src/App.css，用户已确认测试通过并提交，2026-07-09 续94 迁入）——多选模式下卡片悬浮不再露出单条操作按钮
 - **需求**：中转区多选状态下，光标悬浮卡片时不应再弹出「复制/删除」等单条操作按钮（与批量操作栏语义打架，多选时不该再暴露单条操作入口）。
 - **实现**：`stage-grid`/`stage-list` 容器按 `stageMultiselect` 加条件 class `stage-multiselect`；CSS 新增 `.stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}` 与 list 布局对应的 `.clip-copy-btn/.clip-del-btn/.stage-open-btn` 规则，覆盖非多选态下已有的 `:hover{opacity:1}` 规则。未改任何 JS 逻辑/状态机，纯 CSS 门控。
