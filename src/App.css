@@ -150,12 +150,12 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card{position:relative;width:72px;min-width:72px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:9px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 0.12s,box-shadow 0.12s;}
 .stage-card:hover{border-color:var(--card-border-hover-c);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
-/* 缩略图区：固定 72×58 */
-.stage-card-thumb{width:72px;height:58px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
+/* 缩略图区：固定 72×62（续98：封面加高 4px，来自下方标签区/悬浮菜单等量收窄，卡片总高 94px 不变）*/
+.stage-card-thumb{width:72px;height:62px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
 /* 图片 cover：固定同尺寸，object-fit:cover 从顶部裁 */
-.stage-card-thumb img.cover{width:72px;height:58px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
+.stage-card-thumb img.cover{width:72px;height:62px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
 /* 文本预览：固定尺寸 + -webkit-line-clamp（有固定高时可靠）*/
-.stage-card-text-preview{width:72px;height:58px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
+.stage-card-text-preview{width:72px;height:62px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
 /* 文件图标容器：30×30 居中方块 */
 .stage-card-icon-wrap{width:30px;height:30px;border-radius:7px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 /* 类型指示点（thumb 右上角，相对 thumb position:relative 定位）*/
@@ -163,12 +163,12 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card-dot.type-file{background:#378ADD;}
 .stage-card-dot.type-text{background:#639922;}
 .stage-card-dot.type-image{background:#D4537E;}
-/* 标签区 */
-.stage-card-label{padding:3px 6px 5px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:0px;min-width:0;flex-shrink:0;}
+/* 标签区（续98：padding 3/5→2/2 收窄 4px，让给上方封面；两行文本内容不变，卡片总高 94px 不变）*/
+.stage-card-label{padding:2px 6px 2px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:0px;min-width:0;flex-shrink:0;}
 .stage-card-name{font-size:10px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
 .stage-card-meta{font-size:9px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
-/* 悬浮操作栏：只覆盖标签区（bottom:0，高度=标签区高度），不遮 thumb */
-.stage-card-actions{position:absolute;bottom:0;left:0;width:72px;height:34px;background:rgba(30,30,30,0.90);border-radius:0 0 9px 9px;display:flex;align-items:center;justify-content:center;gap:4px;opacity:0;transition:opacity 0.12s;pointer-events:none;}
+/* 悬浮操作栏：只覆盖标签区（bottom:0，高度≈标签区高度），不遮 thumb（续98：34→30px 随标签区收窄，观感更轻）*/
+.stage-card-actions{position:absolute;bottom:0;left:0;width:72px;height:30px;background:rgba(30,30,30,0.90);border-radius:0 0 9px 9px;display:flex;align-items:center;justify-content:center;gap:4px;opacity:0;transition:opacity 0.12s;pointer-events:none;}
 .stage-card:hover .stage-card-actions{opacity:1;pointer-events:auto;}
 /* 多选模式下卡片悬浮不露出单条操作按钮，避免与批量操作栏语义打架 */
 .stage-grid.stage-multiselect .stage-card:hover .stage-card-actions{opacity:0;pointer-events:none;}
