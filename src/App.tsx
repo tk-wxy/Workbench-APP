@@ -408,8 +408,7 @@ export default function App() {
             next = next.slice(0, stageMaxRef.current);
             setStage(next);
             if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
-            dropAreaRef.current?.classList.add("drop-flash");
-            setTimeout(() => dropAreaRef.current?.classList.remove("drop-flash"), 200);
+            // 续99d：中转区不再播落地闪烁（drop-flash）——卡片冒出即确认，且与缩略图生成窗口重合像闪 bug（染色确认根因）。启动台仍保留（走 .app-grid.drop-flash）。
           }
           setFileDragOver(false);
           // 拖入后回焦点，让 Esc 可用

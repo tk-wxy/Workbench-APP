@@ -230,8 +230,9 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 #overlay.dragging{user-select:none;-webkit-user-select:none;cursor:grabbing;}
 /* 中转区接收高亮 */
 .drop-area.drag-over{border:2px dashed var(--accent,#60a5fa);background:rgba(96,165,250,0.06);transition:background 0.1s;}
-/* OLE 拖入落地闪烁确认（200ms，两区共用） */
-.drop-area.drop-flash,.app-grid.drop-flash{animation:drop-flash 200ms ease-out;}
+/* OLE 拖入落地闪烁确认（200ms）——仅启动台保留（.app-grid）；中转区（.drop-area）已去掉：
+   卡片冒出即确认，且与缩略图生成同窗口重合会显得像闪 bug（续99d，染色测试确认 drop-flash 是唯一来源）*/
+.app-grid.drop-flash{animation:drop-flash 200ms ease-out;}
 @keyframes drop-flash{0%{background:rgba(0,120,212,0.18);}100%{background:transparent;}}
 /* 外部文件拖入窗口时：启动器和中转区双区悬停高亮（box-shadow 不破坏 overflow/layout） */
 .file-drag-active .app-panel{box-shadow:inset 0 0 0 2px var(--accent);background:rgba(96,165,250,0.05);transition:box-shadow 80ms,background 80ms;}
