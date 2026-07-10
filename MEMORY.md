@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-10（续96 前端重构+2 fix / 续97 多选拖出误删修复，均已确认测试通过并提交 `772b2ce`+版本 `99376a3`，见 §0）
+> **最后更新**：2026-07-10（续98 中转区底部快捷入口显示/隐藏开关 + 卡片封面加高，已确认测试通过并提交 `0115f9f`+版本 `e9aac82`，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续98（已提交 `0115f9f`+版本 `e9aac82`，用户已确认测试通过）**：设置→中转站新增「底部快捷入口」显示/隐藏开关（`showShortcuts` state + store key `show-shortcuts`，纯前端持久化）——关闭后中转区下方 `.shortcut-row` 不渲染、空间由 `.drop-area(flex:1)` 归还给中转区；附带中转卡片封面 58→62px（标签区/悬浮操作栏等量收窄，总高 94px 不变，不破坏续94 行节奏）。版本号 0.3.8→0.3.9（PATCH）。详见 §0A。
 - **续97（已提交 `772b2ce`，用户已确认测试通过）**：中转区**多选**拖出「区内小幅拖动后立刻松手却误删选中项」修复（**首版方案已回退**）。根因：落点落回**自身 overlay IDropTarget**，它对含 CF_HDROP 的拖入回传 copy → `drag-out-done` 误判成功投放而删（单项因先走区内重排、落回区内不起 OLE 故无症）。**首版**试图「多选也先进 pending 态、等离开 `.drop-area` 才起 OLE」——用户实测**多选拖到外部无法落地**（延迟起 OLE 破坏原生拖出），已完整回退。**改采落点结果侧修复**（不碰拖出起手时机）：`files-dropped` 内部落点置 `droppedOnSelfRef`，`drag-out-done` 命中则保留条目直接返回；依赖 `dragdrop.rs` Drop「emit files-dropped ⟺ 回传 copy」耦合 + 事件送达有序。纯前端，未碰 Rust/窗口/焦点/剪贴板。详见 §0A / CLAUDE 反查表。
 - **续96（已提交 `772b2ce`，用户已确认测试通过）**：前端可维护性重构 + 2 处小 bug 修复（应用户"前端优化"请求）。①剪贴板列表 `key={i}`→`key={c.time}`（prepend 列表用 index key 会让 React 错位复用，导致刚复制卡片的拖拽态/✓ 反馈串到别的卡）；②`.stage-card-actions` 悬浮操作栏暗色硬编码 `rgba(30,30,30,.9)` 在浅色主题突兀、按钮白字不可见——加 `[data-theme="light"]` 上书；③抽出 `src/lib/format.ts`（fmtSize/ago/extIcon/dirOf/IMG_EXTS）、`src/lib/fuzzy.ts`（fuzzyScore/typeKeywords/matchItem/MatchResult）、`src/icons.tsx`（IconCheck/Copy/Trash/Open/Pin/Search，替换 App.tsx 里重复 4~6 次的内联 SVG）——App.tsx 从 2141 行减到 ~2000 行，纯移动无行为变更。设置齿轮/文件夹 SVG（各 1 处）留在 App.tsx。**未碰窗口/焦点/热键/剪贴板最高危区**。验证：`npx tsc --noEmit` + `npm run build` 均零错误（41 modules）。剩余优化候选见文末「前端优化清单」。
 - **续95（已提交，用户已确认测试通过）**：两个独立 bug 修复——①中转区图片/截图点击后粘不进 cmd/Windows Terminal：控制台只认 CF_TEXT、不识别位图，是控制台能力边界非可修 bug，`set_clipboard_image` 新增第③分支退化为粘贴该图片落盘路径的文本（三分叉→四分叉）；②剪贴板历史里的截图/图片条目拖不进中转区：`.clip-image` 的 `<img>` 漏了 `draggable={false}`/`-webkit-user-drag:none`，WebView2 原生图片拖拽抢走指针序列，导致自定义拖拽逻辑从未激活（文本/文件条目无 `<img>` 不受影响），补齐后与 `stage-card`/`app-tile` 等既有图片元素一致。版本号 0.3.6→0.3.7（PATCH）。
@@ -33,6 +34,15 @@
 - **下一步候选（无阻塞）**：① 增强搜索结果的键盘导航已具备（↑↓/Enter），启动器键盘导航续93 已完成——可考虑「Ctrl+K 增强搜索也支持 ←→ 或 Tab 在 Tier 间跳」等细化；② 索引目录可配置；③ 增强搜索纳入剪贴板条目（让搜索成唯一入口）；④ file/folder 收藏的非拖入入口；⑤ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑥ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续98（2026-07-10，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转区底部快捷入口可显示/隐藏 + 卡片封面加高
+- **改动①（新功能，PATCH）**：设置→中转站新增「底部快捷入口」显示/隐藏开关。中转区下方那行「截屏 / 文件管理器 / 下载」等快捷按钮（`.shortcut-row`）现在可关闭。
+  - 实现：新增 state `showShortcuts`（默认 `true`）+ store key `show-shortcuts` 持久化（`changeShowShortcuts` 走既有 `store.set+save` idiom）；渲染处 `{showShortcuts && (<>…</>)}` 门控快捷入口行，关闭后本行不渲染，上方 `.drop-area(flex:1)` 自动铺满归还空间、中转区可见更多条目。
+  - 纯前端 store，无需 Rust 同步（同 `stagePersist`/`stageMax` 先例）；i18n 补「底部快捷入口」+ 说明文案中英。
+- **改动②（观感微调）**：中转卡片封面 `.stage-card-thumb` 58→62px（img.cover / text-preview 同步），标签区 `.stage-card-label` padding 3/5→2/2 等量收窄 4px、悬浮操作栏 `.stage-card-actions` 34→30px——**卡片总高 94px 不变**（不破坏续94 建立的 100px 行节奏对齐）。
+- **验证**：`npx tsc --noEmit` 零错误；开关是纯 CSS/渲染门控 + store 持久化，用户 GUI 实测确认通过。
+- **提交**：`0115f9f`（feat 续98）+ `e9aac82`（chore 版本号 0.3.8→0.3.9，PATCH）。
+- **文件**：`src/App.tsx`（showShortcuts state/loader/changeShowShortcuts/门控渲染/设置项）、`src/App.css`（卡片封面+标签区+操作栏尺寸）、`src/i18n.ts`（两条文案）。
 
 ### 续97（2026-07-10，src/App.tsx，用户已确认测试通过并提交）——中转区多选拖出「什么也不做却误删」修复（首版 pending 方案已回退）
 - **现象**（用户报）：中转站多选若干条目后，在区内小幅拖动再立刻松手（并未拖到任何外部目标），被选中项也被删除；单个条目拖动无此问题。持久化关闭时的预期是「成功拖到外部落地后才消失」。
@@ -55,14 +65,6 @@
   - App.tsx 减到 ~2000 行；`getFileIcon`（依赖 ClipItem 类型）、`HighlightText`（JSX 小组件）留在 App。`MatchResult` 在 App 未再直接用，已从 import 去掉（避 `noUnusedLocals`）。
 - **验证**：`npx tsc --noEmit` 零错误；`npm run build` 通过（version-check 一致 + 41 modules transformed，较重构前 +3 文件）。纯移动/替换无行为变更；拖拽/主题交互链路无法模拟输入，用户 `npm run tauri dev` GUI 确认通过。
 - **提交**：与续97 合并为 `772b2ce`（refactor 前端重构+3 修复）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。因 App.tsx 同时含续96/续97 改动、无法按文件切分，两会话代码合并为一个 commit。
-
-### 续95（2026-07-09，src-tauri/src/clipboard.rs + src/App.tsx + src/App.css，用户已确认测试通过并提交）——cmd 图片粘贴路径回退 + 剪贴板截图拖拽修复
-- **bug①：中转区图片/截图点击后粘不进 cmd/Windows Terminal**。排查 `set_clipboard_image`（`clipboard.rs:710`）确认：目标窗口走三分叉里的分支③（其余 app，写 CF_DIB 位图），而控制台（conhost/Windows Terminal）粘贴只解析 CF_TEXT，位图对它没有任何可解释含义——脱离本应用手动复制图片到 cmd 按 Ctrl+V 同样无反应，是控制台能力边界不是本应用 bug。
-  - **方案**（用户选择"实现路径回退"而非"仅说明限制"）：新增判断 `class1=="ConsoleWindowClass"||"CASCADIA_HOSTING_WINDOW_CLASS"` 的分支，退化为把该图片落盘路径（大图复用已有 `orig_path`，小图现解码落一份 PNG 到 `clip_images/`）当**文本**写回剪贴板 + Ctrl+V，给出可用结果而非静默无反应。原三分叉→四分叉，`CLAUDE.md` 对应铁律描述与反查表已同步更新。
-- **bug②：剪贴板历史里的截图/图片条目拖不进中转区**（其他类型条目可以正常拖）。根因：`.clip-image`（`App.tsx:1792`）的 `<img>` 漏了 `draggable={false}`，CSS 也没有 `-webkit-user-drag:none`——WebView2 原生图片拖拽会抢走指针序列，导致 `handleClipPointerDown/Move/Up` 这套自定义"按下→移动超阈值→落中转区"拖拽逻辑从未激活；文本/文件条目渲染的是纯文本/图标 span，无 `<img>` 元素，故不受影响。这正是 `CLAUDE.md` 死胡同表已记录过的坑（WebView2 原生 `<img>` 拖拽抢手势），本次是漏了 `.clip-image` 这一处没打补丁。补齐 `draggable={false}` + CSS `-webkit-user-drag:none;user-select:none`，与 `stage-card`/`app-tile` 等既有图片元素做法一致。
-- **验证**：`cargo check --lib`（bug①）、`npx tsc --noEmit`（bug②）均零警告零错误；两个 bug 均为真实交互链路（cmd 粘贴 / 跨面板拖拽），无法模拟输入验证，用户分别在 `npm run tauri dev` 中 GUI 实测确认通过。
-- **提交**：`ff0bea6`（fix cmd 路径回退）+ `eeff496`（fix 截图拖拽）+ `687fffc`（chore 版本号 0.3.6→0.3.7，PATCH）。
-- **文件**：`src-tauri/src/clipboard.rs`（`set_clipboard_image` 新增控制台分支）、`src/App.tsx`（`.clip-image` 加 `draggable={false}`）、`src/App.css`（`.clip-image` 加 `-webkit-user-drag:none;user-select:none`）、`CLAUDE.md`（四分叉描述 + 反查表新增一行）。
 
 ---
 
