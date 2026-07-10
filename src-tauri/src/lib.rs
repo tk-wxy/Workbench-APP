@@ -580,6 +580,7 @@ pub fn run() {
             // 剪贴板子系统初始化（路径→load→monitor→janitor 时序封装在 clipboard::init 内）
             let data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
             clipboard::init(app.handle(), &data_dir);
+            apps::init_thumb_cache(&data_dir); // 中转区图片缩略图落盘缓存（续99c：重启秒开）
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             everything::init(app.handle()); // 可选 Everything：登记资源目录供加载 SDK DLL
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞

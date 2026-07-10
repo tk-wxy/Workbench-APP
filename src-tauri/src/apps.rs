@@ -4,6 +4,14 @@ use std::sync::{Mutex, OnceLock};
 
 static APP_CACHE: OnceLock<Mutex<Option<Vec<AppInfo>>>> = OnceLock::new();
 
+// ── 中转区图片缩略图落盘缓存（续99c：重启秒开）──
+/// 缓存目录（app_data/stage_thumbs），setup 时 init_thumb_cache 设定；未设定时降级为纯内存生成（不落盘）。
+static STAGE_THUMB_DIR: OnceLock<PathBuf> = OnceLock::new();
+const STAGE_THUMB_MAX_DIM: u32 = 160; // 卡片显示 72px，@2x DPI ≈ 144，取 160 留余量
+const STAGE_THUMB_CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 缓存目录总量上限 50MB，超出从最旧删
+const STAGE_THUMB_SWEEP_INITIAL_MS: u64 = 8_000;   // 起手延迟错开 setup
+const STAGE_THUMB_SWEEP_MS: u64 = 30 * 60 * 1000;  // 之后每 30 分钟 sweep 一次
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AppInfo {
     pub name: String,
@@ -431,24 +439,92 @@ fn base64_encode(data: &[u8]) -> String {
     r
 }
 
-// ── 中转区图片缩略图（续99b：解内存/卡顿）──────────
+// ── 中转区图片缩略图（续99b：解内存/卡顿；续99c：落盘缓存重启秒开）──────────
 /// 为中转区的图片文件生成小缩略图（base64 PNG data URL）。
 /// 背景：前端若用 asset 协议直接 `<img src=原图>`，WebView 会把每张原图全分辨率解码位图常驻内存
 /// （一张 4000×3000 ≈ 48MB），图一多即卡顿 + 内存暴涨。改由此命令在 Rust 侧解码→缩到 ~160px→释放原图，
 /// 前端只拿几 KB base64。解码是本次调用内的瞬时开销（返回后 DynamicImage 立即析构），非常驻。
-/// 失败（文件不存在/非图片/解码错误）返回 Err，前端回退 emoji 兜底。
+///
+/// 续99c 落盘缓存：缓存键 = crc32(路径) + 文件 mtime（源文件被改则键变、自动失效重建）。命中缓存
+/// 直接读小 PNG（**零解码原图**）→ 重启后前端逐张 invoke 也只是读几十 KB 小文件，秒开；未命中才解码。
+/// 缓存目录未初始化（降级）时退化为纯内存生成、不落盘。失败（文件不存在/非图片/解码错误）返回 Err，
+/// 前端回退 emoji 兜底。总量上限由 sweep_stage_thumb_cache 后台管，写路径本身不做清理（同 clip janitor 解耦思路）。
 #[tauri::command]
 pub fn get_stage_thumbnail(path: String) -> Result<String, String> {
-    const THUMB_MAX: u32 = 160; // 卡片显示 72px，@2x DPI ≈ 144，取 160 留余量
+    // 源文件 mtime（秒）：作为缓存键一部分，源图被改后旧缓存自动失效
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cache_file = STAGE_THUMB_DIR.get().map(|dir| {
+        let hash = crc32(b"THMB", path.as_bytes());
+        dir.join(format!("{:08x}_{}.png", hash, mtime))
+    });
+    // ① 命中磁盘缓存：直接读小 PNG，零解码
+    if let Some(cf) = &cache_file {
+        if let Ok(bytes) = std::fs::read(cf) {
+            return Ok(format!("data:image/png;base64,{}", base64_encode(&bytes)));
+        }
+    }
+    // ② 未命中：解码原图 → 缩略（保持宽高比、仅缩不放）→ PNG
     let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {}", e))?;
     let img = image::load_from_memory(&bytes).map_err(|e| format!("解码失败: {}", e))?;
-    // thumbnail 保持宽高比、仅缩不放；小图原样返回
-    let thumb = img.thumbnail(THUMB_MAX, THUMB_MAX);
+    let thumb = img.thumbnail(STAGE_THUMB_MAX_DIM, STAGE_THUMB_MAX_DIM);
     let mut png = std::io::Cursor::new(Vec::new());
     thumb
         .write_to(&mut png, image::ImageFormat::Png)
         .map_err(|e| format!("编码失败: {}", e))?;
-    Ok(format!("data:image/png;base64,{}", base64_encode(&png.into_inner())))
+    let png_bytes = png.into_inner();
+    // ③ 写盘缓存（best-effort：失败仅少一次缓存、不影响本次返回）
+    if let Some(cf) = &cache_file {
+        let _ = std::fs::write(cf, &png_bytes);
+    }
+    Ok(format!("data:image/png;base64,{}", base64_encode(&png_bytes)))
+}
+
+/// 初始化缩略图落盘缓存：建目录 + 起后台 sweep 线程。setup 时调用一次。
+pub(crate) fn init_thumb_cache(data_dir: &std::path::Path) {
+    let dir = data_dir.join("stage_thumbs");
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = STAGE_THUMB_DIR.set(dir);
+    // 后台 janitor（仿 clip_images 解耦 sweep）：起手延迟错开 setup，之后周期封顶
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(STAGE_THUMB_SWEEP_INITIAL_MS));
+        loop {
+            sweep_stage_thumb_cache();
+            std::thread::sleep(std::time::Duration::from_millis(STAGE_THUMB_SWEEP_MS));
+        }
+    });
+}
+
+/// 缩略图缓存总量封顶：超 STAGE_THUMB_CACHE_MAX_BYTES 时从最旧（mtime 升序）删到 ≤ 上限。
+/// 与 clip 缓存不同：缩略图无 Rust 侧「被引用集」（stage 是前端状态），故不做孤儿清理，纯按容量+时间淘汰
+/// （被删的下次呼出会按需重建，非数据丢失）。全程 best-effort，任何 fs 错误跳过、绝不 panic。
+fn sweep_stage_thumb_cache() {
+    let Some(dir) = STAGE_THUMB_DIR.get() else { return; };
+    if !dir.exists() { return; }
+    let Ok(entries) = std::fs::read_dir(dir) else { return; };
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() { continue; }
+        let Ok(meta) = entry.metadata() else { continue; };
+        let size = meta.len();
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        total += size;
+        files.push((p, size, mtime));
+    }
+    if total <= STAGE_THUMB_CACHE_MAX_BYTES { return; }
+    files.sort_by_key(|(_, _, t)| *t); // 升序：最旧先删
+    let mut remaining = total;
+    for (p, size, _) in &files {
+        if remaining <= STAGE_THUMB_CACHE_MAX_BYTES { break; }
+        if std::fs::remove_file(p).is_ok() { remaining = remaining.saturating_sub(*size); }
+    }
+    eprintln!("[thumb_sweep] 总量封顶：{total} → {remaining} bytes（上限 {STAGE_THUMB_CACHE_MAX_BYTES}）");
 }
 
 // ── 应用启动（ShellExecuteW，支持 .lnk 和 .exe）──────────
