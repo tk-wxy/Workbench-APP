@@ -1,7 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-type TFunc = ReturnType<typeof makeT>;
+import { IMG_EXTS, fmtSize, ago, extIcon, dirOf } from "./lib/format";
+import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
+import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch } from "./icons";
 
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
@@ -38,8 +40,6 @@ interface LauncherItem {
 const LAUNCHER_MAX = 60;
 const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
-function fmtSize(b: number) { if (!b) return "0 B"; const u = ["B","KB","MB","GB"]; const i = Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/1024**i).toFixed(i?1:0)} ${u[i]}`; }
-function ago(ms: number, t: TFunc) { const s = Math.floor((Date.now()-ms)/1000); if (s<60) return t("刚刚"); if (s<3600) return t("{n}分钟前", {n: Math.floor(s/60)}); return t("{n}小时前", {n: Math.floor(s/3600)}); }
 
 // ── 应用使用打分：频率为主 × 近期乘数（频率高且近期用过的排前）──
 // score = count × 0.5^(距上次使用 / 半衰期)。30 天没用，权重掉一半。要调"近期"敏感度改这个常量。
@@ -52,7 +52,6 @@ function usageScore(u: AppUsage | undefined, nowS: number): number {
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
 
 // ── 文件中转：转换 + 写剪贴板助手 ──
-const IMG_EXTS = ["jpg","jpeg","png","gif","bmp","webp","svg","ico"];
 const stageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // 稳定唯一 id（key/去重）
 function fileEntryToStage(f: FileEntry): StageItem {
   const isImage = IMG_EXTS.includes(f.ext.toLowerCase());
@@ -67,49 +66,6 @@ async function writeItemToClipboard(item: Pasteable) {
   if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
   else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
   else await invoke("copy_image_to_clipboard", { base64: item.content, origPath: item.orig_path ?? null });
-}
-
-// ── 模糊搜索：子序列打分器（统一解决模糊 + 缩写）──
-interface MatchResult { score: number; ranges: [number, number][]; } // ranges 基于 target 原始字符串
-function fuzzyScore(query: string, target: string): MatchResult {
-  if (!query) return { score: 0, ranges: [] };
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-
-  // 完全子串：最高分直接返回（前缀额外加分）
-  const exactIdx = t.indexOf(q);
-  if (exactIdx !== -1) return { score: 100 + (exactIdx === 0 ? 20 : 0), ranges: [[exactIdx, exactIdx + q.length - 1]] };
-
-  // 子序列匹配：query 字符按序出现在 target（不要求连续）
-  let qi = 0;
-  const idxs: number[] = [];
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) { idxs.push(ti); qi++; }
-  }
-  if (qi < q.length) return { score: 0, ranges: [] }; // 子序列不成立
-
-  // 打分：词首 / 连续 / 靠前 加分（缩写匹配靠词首加分自然涌现）
-  let score = 10;
-  let consecutive = 0;
-  for (let i = 0; i < idxs.length; i++) {
-    const idx = idxs[i];
-    const prev = idx > 0 ? target[idx - 1] : null;
-    const isWordStart = idx === 0 || prev === " " || prev === "_" || prev === "-"
-      || (target[idx] === target[idx].toUpperCase() && prev !== null && prev === prev.toLowerCase() && prev !== " ");
-    if (isWordStart) score += 8;
-    if (i > 0 && idxs[i] === idxs[i - 1] + 1) { consecutive++; score += 3 + consecutive; } else { consecutive = 0; }
-    score += Math.max(0, 5 - Math.floor(idx / 5));
-  }
-
-  // 压缩为连续区间，供高亮
-  const ranges: [number, number][] = [];
-  let start = idxs[0], end = idxs[0];
-  for (let i = 1; i < idxs.length; i++) {
-    if (idxs[i] === end + 1) end = idxs[i];
-    else { ranges.push([start, end]); start = end = idxs[i]; }
-  }
-  ranges.push([start, end]);
-  return { score, ranges };
 }
 
 // 高亮命中字符（色用 --accent 兜底，贴合主题系统）
@@ -158,26 +114,6 @@ const LAUNCH_ANIM_MS = 200;
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 interface LaunchAnim { icon: string | null; name: string; iconText?: string; rect: { top: number; left: number; width: number; height: number }; }
 
-// 按扩展名映射文件类型图标（搜索结果 + 剪贴板卡片共用，单一真相源）。
-function extIcon(ext: string): string {
-  const e = ext.toLowerCase().replace(/^\./, "");
-  if (["png","jpg","jpeg","gif","webp","bmp","svg","ico","tif","tiff","heic","heif","avif","psd"].includes(e)) return "🖼️";
-  if (["mp4","mkv","avi","mov","wmv","flv","webm","m4v","mpeg","mpg","ts","3gp"].includes(e)) return "🎬";
-  if (["mp3","wav","flac","ogg","aac","m4a","wma","opus","aiff","mid"].includes(e)) return "🎵";
-  if (["zip","rar","7z","tar","gz","bz2","xz","zst","tgz"].includes(e)) return "🗜️";
-  if (e === "pdf") return "📕";
-  if (["doc","docx","odt","rtf","pages"].includes(e)) return "📝";
-  if (["xls","xlsx","csv","ods","tsv"].includes(e)) return "📊";
-  if (["ppt","pptx","odp","key"].includes(e)) return "📽️";
-  if (["epub","mobi","azw","azw3","fb2"].includes(e)) return "📚";
-  if (["iso","img","dmg","vhd","vhdx"].includes(e)) return "💿";
-  if (["ttf","otf","woff","woff2","fon"].includes(e)) return "🔤";
-  if (["js","mjs","cjs","ts","jsx","tsx","py","rs","go","cpp","cc","cxx","c","h","hpp","java","cs","php","rb","swift","kt","scala","html","htm","css","scss","sass","less","vue","json","yaml","yml","xml","toml","sql","lua","r","dart"].includes(e)) return "💻";
-  if (["exe","msi","bat","cmd","ps1","sh","appx","apk","deb","rpm"].includes(e)) return "⚙️";
-  if (["txt","md","markdown","log","ini","cfg","conf","env","properties"].includes(e)) return "📃";
-  return "📎";
-}
-
 function getFileIcon(item: ClipItem): string {
   const items = item.items ?? [];
   if (items.length > 1) return "📦";
@@ -186,39 +122,6 @@ function getFileIcon(item: ClipItem): string {
   if (first.isImage) return "🖼️"; // 剪贴板图片（可能无扩展名）
   const ext = first.ext || first.path.split(".").pop() || "";
   return extIcon(ext);
-}
-
-// 从绝对路径提取父目录（用于搜索结果目录串展示）
-const dirOf = (p: string) => { const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")); return i > 0 ? p.slice(0, i) : p; };
-
-// 给条目算"类型词"，让"图片/文本/txt/pdf"等查询能命中对应类型条目（与名称/内容搜索并存）
-function typeKeywords(opts: { type: "text" | "image" | "file"; ext?: string; isImage?: boolean }): string[] {
-  const { type, ext, isImage } = opts;
-  if (type === "text") return ["文本", "text", "txt"];
-  if (type === "image") return ["图片", "image", "img", "png", "jpg"];
-  // file：按扩展名归类
-  const e = (ext || "").toLowerCase();
-  const kw = ["文件", "file"];
-  if (isImage || ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico"].includes(e)) kw.push("图片", "image", e);
-  else if (["mp4", "mkv", "avi", "mov", "wmv"].includes(e)) kw.push("视频", "video", e);
-  else if (["mp3", "wav", "flac", "ogg", "aac", "m4a"].includes(e)) kw.push("音频", "audio", e);
-  else if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz"].includes(e)) kw.push("压缩", "archive", e);
-  else if (e === "pdf") kw.push("pdf", "文档");
-  else if (["doc", "docx", "odt"].includes(e)) kw.push("文档", "word", e);
-  else if (["xls", "xlsx", "csv"].includes(e)) kw.push("表格", "excel", e);
-  else if (["ppt", "pptx"].includes(e)) kw.push("幻灯片", "ppt", e);
-  else if (["js", "ts", "jsx", "tsx", "py", "rs", "go", "cpp", "c", "h", "java", "cs", "html", "css", "json", "yaml", "yml", "xml", "toml"].includes(e)) kw.push("代码", "code", e);
-  else if (["exe", "msi", "bat", "cmd", "ps1", "sh"].includes(e)) kw.push("程序", "exe", e);
-  else if (["txt", "md", "log", "ini", "cfg", "conf"].includes(e)) kw.push("文本", "txt", e);
-  else if (e) kw.push(e);
-  return kw;
-}
-// 通用命中判断：名称/内容优先（子序列模糊），叠加类型词（子串即可）。任一命中即保留。
-function matchItem(query: string, name: string, keywords: string[]): boolean {
-  const q = query.trim().toLowerCase();
-  if (!q) return true;
-  if (fuzzyScore(q, name).score > 0) return true;        // 名称/内容（子序列模糊）
-  return keywords.some(k => k.toLowerCase().includes(q)); // 类型词（子串即可，"图片""txt"好命中）
 }
 
 // ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
@@ -339,6 +242,8 @@ export default function App() {
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
   // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
   const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
+  // 续97：本次 OLE 拖出的落点其实落回自身 overlay（内部拖，非真正投放到外部）→ files-dropped 置位、drag-out-done 据此不删条目。
+  const droppedOnSelfRef = useRef(false);
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
   // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动、光标仍在 .drop-area 内时走此逻辑；
   // 光标离开区域边界 → 升级为原生 OLE 拖出（沿用既有 start_drag_out 链路，见 beginNativeDragOut）。
@@ -455,7 +360,9 @@ export default function App() {
           const cssY = payload.y / window.devicePixelRatio;
           const launcherRect = launcherDropRef.current?.getBoundingClientRect();
           const inLauncher = !!launcherRect && cssX >= launcherRect.left && cssX <= launcherRect.right && cssY >= launcherRect.top && cssY <= launcherRect.bottom;
-          if (internalDrag && !inLauncher) { setFileDragOver(false); return; }
+          // 续97：内部拖出落回自身 overlay（非启动台）——即"拖了一下又落回本窗口"，属未真正投放到外部。
+          // 标记之，供随后到达的 drag-out-done 跳过删除（OS 仍会回传 copy，否则会误判成功投放而删条目）。
+          if (internalDrag && !inLauncher) { droppedOnSelfRef.current = true; setFileDragOver(false); return; }
           const { invoke } = await import("@tauri-apps/api/core");
           if (inLauncher) {
             // 落点在启动器：.lnk → resolve_lnk → kind:"app"；其余 → get_file_info → file/folder
@@ -523,7 +430,17 @@ export default function App() {
         // 移除仍严格挂在 Rust 回传的「非 none」（已确认成功投放）之后，只是多加一道门。
         const un9 = await listen<string>("drag-out-done", async (event) => {
           const dr = dragOutRef.current;
-          console.log("[stage-drag] drag-out-done effect=", event.payload, "draggedIds=", dr.draggedIds); // 续88 诊断
+          console.log("[stage-drag] drag-out-done effect=", event.payload, "draggedIds=", dr.draggedIds, "onSelf=", droppedOnSelfRef.current); // 续88/续97 诊断
+          // 续97：本次 OLE 落点落回自身 overlay（files-dropped 已置位 droppedOnSelfRef）——非真正外部投放。
+          // OS 仍回传 copy（overlay 自身 IDropTarget 接受），但不应删条目/清选区。命中则保留一切、直接返回。
+          // 这正是"多选拖动后什么也没做（区内小幅拖动+立刻松手，落回本窗口）却误删选中项"的根因（单项因先走区内重排、
+          // 落回区内只是重排不起 OLE，故无此症）。真正拖到外部落地时不经此分支（落点非本窗口→无 files-dropped 自标记）。
+          if (droppedOnSelfRef.current) {
+            droppedOnSelfRef.current = false;
+            dr.draggedIds = [];
+            console.log("[stage-drag] 落回自身 overlay → 视为未投放，保留条目与选区");
+            return;
+          }
           const dropped = event.payload === "move" || event.payload === "copy"; // 真正投放成功；取消/none 一律不算
           // 续72：单个 text 条目拖出且 effect==="copy" 时，回退 copyAndPaste（写剪贴板 + 焦点交还 + Ctrl+V），等同点击取走。
           // 判定依据（别改成「无论 effect 一律回退」，会双粘）：会原生插入文本的目标（Word/写字板）返回 move →
@@ -1070,6 +987,7 @@ export default function App() {
     console.log("[stage-drag] → native drag-out", ids, "forceHide=", forceHide); // 续88 诊断
     dr.mode = "native";
     dr.draggedIds = ids;
+    droppedOnSelfRef.current = false; // 续97：每次拖出重置「落回自身」标记，等 files-dropped 内部落点再置位
     const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
       type: s.type,
       content: s.content ?? null,
@@ -1598,7 +1516,7 @@ export default function App() {
         <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
         <div className="top-center">
           <div className="global-search">
-            <svg className="search-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <IconSearch size={16}/>
             <input ref={searchRef} className="search-field" placeholder={t("搜索应用、中转、剪贴板…")} value={search}
               onChange={e=>{
                 const v=e.target.value;
@@ -1732,11 +1650,9 @@ export default function App() {
                     {/* ── 悬浮操作栏：左键本体已=取走粘贴，故悬浮栏统一留「复制到剪贴板 + 删除」两键（所有类型一致）── */}
                     <div className="stage-card-actions">
                       <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?t("已复制"):t("复制到剪贴板")}>
-                        {copiedStageId===s.id
-                          ?<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                          :<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                        {copiedStageId===s.id ? <IconCheck/> : <IconCopy/>}
                       </button>
-                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("删除")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("删除")}><IconTrash/></button>
                     </div>
                   </div>
                 );})}</div>
@@ -1753,12 +1669,10 @@ export default function App() {
                     {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
                     <div className="stage-actions">
                       <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?t("已复制"):t("复制到剪贴板")}>
-                        {copiedStageId===s.id
-                          ?<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                          :<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                        {copiedStageId===s.id ? <IconCheck/> : <IconCopy/>}
                       </button>
-                      {s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title={t("打开")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>}
-                      <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("移除")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                      {s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title={t("打开")}><IconOpen/></button>}
+                      <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("移除")}><IconTrash/></button>
                     </div>
                   </div>);
                 })}</div>
@@ -1775,19 +1689,17 @@ export default function App() {
         <section className="clip-panel">
           <div className="section-label">{t("剪贴板历史")}</div>
           <div className="clip-list">
-            {filteredClip.length? filteredClip.map((c,i)=>(
-              <div key={i} className="clip-block"
+            {filteredClip.length? filteredClip.map((c)=>(
+              <div key={c.time} className="clip-block"
                 onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
                 onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp} onPointerCancel={handleClipPointerUp}
                 onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?t("单击左键粘贴"):c.type==="file"?t("单击左键粘贴文件"):t("单击左键复制")}>
                 <div className="clip-actions">
-                  <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14l-2-4V7a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v6z"/></svg></button>
+                  <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin/></button>
                   <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?t("已复制"):t("复制到剪贴板")}>
-                    {copiedTime===c.time
-                      ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                      : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>}
+                    {copiedTime===c.time ? <IconCheck/> : <IconCopy/>}
                   </button>
-                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg></button>
+                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><IconTrash/></button>
                 </div>
                 {c.type==="image"? <img className="clip-image" src={c.content} alt="" draggable={false}/>
                 : c.type==="file"? <div className="file-clip-preview">
@@ -1804,7 +1716,7 @@ export default function App() {
       {/* ── 增强搜索层（始终挂载，靠 class 切换显隐，沿用 overlay-visible/hidden 模式避免卸载闪烁）── */}
       <div className={`enh-layer${enhOpen?" enh-open":""}${enhPinned?" enh-pinned":""}`}>
         <div className="enh-search-box">
-          <svg className="search-icon-svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <IconSearch size={18}/>
           <input ref={enhInputRef} className="enh-search-input" placeholder={t("搜索应用、中转文件…")}
             value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
           <span className="enh-hint">{searchDefaultMode==="enhanced"&&<><kbd>{comboLabel(enhHotkey)}</kbd> {t("界面搜索")} · </>}<kbd>Esc</kbd> {t("关闭")}</span>
@@ -1858,7 +1770,7 @@ export default function App() {
               <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}>×</button>
             </div>
             <div className="picker-search">
-              <svg className="search-icon-svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <IconSearch size={16}/>
               <input ref={pickerInputRef} className="picker-search-input" autoFocus placeholder={t("搜索要添加的应用…")} value={pickerQuery} onChange={e=>setPickerQuery(e.target.value)} spellCheck={false}/>
             </div>
             <div className="picker-list">
