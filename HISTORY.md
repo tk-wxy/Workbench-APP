@@ -9,6 +9,18 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续96（2026-07-10，src/App.tsx + src/App.css + 新增 src/lib/format.ts·src/lib/fuzzy.ts·src/icons.tsx，用户已确认测试通过并提交，2026-07-10 续99 迁入）——前端可维护性重构 + 2 处小 bug 修复
+- **触发**：用户问「前端/界面有什么值得优化」，静态审查后按「先修 2 个实害 → 再抽纯函数+SVG」的优先级推进（未动最高危区）。
+- **bug①（实害）**：剪贴板历史列表 `filteredClip.map((c,i)=><div key={i}>`（`App.tsx`）。新复制项 **prepend 到头部**，用 index 做 key 会让 React 错位复用 DOM——每个 clip-block 挂着 pointer 拖拽 handler + `copiedTime` ✓ 反馈 + 图片 src，可能导致复制后拖拽态/✓ 串到相邻卡。改 `key={c.time}`（`time` 本就是删除/✓ 判定的 identity，唯一）。
+- **bug②（主题漏配）**：`.stage-card-actions`（方格卡片悬浮操作栏）底色硬编码 `rgba(30,30,30,0.90)`，`.stage-card-act-btn` 白字——浅色主题下黑帯突兀 + 图标不可见。加 `[data-theme="light"]` 上书：操作栏改 `rgba(245,245,247,.94)`、按钮 `rgba(0,0,0,.08)` + `color:var(--text)`（SVG 走 currentColor 自动变深）。
+- **重构③（抽文件降 monolith）**：App.tsx 曾 2141 行单文件单组件。抽出——
+  - `src/lib/format.ts`：`IMG_EXTS`/`fmtSize`/`ago`（带 TFunc）/`extIcon`/`dirOf`，React 无依赖纯函数。
+  - `src/lib/fuzzy.ts`：`MatchResult`/`fuzzyScore`/`typeKeywords`/`matchItem`，模糊搜索纯函数。
+  - `src/icons.tsx`：`IconCheck/IconCopy/IconTrash/IconOpen/IconPin/IconSearch`——替换 App.tsx 里各重复 4~6 次的内联 12/16/18px SVG（copy/check 三元、trash ×3、search ×3 等）；全部 `stroke="currentColor"` 保持原色继承。设置齿轮 + 文件夹 SVG（各 1 处、个例）保留在 App.tsx（剩 2 个 `<svg>`）。
+  - App.tsx 减到 ~2000 行；`getFileIcon`（依赖 ClipItem 类型）、`HighlightText`（JSX 小组件）留在 App。`MatchResult` 在 App 未再直接用，已从 import 去掉（避 `noUnusedLocals`）。
+- **验证**：`npx tsc --noEmit` 零错误；`npm run build` 通过（version-check 一致 + 41 modules transformed，较重构前 +3 文件）。纯移动/替换无行为变更；拖拽/主题交互链路无法模拟输入，用户 `npm run tauri dev` GUI 确认通过。
+- **提交**：与续97 合并为 `772b2ce`（refactor 前端重构+3 修复）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。因 App.tsx 同时含续96/续97 改动、无法按文件切分，两会话代码合并为一个 commit。
+
 ### 续95（2026-07-09，src-tauri/src/clipboard.rs + src/App.tsx + src/App.css，用户已确认测试通过并提交，2026-07-10 续98 迁入）——cmd 图片粘贴路径回退 + 剪贴板截图拖拽修复
 - **bug①：中转区图片/截图点击后粘不进 cmd/Windows Terminal**。排查 `set_clipboard_image`（`clipboard.rs:710`）确认：目标窗口走三分叉里的分支③（其余 app，写 CF_DIB 位图），而控制台（conhost/Windows Terminal）粘贴只解析 CF_TEXT，位图对它没有任何可解释含义——脱离本应用手动复制图片到 cmd 按 Ctrl+V 同样无反应，是控制台能力边界不是本应用 bug。
   - **方案**（用户选择"实现路径回退"而非"仅说明限制"）：新增判断 `class1=="ConsoleWindowClass"||"CASCADIA_HOSTING_WINDOW_CLASS"` 的分支，退化为把该图片落盘路径（大图复用已有 `orig_path`，小图现解码落一份 PNG 到 `clip_images/`）当**文本**写回剪贴板 + Ctrl+V，给出可用结果而非静默无反应。原三分叉→四分叉，`CLAUDE.md` 对应铁律描述与反查表已同步更新。
