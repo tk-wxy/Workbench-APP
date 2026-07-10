@@ -431,6 +431,26 @@ fn base64_encode(data: &[u8]) -> String {
     r
 }
 
+// ── 中转区图片缩略图（续99b：解内存/卡顿）──────────
+/// 为中转区的图片文件生成小缩略图（base64 PNG data URL）。
+/// 背景：前端若用 asset 协议直接 `<img src=原图>`，WebView 会把每张原图全分辨率解码位图常驻内存
+/// （一张 4000×3000 ≈ 48MB），图一多即卡顿 + 内存暴涨。改由此命令在 Rust 侧解码→缩到 ~160px→释放原图，
+/// 前端只拿几 KB base64。解码是本次调用内的瞬时开销（返回后 DynamicImage 立即析构），非常驻。
+/// 失败（文件不存在/非图片/解码错误）返回 Err，前端回退 emoji 兜底。
+#[tauri::command]
+pub fn get_stage_thumbnail(path: String) -> Result<String, String> {
+    const THUMB_MAX: u32 = 160; // 卡片显示 72px，@2x DPI ≈ 144，取 160 留余量
+    let bytes = std::fs::read(&path).map_err(|e| format!("读取失败: {}", e))?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解码失败: {}", e))?;
+    // thumbnail 保持宽高比、仅缩不放；小图原样返回
+    let thumb = img.thumbnail(THUMB_MAX, THUMB_MAX);
+    let mut png = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| format!("编码失败: {}", e))?;
+    Ok(format!("data:image/png;base64,{}", base64_encode(&png.into_inner())))
+}
+
 // ── 应用启动（ShellExecuteW，支持 .lnk 和 .exe）──────────
 
 #[tauri::command]
