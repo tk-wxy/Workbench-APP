@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-10（续99c 缩略图落盘缓存重启秒开 + 续99d 去中转区落地闪烁 drop-flash；均已确认测试通过，见 §0/§0A）
+> **最后更新**：2026-07-10（续99e 列表视图补齐图片缩略图 + 固定开关，与方格视图一致；已确认测试通过，见 §0/§0A）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -18,6 +18,7 @@
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）+ **单条「固定」豁免**（卡片右上点点，续99），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；中转卡片**图片文件显示缩略图**（Rust 侧生成小图，续99b）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
 - **续99（已提交，用户已确认测试通过）**：中转区界面优化 4 项 + 缩略图内存优化。①封面图标放大（icon-wrap 30→40px 等）；②图片文件显示真缩略图；③标题行变矮（`.stage-section-header` padding 12/6→6/4，启动器+中转站共用）；④右上点点从纯类型色标升级为**每条目「固定」开关**（点亮=📌 常驻，拖出成功也不自动移除；全局持久化开启时整体隐藏）。**续99b（同批，解性能）**：缩略图首版用 asset 协议直读原图→WebView 常驻全分辨率解码位图（一张 4000×3000≈48MB）→图多即卡顿+内存暴涨；改由 Rust `get_stage_thumbnail` 解码缩到 160px 返回小 base64（原图瞬时释放），撤掉 asset 协议。版本号 0.3.9→0.4.0（MINOR）。详见 §0A。
 - **续99c/99d（已提交，用户已确认测试通过）**：①**99c 缩略图落盘缓存**（重启秒开）——`get_stage_thumbnail` 先查 `app_data/stage_thumbs/{crc32(path)}_{mtime}.png`，命中直接读小 PNG（零解码原图），未命中才解码缩图并写盘；后台 janitor 50MB 封顶（`apps.rs`/`lib.rs`）。②**99d 去中转区落地闪烁**——用户报"拖新图落地、缩略图替换占位图标那一刻中转区闪蓝"；**染色测试**（把 drop-flash/file-drag-active/drag-over 三处染不同色）定位到闪的是 🔴 `drop-flash`（落地确认动画，与缩略图生成窗口时间重合，非缩略图 bug）；从 CSS + JS 两层摘掉**中转区** `drop-flash`（`.drop-area.drop-flash` 选择器删除 + `files-dropped` 里加类两行删除），启动台 `.app-grid.drop-flash` 保留，悬停高亮 `file-drag-active` 未碰。版本号 0.4.0→0.4.1（PATCH）。详见 §0A。
+- **续99e（已提交，用户已确认测试通过）**：中转区**列表视图**补齐图片缩略图 + 固定开关（此前只有方格视图有，而 `stageLayout` 默认 `"list"`→列表用户看不到 99 的成果，属覆盖盲区）。纯前端渲染层：列表项图片文件优先显示 `stageThumbs[path]`（复用同一缓存，缩略图生成与视图无关，早已就绪）；新增 `.stage-pin-btn`（未固定 hover 淡显、已固定常驻 accent 📌、全局持久化开启时隐藏，与方格 dot 同语义）。版本号 0.4.1→0.4.2（PATCH）。详见 §0A。
 - **续98（已提交 `0115f9f`+版本 `e9aac82`，用户已确认测试通过）**：设置→中转站新增「底部快捷入口」显示/隐藏开关（`showShortcuts` state + store key `show-shortcuts`，纯前端持久化）——关闭后中转区下方 `.shortcut-row` 不渲染、空间由 `.drop-area(flex:1)` 归还给中转区；附带中转卡片封面 58→62px（标签区/悬浮操作栏等量收窄，总高 94px 不变，不破坏续94 行节奏）。版本号 0.3.8→0.3.9（PATCH）。详见 §0A。
 - **续97（已提交 `772b2ce`，用户已确认测试通过）**：中转区**多选**拖出「区内小幅拖动后立刻松手却误删选中项」修复（**首版方案已回退**）。根因：落点落回**自身 overlay IDropTarget**，它对含 CF_HDROP 的拖入回传 copy → `drag-out-done` 误判成功投放而删（单项因先走区内重排、落回区内不起 OLE 故无症）。**首版**试图「多选也先进 pending 态、等离开 `.drop-area` 才起 OLE」——用户实测**多选拖到外部无法落地**（延迟起 OLE 破坏原生拖出），已完整回退。**改采落点结果侧修复**（不碰拖出起手时机）：`files-dropped` 内部落点置 `droppedOnSelfRef`，`drag-out-done` 命中则保留条目直接返回；依赖 `dragdrop.rs` Drop「emit files-dropped ⟺ 回传 copy」耦合 + 事件送达有序。纯前端，未碰 Rust/窗口/焦点/剪贴板。详见 §0A / CLAUDE 反查表。
 - **续96（已提交 `772b2ce`，用户已确认测试通过）**：前端可维护性重构 + 2 处小 bug 修复（应用户"前端优化"请求）。①剪贴板列表 `key={i}`→`key={c.time}`（prepend 列表用 index key 会让 React 错位复用，导致刚复制卡片的拖拽态/✓ 反馈串到别的卡）；②`.stage-card-actions` 悬浮操作栏暗色硬编码 `rgba(30,30,30,.9)` 在浅色主题突兀、按钮白字不可见——加 `[data-theme="light"]` 上书；③抽出 `src/lib/format.ts`（fmtSize/ago/extIcon/dirOf/IMG_EXTS）、`src/lib/fuzzy.ts`（fuzzyScore/typeKeywords/matchItem/MatchResult）、`src/icons.tsx`（IconCheck/Copy/Trash/Open/Pin/Search，替换 App.tsx 里重复 4~6 次的内联 SVG）——App.tsx 从 2141 行减到 ~2000 行，纯移动无行为变更。设置齿轮/文件夹 SVG（各 1 处）留在 App.tsx。**未碰窗口/焦点/热键/剪贴板最高危区**。验证：`npx tsc --noEmit` + `npm run build` 均零错误（41 modules）。剩余优化候选见文末「前端优化清单」。
@@ -53,6 +54,11 @@
 - **99d 去中转区落地闪烁（闪蓝 bug，`App.tsx`+`App.css`）**：用户报"拖新图落地、占位图标→缩略图替换那一刻中转区闪蓝"。**排错走了弯路**（先怀疑缩略图 img 命中触发 OLE 重入、加 pointer-events/-webkit-user-drag、删 drop-flash——均无效或方向错，用户明确要求"根除别妥协、先撤无效改动"）。**决定性诊断=染色测试**：把三处能让中转区变蓝的 CSS（`drop-flash` 落地闪烁 / `file-drag-active` 悬停高亮 / `drag-over` 内部拖拽）各染不同色，用户复现报「🔴红」→ 锁定是 **`drop-flash`**（落地确认动画，200ms；99c 磁盘缓存让缩略图生成变快、正好和这 200ms 窗口重合，故错看成"替换缩略图那一下"，与缩略图无因果）。**根治**：从 CSS 层删 `.drop-area.drop-flash` 选择器（即使 JS 加类也无规则可播）+ 从 JS 层删 `files-dropped` 里给中转区加类两行。启动台 `.app-grid.drop-flash` 保留，悬停高亮 `file-drag-active` 未碰（用户要保留落点提示）。
 - **教训（写给后人）**：多处同色视觉 bug 定位，**染色测试**（每个嫌疑源染不同色、看实际显示什么色）比反复读代码猜快得多、且确定；用户"背景蓝无边框"这类精确指纹能先缩小到具体 CSS 规则（`drop-flash` 是唯一"只有背景无边框"的）。别在没定位到真凶前反复打补丁。
 - **验证**：`npx tsc --noEmit` + `cargo check` 均通过；用户 GUI 实测确认闪蓝消失、悬停提示与启动台落地闪保留。版本号 0.4.0→0.4.1（PATCH）。
+
+#### 续99e（2026-07-10 同批延续，用户已确认测试通过并提交）——列表视图补齐缩略图 + 固定开关
+- **触发**：审查发现 99/99b/99c/99d 的缩略图 + 固定点点**只加在方格视图（grid）**，而 `stageLayout` 默认值是 `"list"`——没手动切方格的用户完全看不到这些成果，属功能覆盖盲区。
+- **改动（纯前端渲染层，`App.tsx`+`App.css`，复用现成状态）**：①列表项（`.stage-item`）图片文件渲染优先用 `stageThumbs[path]`（缩略图 effect 依赖 `stage`、与视图无关，早已为所有图片文件生成，故只加渲染分支、无逻辑改动）；②新增 `.stage-pin-btn`（放 `.stage-actions` 前）——未固定时行 hover 淡显（opacity 0.5）、已固定常驻 accent 📌、全局持久化开启（`!stagePersist` 门控）时隐藏，`onPointerDown/onClick` 均 stopPropagation 防误触拖动/取走，与方格 `dotEl` 同语义。
+- **验证**：`npx tsc --noEmit` 通过；用户 GUI 实测确认列表视图缩略图显示、固定钮工作、拖动/多选未受影响。版本号 0.4.1→0.4.2（PATCH）。
 
 ### 续98（2026-07-10，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转区底部快捷入口可显示/隐藏 + 卡片封面加高
 - **改动①（新功能，PATCH）**：设置→中转站新增「底部快捷入口」显示/隐藏开关。中转区下方那行「截屏 / 文件管理器 / 下载」等快捷按钮（`.shortcut-row`）现在可关闭。
