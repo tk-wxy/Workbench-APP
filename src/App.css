@@ -134,6 +134,11 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-actions{display:flex;gap:2px;flex-shrink:0;}
 .stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
+/* 续99e：列表视图「固定」开关——未固定 hover 才淡显、已固定常驻 accent（与方格视图 dot 同语义）*/
+.stage-pin-btn{flex-shrink:0;width:24px;height:24px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;color:var(--text3);cursor:pointer;padding:0;border-radius:6px;opacity:0;transition:opacity 80ms,color 80ms,background 80ms;}
+.stage-item:hover .stage-pin-btn{opacity:0.5;}
+.stage-item .stage-pin-btn:hover{background:var(--hover);color:var(--text);opacity:1;}
+.stage-pin-btn.pinned{opacity:1;color:var(--accent);}
 /* 多选模式下卡片悬浮不露出单条操作按钮（避免与批量操作栏语义打架，见 MEMORY §0A）*/
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
