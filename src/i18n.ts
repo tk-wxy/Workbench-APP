@@ -130,6 +130,9 @@ export const EN_DICT: Record<string, string> = {
   "持久化": "Persist Items",
   "「关闭」（默认）：条目确认成功移出/拖出后自动从中转区移除。「开启」：条目移出/拖出后仍保留在中转区，除非手动删除。":
     "\"Off\" (default): items are removed from Stage automatically once a move-out/drag-out is confirmed successful. \"On\": items stay in Stage after being moved/dragged out, until you delete them manually.",
+  "底部快捷入口": "Bottom Quick Access",
+  "中转区下方的截屏 / 文件管理器 / 下载等快捷按钮。隐藏后这块空间归还给中转区，可容纳更多条目。":
+    "The screenshot / File Explorer / Downloads shortcut buttons below Stage. Hiding them returns the space to Stage to fit more items.",
 
   // ── 设置：剪贴板 ──
   "历史保存条数": "History Size",
