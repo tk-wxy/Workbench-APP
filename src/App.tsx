@@ -192,6 +192,7 @@ export default function App() {
   const [copiedTime, setCopiedTime] = useState<number|null>(null); // 最近"只复制"的剪贴板项 time，用于按钮 ✓ 反馈
   const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
   const [imgCacheCleared, setImgCacheCleared] = useState(false); // 设置面板「清空缓存」✓ 反馈
+  const [thumbCacheCleared, setThumbCacheCleared] = useState(false); // 中转区缩略图缓存「清空」✓ 反馈（续99f）
   const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
@@ -1936,6 +1937,14 @@ export default function App() {
                     </div>
                   </div>
                   <p className="settings-hint">{t("中转区下方的截屏 / 文件管理器 / 下载等快捷按钮。隐藏后这块空间归还给中转区，可容纳更多条目。")}</p>
+                  <div className="settings-row">
+                    <span className="settings-row-label">{t("缩略图缓存")}</span>
+                    <div style={{display:"flex",gap:4}}>
+                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_stage_thumb_dir");}catch{}}}>{t("打开文件夹")}</button>
+                      <button className={`settings-action danger${thumbCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_stage_thumb_cache");setThumbCacheCleared(true);setTimeout(()=>setThumbCacheCleared(false),1500);}catch{}}}>{thumbCacheCleared?t("✓ 已清空"):t("清空缓存")}</button>
+                    </div>
+                  </div>
+                  <p className="settings-hint">{t("中转区图片文件的缩略图缓存，命中后重启秒开。清空后下次显示会按需重新生成，不影响原文件。")}</p>
                 </>)}
                 {settingsTab==="clipboard" && (<>
                   <div className="settings-panel-title">{t("剪贴板")}</div>
