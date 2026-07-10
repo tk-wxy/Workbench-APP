@@ -1701,11 +1701,17 @@ export default function App() {
                   <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）"))}>
                     {s.type==="image"
                       ?<img className="stage-thumb" draggable={false} src={s.content} alt=""/>
-                      :s.type==="file" && s.items?.[0]?.icon
-                        ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
-                        :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
+                      :s.type==="file" && s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path]
+                        ?<img className="stage-thumb" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/> /* 续99e：列表视图图片文件缩略图，与方格视图一致（复用同一 stageThumbs 缓存）*/
+                        :s.type==="file" && s.items?.[0]?.icon
+                          ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
+                          :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
                     <span className="stage-title">{label}</span>
                     {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
+                    {/* 续99e：列表视图「固定」开关，与方格视图 dot 同语义——未固定 hover 才现、已固定常驻 accent；全局持久化开启时隐藏 */}
+                    {!stagePersist && (
+                      <button className={`stage-pin-btn${s.pinned?" pinned":""}`} onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();toggleStagePin(s.id);}} title={s.pinned?t("已固定：取走 / 拖出后保留（点击取消）"):t("点击固定：取走 / 拖出后仍保留在中转区")}><IconPin/></button>
+                    )}
                     <div className="stage-actions">
                       <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?t("已复制"):t("复制到剪贴板")}>
                         {copiedStageId===s.id ? <IconCheck/> : <IconCopy/>}
