@@ -9,6 +9,29 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续94（2026-07-09，src/App.css + src/App.tsx，用户已确认测试通过并提交，2026-07-10 续97 迁入）——中转站/启动台卡片行节奏对齐 + 中转站行容量 9→10
+- **需求链**（同一会话四轮迭代）：①中转区卡片悬浮操作条稍矮，多出高度补给缩略图；②启动台/中转站卡片轮廓高统一，启动台名字区固定两字高、不满两行居中；③两栏出现"越往下越错位"，判定为逐行"卡高+间距"（行节奏）不等，不是首行没对齐；④中转站列表视图行高不能只砍一半，要按行节奏对齐；⑤消除可滚动区域内边缘卡片被截断——评估后判定"任何时候都不截断"需 JS 动态测量容器高度（依赖运行时窗口尺寸，跨显示器表现不确定），按用户给的口子放弃，改加纯 CSS `scroll-snap` 折中；用户测试后要求撤销该 scroll-snap，已完整回退（4 处 `scroll-snap-type`/`scroll-snap-align` 全部移除，diff 清零，未留痕迹）。
+- **最终尺寸**：中转站卡片 80→72px，缩略图 72×58，label padding 3/6/5，悬浮操作条 34px，圆角 9px，图标容器 30×30；`.stage-grid` gap 8→6px（10 列共占 774px＜原 9 列 784px，行容量 9→10）；卡片轮廓高 94px + gap6 = 行节奏 100px。
+- **启动台联动**：`.app-tile-label` 外包一层 `.app-tile-label-wrap`（固定 29px + flex 居中），名字不足两行时垂直居中、两行时铺满被 `line-clamp` 截断，轮廓高固定 96px + gap4 = 行节奏 100px，与中转站严格对齐（此前名字行数不同会导致行高浮动，是错位根因之一）。
+- **列表视图**：`.stage-item` 固定高 44px（`.stage-thumb` 32→30px 配合内边距），行节奏 44+6=50px，正好是网格行节奏 100px 的 1/2——两行列表 = 一行网格的纵向空间，每隔一行与左栏重新对齐。
+- **验证**：`npx tsc --noEmit` 零错误；纯 CSS/JSX 视觉改动，未跑 `npm run build`（含 version-check，非本次改动相关），用户在 `npm run tauri dev` 中多轮 GUI 实测确认（含加入/撤销 scroll-snap 两态）通过。
+- **提交**：`d6226ee`（fix 布局对齐）+ `8aaf53c`（chore 版本号 0.3.5→0.3.6，PATCH）。
+- **文件**：`src/App.css`（`.app-tile-label-wrap`/`.stage-item`/`.stage-thumb`/`.stage-grid`/`.stage-card*`）、`src/App.tsx`（label 包一层 wrap div）。
+
+### 续93（2026-07-09，src/App.tsx，用户已确认测试通过并提交，2026-07-10 续96 迁入）——启动器网格新增键盘导航（Start 菜单风）
+- **需求**：启动器（收藏托盘）加键盘操作——↑↓←→ 移动选中、Enter 打开，此前只有「顶栏搜索非空时 Enter 起动 filteredApps[0]」的兜底。
+- **实现**：新增 `launcherSelIdx` state（-1=未选中/焦点在搜索框）。keydown 处理器加 launcher 网格导航块：
+  - 未选中(idx<0)：仅 `↓` 进入网格（setIdx 0）；`←→↑` 不 preventDefault，留给搜索输入框做光标编辑（Start 菜单式：先打字过滤，↓ 才进结果）。
+  - 已选中(idx>=0)：`←→` ±1、`↑↓` ±cols 二维移动并 clamp；行首 `←`/首行 `↑` 退回搜索框（setIdx -1 + searchRef.focus）；`Enter` 打开选中项（复用 `openLauncherItem`，含放大动画，iconEl 取 `.app-tile.selected .app-tile-icon`）。
+  - **列数 `cols` 按 DOM 动态算**（`.app-tile` 首行同 `offsetTop` 计数），不硬编码——契合高 DPI/响应式铁律。
+- **兜底保留**：未进入网格(idx<0)时 Enter 仍走旧 `filteredApps[0]` 起动路径。
+- **Esc 分层链新增一段**：选中态(idx>=0)先解除选中+回搜索框、再关页（插在 stageSel 之后、settings 之前，用直接值非 ref——已随 idx 入 effect deps）。
+- **复用与零新增**：高亮复用既有 `.app-tile.selected`（CSS 行 91，与 :hover 同背景）→ **CSS 零新增**；两 effect——选中项 `scrollIntoView` + `visible`/`search` 变化复位 idx=-1（打字过滤即退出网格，语义自洽）。`.app-tile` className 加 `${i===launcherSelIdx?" selected":""}`。
+- **未碰最高危区**：呼出 set_focus 不动，纯 JS 键处理。effect deps 补 `filteredLauncher/launcherSelIdx/openLauncherItem`。
+- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测 ↓进网格/四向移动/Enter起动+动画/搜索框内←→编辑不误入网格/首行↑·行首←·Esc 回搜索框 均确认通过。
+- **提交**：`822017f`（feat）+ `3825372`（chore 版本号 0.3.4→0.3.5，PATCH）。
+- **文件**：`src/App.tsx`（`launcherSelIdx` state / 两 effect / keydown 网格导航块 + Esc 一段 / `.app-tile` selected class）。
+
 ### 续92（2026-07-09，src/App.tsx，用户已确认测试通过并提交，2026-07-09 续95 迁入）——增强搜索结果新增右键菜单
 - **需求**：增强搜索（Ctrl+K）条目加右键菜单，菜单项：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区。
 - **实现**：新增 `openEnhCtxMenu(e,r)`，`onContextMenu` 挂到 `.enh-result` div。复用现有 `ctxMenu` 基础设施（`openCtxMenu`/`CtxMenuItem`）+ 已有动作 handler（`activateEnh`/`writeItemToClipboard`/`reveal_in_explorer`/`addFsToLauncher`/`addFsToStage`/`addAppToLauncher`/`copyStageToClipboard`）——**零新增 Rust 命令 / 剪贴板路径 / i18n 词条**（全部复用已有翻译键）。抽了 `revealPath` 小 helper 去重。
