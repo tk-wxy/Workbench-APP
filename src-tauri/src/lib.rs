@@ -540,7 +540,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             apps::scan_start_menu, apps::refresh_apps,
-            apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk,
+            apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,

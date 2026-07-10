@@ -13,7 +13,7 @@ interface FileItem { path: string; name: string; ext: string; isImage: boolean; 
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
-interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; }
+interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
@@ -223,6 +223,9 @@ export default function App() {
   const [stagePersist, setStagePersist] = useState(false); // 中转站文件持久化：开启后移出/拖出不再自动移除条目，需手动删除（纯前端，无需 Rust 同步）
   const stagePersistRef = useRef(stagePersist); stagePersistRef.current = stagePersist; // 供 drag-out-done 监听闭包读最新值
   const [showShortcuts, setShowShortcuts] = useState(true); // 中转区下方「快捷入口」行是否显示（纯前端 store 持久化）；关闭时空间归还给中转区 drop-area（flex:1 自动铺满）
+  // 续99b：中转区图片文件缩略图缓存（path → data URL）。由 Rust get_stage_thumbnail 生成小图，避免前端直接加载原图全分辨率致内存暴涨/卡顿。仅会话内内存缓存，不落盘。
+  const [stageThumbs, setStageThumbs] = useState<Record<string,string>>({});
+  const stageThumbPendingRef = useRef<Set<string>>(new Set()); // 已发起/已失败的 path（失败不重试，卡片回退 emoji）
   const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
   const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
@@ -319,6 +322,8 @@ export default function App() {
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
 
   const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
+  // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
+  const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
@@ -458,7 +463,7 @@ export default function App() {
           if (!keepOpen && dropped && event.payload !== "move" && draggedItems.length === 1 && draggedItems[0].type === "text") {
             const item = draggedItems[0];
             copyAndPaste(item); // 复用现有粘贴出口（含焦点交还 + Ctrl+V）
-            if (!stagePersistRef.current) {
+            if (!stagePersistRef.current && !item.pinned) { // 续99：固定条目豁免自动移除
               const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
               setStage(next);
               if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
@@ -470,10 +475,13 @@ export default function App() {
           }
           if (dropped && dr.draggedIds.length) {
             if (!stagePersistRef.current) {
-              const ids = new Set(dr.draggedIds);
-              const next = stageRef.current.filter(s => !ids.has(s.id));
-              setStage(next);
-              if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+              // 续99：全局非持久化时，仍豁免被固定（pinned）的条目——只移除拖出成功且未固定的
+              const ids = new Set(dr.draggedIds.filter(id => !stageRef.current.find(s => s.id === id)?.pinned));
+              if (ids.size) {
+                const next = stageRef.current.filter(s => !ids.has(s.id));
+                setStage(next);
+                if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+              }
             }
             setStageSel(new Set<number>());
             setStageMultiselect(false);
@@ -630,6 +638,23 @@ export default function App() {
       return matchItem(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
     });
   }, [stage, search]);
+  // 续99b：为中转区图片文件懒生成缩略图（Rust 侧解码缩图，前端只缓存小 base64）。pending ref 去重：每个 path 只发起一次，失败不重试（回退 emoji）。
+  useEffect(() => {
+    const paths = stage
+      .filter(s => s.type === "file" && s.items?.[0]?.isImage && s.items?.[0]?.path)
+      .map(s => s.items![0].path);
+    for (const p of paths) {
+      if (stageThumbPendingRef.current.has(p)) continue;
+      stageThumbPendingRef.current.add(p);
+      (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const url = await invoke<string>("get_stage_thumbnail", { path: p });
+          setStageThumbs(prev => ({ ...prev, [p]: url }));
+        } catch { /* 失败：保留 pending 标记不再重试，卡片显示 emoji 兜底 */ }
+      })();
+    }
+  }, [stage]);
   // 剪贴板历史：同上
   const filteredClip = useMemo(() => {
     const q = search.trim();
@@ -1615,33 +1640,46 @@ export default function App() {
                   const cardMeta = s.type==="image" ? t("图片")
                     : s.type==="text" ? t("文本")
                     : (isAnyDir ? t("文件夹") : (rawExt ? `.${rawExt}` : t("文件")));
+                  // 右上点点（续99）：全局持久化开启时整体隐藏（冗余）；否则点击切换「固定」——已固定显 📌 常驻，未固定显类型色点。
+                  // stopPropagation 双拦：pointerdown 不触发拖动、click 不触发取走。
+                  const dotEl = stagePersist ? null : (
+                    <button type="button" className={`stage-card-dot${s.pinned?" pinned":` type-${s.type}`}`}
+                      onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();toggleStagePin(s.id);}}
+                      title={s.pinned?t("已固定：取走 / 拖出后保留（点击取消）"):t("点击固定：取走 / 拖出后仍保留在中转区")}>
+                      {s.pinned ? <span className="dot-pin"><IconPin/></span> : <span className="dot-type"/>}
+                    </button>
+                  );
                   return (
                   <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用"))}>
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
-                        <div className="stage-card-dot type-image"/>
+                        {dotEl}
                         {s.content
                           ? <img className="cover" draggable={false} src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
-                          : <span style={{fontSize:28}}>🖼️</span>}
+                          : <span style={{fontSize:32}}>🖼️</span>}
                       </div>
                     )}
                     {s.type==="text" && (
                       <div className="stage-card-thumb">
-                        <div className="stage-card-dot type-text"/>
+                        {dotEl}
                         <div className="stage-card-text-preview">{s.content||""}</div>
                       </div>
                     )}
                     {s.type==="file" && (
                       <div className="stage-card-thumb">
-                        <div className="stage-card-dot type-file"/>
+                        {dotEl}
                         <div className="stage-card-icon-wrap">
                           {s.items?.[0]?.icon
-                            ? <img src={s.items[0].icon} alt="" draggable={false} style={{width:28,height:28,objectFit:"contain"}}/>
+                            ? <img src={s.items[0].icon} alt="" draggable={false} style={{width:34,height:34,objectFit:"contain"}}/>
                             : isAnyDir
-                              ? <svg width="26" height="26" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
-                              : <span style={{fontSize:22}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
+                              ? <svg width="32" height="32" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
+                              : <span style={{fontSize:28}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
                         </div>
+                        {/* 续99b：图片文件显示 Rust 生成的小缩略图（避免原图全分辨率常驻内存）；未就绪/失败则无此层，露出下方 emoji 兜底 */}
+                        {s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path] && (
+                          <img className="cover" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/>
+                        )}
                       </div>
                     )}
                     {/* ── 标签区 ── */}

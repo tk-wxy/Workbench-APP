@@ -152,17 +152,24 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
 /* 缩略图区：固定 72×62（续98：封面加高 4px，来自下方标签区/悬浮菜单等量收窄，卡片总高 94px 不变）*/
 .stage-card-thumb{width:72px;height:62px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
-/* 图片 cover：固定同尺寸，object-fit:cover 从顶部裁 */
-.stage-card-thumb img.cover{width:72px;height:62px;object-fit:cover;object-position:center top;display:block;flex-shrink:0;}
+/* 图片 cover：绝对铺满 thumb（叠在 icon-wrap 兜底之上；图片文件加载失败时 onError 隐藏、露出兜底 emoji），object-fit:cover 从顶部裁 */
+.stage-card-thumb img.cover{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center top;display:block;}
 /* 文本预览：固定尺寸 + -webkit-line-clamp（有固定高时可靠）*/
 .stage-card-text-preview{width:72px;height:62px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
-/* 文件图标容器：30×30 居中方块 */
-.stage-card-icon-wrap{width:30px;height:30px;border-radius:7px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-/* 类型指示点（thumb 右上角，相对 thumb position:relative 定位）*/
-.stage-card-dot{position:absolute;top:5px;right:5px;width:5px;height:5px;border-radius:50%;pointer-events:none;z-index:1;flex-shrink:0;}
-.stage-card-dot.type-file{background:#378ADD;}
-.stage-card-dot.type-text{background:#639922;}
-.stage-card-dot.type-image{background:#D4537E;}
+/* 文件图标容器：40×40 居中方块（续99 放大：30→40，图标更醒目）*/
+.stage-card-icon-wrap{width:40px;height:40px;border-radius:9px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+/* 右上「固定」开关（续99）：16×16 可点热区（透明），内含 6px 类型色点 或 📌；z-index:2 压过 cover 图片 */
+.stage-card-dot{position:absolute;top:2px;right:2px;width:16px;height:16px;display:flex;align-items:center;justify-content:center;padding:0;border:none;background:transparent;cursor:pointer;z-index:2;flex-shrink:0;}
+.stage-card-dot .dot-type{width:6px;height:6px;border-radius:50%;transition:box-shadow 0.12s;}
+.stage-card-dot.type-file .dot-type{background:#378ADD;}
+.stage-card-dot.type-text .dot-type{background:#639922;}
+.stage-card-dot.type-image .dot-type{background:#D4537E;}
+/* hover 卡片时给未固定点一圈提示环，暗示可点 */
+.stage-card:hover .stage-card-dot .dot-type{box-shadow:0 0 0 3px rgba(255,255,255,0.18);}
+[data-theme="light"] .stage-card:hover .stage-card-dot .dot-type{box-shadow:0 0 0 3px rgba(0,0,0,0.10);}
+/* 已固定：📌 常驻显示（accent 色），比色点更醒目 */
+.stage-card-dot .dot-pin{display:flex;align-items:center;justify-content:center;color:var(--accent);}
+.stage-card-dot .dot-pin svg{width:12px;height:12px;}
 /* 标签区（续98：padding 3/5→2/2 收窄 4px，让给上方封面；两行文本内容不变，卡片总高 94px 不变）*/
 .stage-card-label{padding:2px 6px 2px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:0px;min-width:0;flex-shrink:0;}
 .stage-card-name{font-size:10px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
@@ -234,7 +241,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;}
 
 /* ── 中转区标题行 + 多选工具栏 ── */
-.stage-section-header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 6px;flex-shrink:0;gap:8px;}
+.stage-section-header{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 4px;flex-shrink:0;gap:8px;}
 .stage-section-header .section-label{padding:0;flex-shrink:0;}
 .stage-multi-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
 .stage-sel-count{font-size:11px;color:var(--text2);white-space:nowrap;padding:0 4px;}
