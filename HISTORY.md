@@ -9,6 +9,14 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续95（2026-07-09，src-tauri/src/clipboard.rs + src/App.tsx + src/App.css，用户已确认测试通过并提交，2026-07-10 续98 迁入）——cmd 图片粘贴路径回退 + 剪贴板截图拖拽修复
+- **bug①：中转区图片/截图点击后粘不进 cmd/Windows Terminal**。排查 `set_clipboard_image`（`clipboard.rs:710`）确认：目标窗口走三分叉里的分支③（其余 app，写 CF_DIB 位图），而控制台（conhost/Windows Terminal）粘贴只解析 CF_TEXT，位图对它没有任何可解释含义——脱离本应用手动复制图片到 cmd 按 Ctrl+V 同样无反应，是控制台能力边界不是本应用 bug。
+  - **方案**（用户选择"实现路径回退"而非"仅说明限制"）：新增判断 `class1=="ConsoleWindowClass"||"CASCADIA_HOSTING_WINDOW_CLASS"` 的分支，退化为把该图片落盘路径（大图复用已有 `orig_path`，小图现解码落一份 PNG 到 `clip_images/`）当**文本**写回剪贴板 + Ctrl+V，给出可用结果而非静默无反应。原三分叉→四分叉，`CLAUDE.md` 对应铁律描述与反查表已同步更新。
+- **bug②：剪贴板历史里的截图/图片条目拖不进中转区**（其他类型条目可以正常拖）。根因：`.clip-image`（`App.tsx:1792`）的 `<img>` 漏了 `draggable={false}`，CSS 也没有 `-webkit-user-drag:none`——WebView2 原生图片拖拽会抢走指针序列，导致 `handleClipPointerDown/Move/Up` 这套自定义"按下→移动超阈值→落中转区"拖拽逻辑从未激活；文本/文件条目渲染的是纯文本/图标 span，无 `<img>` 元素，故不受影响。这正是 `CLAUDE.md` 死胡同表已记录过的坑（WebView2 原生 `<img>` 拖拽抢手势），本次是漏了 `.clip-image` 这一处没打补丁。补齐 `draggable={false}` + CSS `-webkit-user-drag:none;user-select:none`，与 `stage-card`/`app-tile` 等既有图片元素做法一致。
+- **验证**：`cargo check --lib`（bug①）、`npx tsc --noEmit`（bug②）均零警告零错误；两个 bug 均为真实交互链路（cmd 粘贴 / 跨面板拖拽），无法模拟输入验证，用户分别在 `npm run tauri dev` 中 GUI 实测确认通过。
+- **提交**：`ff0bea6`（fix cmd 路径回退）+ `eeff496`（fix 截图拖拽）+ `687fffc`（chore 版本号 0.3.6→0.3.7，PATCH）。
+- **文件**：`src-tauri/src/clipboard.rs`（`set_clipboard_image` 新增控制台分支）、`src/App.tsx`（`.clip-image` 加 `draggable={false}`）、`src/App.css`（`.clip-image` 加 `-webkit-user-drag:none;user-select:none`）、`CLAUDE.md`（四分叉描述 + 反查表新增一行）。
+
 ### 续94（2026-07-09，src/App.css + src/App.tsx，用户已确认测试通过并提交，2026-07-10 续97 迁入）——中转站/启动台卡片行节奏对齐 + 中转站行容量 9→10
 - **需求链**（同一会话四轮迭代）：①中转区卡片悬浮操作条稍矮，多出高度补给缩略图；②启动台/中转站卡片轮廓高统一，启动台名字区固定两字高、不满两行居中；③两栏出现"越往下越错位"，判定为逐行"卡高+间距"（行节奏）不等，不是首行没对齐；④中转站列表视图行高不能只砍一半，要按行节奏对齐；⑤消除可滚动区域内边缘卡片被截断——评估后判定"任何时候都不截断"需 JS 动态测量容器高度（依赖运行时窗口尺寸，跨显示器表现不确定），按用户给的口子放弃，改加纯 CSS `scroll-snap` 折中；用户测试后要求撤销该 scroll-snap，已完整回退（4 处 `scroll-snap-type`/`scroll-snap-align` 全部移除，diff 清零，未留痕迹）。
 - **最终尺寸**：中转站卡片 80→72px，缩略图 72×58，label padding 3/6/5，悬浮操作条 34px，圆角 9px，图标容器 30×30；`.stage-grid` gap 8→6px（10 列共占 774px＜原 9 列 784px，行容量 9→10）；卡片轮廓高 94px + gap6 = 行节奏 100px。
