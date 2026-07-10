@@ -133,6 +133,7 @@ npm run tauri build    # 打包
 | 拖动排位/区内重排途中窗口意外消失、卡片永久悬浮点不动 | light-dismiss（`start_focus_watch`）不知道这个新阶段、在窗口仍可见时因前台瞬时切走提前 `hide()`，打断手势；新阶段必须让 `stage_reorder_active()` 参与 **`start_focus_watch`** 的让路判断；见 DECISIONS §18 续88 |
 | 中转区拖动排位途中按热键关不掉界面（区内重排阶段热键失灵） | `stage_reorder_active()` 被错误加进 `start_hotkey_monitor` 让路判断——纯 JS 重排阶段没有替代者接管热键，让路 = 热键整段失效；改为该阶段 emit `stage-drag-hotkey`；见 DECISIONS §18 续88 |
 | 中转区拖动中按热键关界面成功、但松手后无文件落地（拖排序破坏拖转移） | 区内重排是纯 JS ghost、无原生 OLE 拖；直接 hide 后 DoDragDrop 无从起手。须 emit `stage-drag-hotkey`→前端 `beginNativeDragOut(ids,forceHide=true)` 在窗口仍可见时起手 DoDragDrop、再由 dragout 隐藏；且 `STAGE_REORDER_ACTIVE`→`DRAG_IN_PROGRESS` 无缝交接防交接空窗被提前 hide；见 DECISIONS §18 续88 |
+| 多选条目拖动后什么也没做（区内小幅拖动+立刻松手，落回本窗口）选中项却被误删 | 落点落在**自身 overlay 的 IDropTarget** → 它对含 CF_HDROP 的拖入 `accept` 并回传 `DROPEFFECT_COPY` → `drag-out-done` 误判成功投放而删条目（单项因先走区内重排、落回区内不起 OLE 故无此症）。修复**只能在落点结果侧、绝不改拖出起手时机**（改起手时机=延迟起 OLE 会让多选拖到外部无法落地，续97 首版踩坑已回退）：`files-dropped` 内部落点（`internalDrag && !inLauncher`）置 `droppedOnSelfRef`，`drag-out-done` 命中则保留条目直接返回。依赖 `dragdrop.rs` Drop 中「emit files-dropped ⟺ 回传 copy」同条件耦合、且 files-dropped 先于 drag-out-done 送达（续97，`App.tsx`）|
 
 ---
 

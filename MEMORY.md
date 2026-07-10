@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-09（续95：cmd 图片粘贴路径回退 + 剪贴板截图拖拽修复，已提交，见 §0）
+> **最后更新**：2026-07-10（续96 前端重构+2 fix / 续97 多选拖出误删修复，均已确认测试通过并提交 `772b2ce`+版本 `99376a3`，见 §0）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,8 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续97（已提交 `772b2ce`，用户已确认测试通过）**：中转区**多选**拖出「区内小幅拖动后立刻松手却误删选中项」修复（**首版方案已回退**）。根因：落点落回**自身 overlay IDropTarget**，它对含 CF_HDROP 的拖入回传 copy → `drag-out-done` 误判成功投放而删（单项因先走区内重排、落回区内不起 OLE 故无症）。**首版**试图「多选也先进 pending 态、等离开 `.drop-area` 才起 OLE」——用户实测**多选拖到外部无法落地**（延迟起 OLE 破坏原生拖出），已完整回退。**改采落点结果侧修复**（不碰拖出起手时机）：`files-dropped` 内部落点置 `droppedOnSelfRef`，`drag-out-done` 命中则保留条目直接返回；依赖 `dragdrop.rs` Drop「emit files-dropped ⟺ 回传 copy」耦合 + 事件送达有序。纯前端，未碰 Rust/窗口/焦点/剪贴板。详见 §0A / CLAUDE 反查表。
+- **续96（已提交 `772b2ce`，用户已确认测试通过）**：前端可维护性重构 + 2 处小 bug 修复（应用户"前端优化"请求）。①剪贴板列表 `key={i}`→`key={c.time}`（prepend 列表用 index key 会让 React 错位复用，导致刚复制卡片的拖拽态/✓ 反馈串到别的卡）；②`.stage-card-actions` 悬浮操作栏暗色硬编码 `rgba(30,30,30,.9)` 在浅色主题突兀、按钮白字不可见——加 `[data-theme="light"]` 上书；③抽出 `src/lib/format.ts`（fmtSize/ago/extIcon/dirOf/IMG_EXTS）、`src/lib/fuzzy.ts`（fuzzyScore/typeKeywords/matchItem/MatchResult）、`src/icons.tsx`（IconCheck/Copy/Trash/Open/Pin/Search，替换 App.tsx 里重复 4~6 次的内联 SVG）——App.tsx 从 2141 行减到 ~2000 行，纯移动无行为变更。设置齿轮/文件夹 SVG（各 1 处）留在 App.tsx。**未碰窗口/焦点/热键/剪贴板最高危区**。验证：`npx tsc --noEmit` + `npm run build` 均零错误（41 modules）。剩余优化候选见文末「前端优化清单」。
 - **续95（已提交，用户已确认测试通过）**：两个独立 bug 修复——①中转区图片/截图点击后粘不进 cmd/Windows Terminal：控制台只认 CF_TEXT、不识别位图，是控制台能力边界非可修 bug，`set_clipboard_image` 新增第③分支退化为粘贴该图片落盘路径的文本（三分叉→四分叉）；②剪贴板历史里的截图/图片条目拖不进中转区：`.clip-image` 的 `<img>` 漏了 `draggable={false}`/`-webkit-user-drag:none`，WebView2 原生图片拖拽抢走指针序列，导致自定义拖拽逻辑从未激活（文本/文件条目无 `<img>` 不受影响），补齐后与 `stage-card`/`app-tile` 等既有图片元素一致。版本号 0.3.6→0.3.7（PATCH）。
 - **续94（已提交，用户已确认测试通过）**：中转站方格卡片 80px→72px（gap 8→6，行容量 9→10）+ 启动台名字区固定两行高（`.app-tile-label-wrap` flex 居中，不再随名字行数浮动）+ 中转站列表视图条目固定 44px 高——三处共同目标是让启动台/中转站两栏"行节奏"（卡高+行距）严格相等（100px，列表为其 1/2=50px），修复逐行滚动累积错位（非首行对不齐）。期间加过 `scroll-snap` 试图缓解可滚动区域边缘卡片截断，用户测试后要求撤销，已完整回退。版本号 0.3.5→0.3.6（PATCH）。
 - **续93（已提交，用户已确认测试通过）**：启动器（收藏托盘）网格新增键盘导航（Start 菜单风）——搜索框内 `↓` 进网格，网格内 `←→↑↓` 二维移动（列数按 DOM `offsetTop` 动态算）、`Enter` 打开（复用 `openLauncherItem`+放大动画）、行首`←`/首行`↑`/`Esc` 回搜索框；未进网格时保留旧 `filteredApps[0]` Enter 兜底。复用既有 `.app-tile.selected`（CSS 零新增），未碰窗口/焦点/热键最高危区。版本号 0.3.4→0.3.5（PATCH）。
@@ -32,6 +34,28 @@
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
 
+### 续97（2026-07-10，src/App.tsx，用户已确认测试通过并提交）——中转区多选拖出「什么也不做却误删」修复（首版 pending 方案已回退）
+- **现象**（用户报）：中转站多选若干条目后，在区内小幅拖动再立刻松手（并未拖到任何外部目标），被选中项也被删除；单个条目拖动无此问题。持久化关闭时的预期是「成功拖到外部落地后才消失」。
+- **根因**：多选/搜索态超阈值即 `beginNativeDragOut` 起 native OLE（`DoDragDrop`）。区内快速松手时落点落在**自身 overlay 的 IDropTarget**（`dragdrop.rs`）——它对含 CF_HDROP 的拖入 `accept` 并回传 `DROPEFFECT_COPY`（`set_effect`），Rust emit `drag-out-done="copy"` → un9 判 `dropped=true` 非持久化 → 删条目。**单项无此症**：单项先进 `reorder`（纯 JS FLIP），只有光标离开 `.drop-area` 才升级 native，小幅拖动+松手只是重排提交、永不 OLE。
+- **首版方案（已回退）**：给多选/搜索态加 `pending` 态、与单项一样等光标离开 `.drop-area` 才 `beginNativeDragOut`。用户实测：**多选拖到外部无法落地**（原拖出功能失效），单项仍正常——**延迟起 OLE 破坏了多选原生拖出的成功投放**（单项 reorder→native 之所以行得通有其自身链路，多选照搬失败，根因未深究，因方向本身错——不应改拖出起手时机）。已完整回退全部 pending 改动（类型/init/move/up 复原）。
+- **改采方案（落点结果侧，不碰拖出起手时机）**：新增 `droppedOnSelfRef`。① `beginNativeDragOut` 起手清 false；② `files-dropped` 内部落点分支（`internalDrag && !inLauncher`，即落回自身 overlay 非启动台）置 true；③ `drag-out-done`(un9) 开头若命中则复位标志 + 清 `draggedIds` + **直接返回不删不清选区**。
+- **成立依据**：`dragdrop.rs` Drop 中 `accept = !paths.is_empty()`，`emit("files-dropped")` 与 `set_effect(copy)` **同一 `accept` 门控**——故「落回自身且回传 copy」⟺「files-dropped 必被 emit」，标志一定被置上；且 files-dropped 在 DoDragDrop 阻塞期内 emit（早于其返回后 emit 的 drag-out-done），前端按序处理、标志同步先置（handler 首个 await 前）。真正拖到外部落地：落点非本窗口→无 files-dropped 自标记→照常删。附带修复 keepOpen 模式「多选拖回区内也被误删」的同源变体。
+- **验证**：`npx tsc --noEmit` + `npm run build` 均零错误；拖拽无法模拟输入，用户 GUI 实测确认：①多选区内小幅拖动+松手不删/不掉选区；②多选拖到外部文件夹**恢复正常落地并消失**（首版回归点）均通过。CLAUDE.md 反查表行已改写为落点侧方案。
+- **提交**：`772b2ce`（refactor 续96+续97 代码合并提交）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。
+- **文件**：`src/App.tsx`（`droppedOnSelfRef` + `beginNativeDragOut`/`files-dropped`/`drag-out-done` 三处）。
+
+### 续96（2026-07-10，src/App.tsx + src/App.css + 新增 src/lib/format.ts·src/lib/fuzzy.ts·src/icons.tsx，用户已确认测试通过并提交）——前端可维护性重构 + 2 处小 bug 修复
+- **触发**：用户问「前端/界面有什么值得优化」，静态审查后按「先修 2 个实害 → 再抽纯函数+SVG」的优先级推进（未动最高危区）。
+- **bug①（实害）**：剪贴板历史列表 `filteredClip.map((c,i)=><div key={i}>`（`App.tsx`）。新复制项 **prepend 到头部**，用 index 做 key 会让 React 错位复用 DOM——每个 clip-block 挂着 pointer 拖拽 handler + `copiedTime` ✓ 反馈 + 图片 src，可能导致复制后拖拽态/✓ 串到相邻卡。改 `key={c.time}`（`time` 本就是删除/✓ 判定的 identity，唯一）。
+- **bug②（主题漏配）**：`.stage-card-actions`（方格卡片悬浮操作栏）底色硬编码 `rgba(30,30,30,0.90)`，`.stage-card-act-btn` 白字——浅色主题下黑帯突兀 + 图标不可见。加 `[data-theme="light"]` 上书：操作栏改 `rgba(245,245,247,.94)`、按钮 `rgba(0,0,0,.08)` + `color:var(--text)`（SVG 走 currentColor 自动变深）。
+- **重构③（抽文件降 monolith）**：App.tsx 曾 2141 行单文件单组件。抽出——
+  - `src/lib/format.ts`：`IMG_EXTS`/`fmtSize`/`ago`（带 TFunc）/`extIcon`/`dirOf`，React 无依赖纯函数。
+  - `src/lib/fuzzy.ts`：`MatchResult`/`fuzzyScore`/`typeKeywords`/`matchItem`，模糊搜索纯函数。
+  - `src/icons.tsx`：`IconCheck/IconCopy/IconTrash/IconOpen/IconPin/IconSearch`——替换 App.tsx 里各重复 4~6 次的内联 12/16/18px SVG（copy/check 三元、trash ×3、search ×3 等）；全部 `stroke="currentColor"` 保持原色继承。设置齿轮 + 文件夹 SVG（各 1 处、个例）保留在 App.tsx（剩 2 个 `<svg>`）。
+  - App.tsx 减到 ~2000 行；`getFileIcon`（依赖 ClipItem 类型）、`HighlightText`（JSX 小组件）留在 App。`MatchResult` 在 App 未再直接用，已从 import 去掉（避 `noUnusedLocals`）。
+- **验证**：`npx tsc --noEmit` 零错误；`npm run build` 通过（version-check 一致 + 41 modules transformed，较重构前 +3 文件）。纯移动/替换无行为变更；拖拽/主题交互链路无法模拟输入，用户 `npm run tauri dev` GUI 确认通过。
+- **提交**：与续97 合并为 `772b2ce`（refactor 前端重构+3 修复）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。因 App.tsx 同时含续96/续97 改动、无法按文件切分，两会话代码合并为一个 commit。
+
 ### 续95（2026-07-09，src-tauri/src/clipboard.rs + src/App.tsx + src/App.css，用户已确认测试通过并提交）——cmd 图片粘贴路径回退 + 剪贴板截图拖拽修复
 - **bug①：中转区图片/截图点击后粘不进 cmd/Windows Terminal**。排查 `set_clipboard_image`（`clipboard.rs:710`）确认：目标窗口走三分叉里的分支③（其余 app，写 CF_DIB 位图），而控制台（conhost/Windows Terminal）粘贴只解析 CF_TEXT，位图对它没有任何可解释含义——脱离本应用手动复制图片到 cmd 按 Ctrl+V 同样无反应，是控制台能力边界不是本应用 bug。
   - **方案**（用户选择"实现路径回退"而非"仅说明限制"）：新增判断 `class1=="ConsoleWindowClass"||"CASCADIA_HOSTING_WINDOW_CLASS"` 的分支，退化为把该图片落盘路径（大图复用已有 `orig_path`，小图现解码落一份 PNG 到 `clip_images/`）当**文本**写回剪贴板 + Ctrl+V，给出可用结果而非静默无反应。原三分叉→四分叉，`CLAUDE.md` 对应铁律描述与反查表已同步更新。
@@ -39,29 +63,6 @@
 - **验证**：`cargo check --lib`（bug①）、`npx tsc --noEmit`（bug②）均零警告零错误；两个 bug 均为真实交互链路（cmd 粘贴 / 跨面板拖拽），无法模拟输入验证，用户分别在 `npm run tauri dev` 中 GUI 实测确认通过。
 - **提交**：`ff0bea6`（fix cmd 路径回退）+ `eeff496`（fix 截图拖拽）+ `687fffc`（chore 版本号 0.3.6→0.3.7，PATCH）。
 - **文件**：`src-tauri/src/clipboard.rs`（`set_clipboard_image` 新增控制台分支）、`src/App.tsx`（`.clip-image` 加 `draggable={false}`）、`src/App.css`（`.clip-image` 加 `-webkit-user-drag:none;user-select:none`）、`CLAUDE.md`（四分叉描述 + 反查表新增一行）。
-
-### 续94（2026-07-09，src/App.css + src/App.tsx，用户已确认测试通过并提交）——中转站/启动台卡片行节奏对齐 + 中转站行容量 9→10
-- **需求链**（同一会话四轮迭代）：①中转区卡片悬浮操作条稍矮，多出高度补给缩略图；②启动台/中转站卡片轮廓高统一，启动台名字区固定两字高、不满两行居中；③两栏出现"越往下越错位"，判定为逐行"卡高+间距"（行节奏）不等，不是首行没对齐；④中转站列表视图行高不能只砍一半，要按行节奏对齐；⑤消除可滚动区域内边缘卡片被截断——评估后判定"任何时候都不截断"需 JS 动态测量容器高度（依赖运行时窗口尺寸，跨显示器表现不确定），按用户给的口子放弃，改加纯 CSS `scroll-snap` 折中；用户测试后要求撤销该 scroll-snap，已完整回退（4 处 `scroll-snap-type`/`scroll-snap-align` 全部移除，diff 清零，未留痕迹）。
-- **最终尺寸**：中转站卡片 80→72px，缩略图 72×58，label padding 3/6/5，悬浮操作条 34px，圆角 9px，图标容器 30×30；`.stage-grid` gap 8→6px（10 列共占 774px＜原 9 列 784px，行容量 9→10）；卡片轮廓高 94px + gap6 = 行节奏 100px。
-- **启动台联动**：`.app-tile-label` 外包一层 `.app-tile-label-wrap`（固定 29px + flex 居中），名字不足两行时垂直居中、两行时铺满被 `line-clamp` 截断，轮廓高固定 96px + gap4 = 行节奏 100px，与中转站严格对齐（此前名字行数不同会导致行高浮动，是错位根因之一）。
-- **列表视图**：`.stage-item` 固定高 44px（`.stage-thumb` 32→30px 配合内边距），行节奏 44+6=50px，正好是网格行节奏 100px 的 1/2——两行列表 = 一行网格的纵向空间，每隔一行与左栏重新对齐。
-- **验证**：`npx tsc --noEmit` 零错误；纯 CSS/JSX 视觉改动，未跑 `npm run build`（含 version-check，非本次改动相关），用户在 `npm run tauri dev` 中多轮 GUI 实测确认（含加入/撤销 scroll-snap 两态）通过。
-- **提交**：`d6226ee`（fix 布局对齐）+ `8aaf53c`（chore 版本号 0.3.5→0.3.6，PATCH）。
-- **文件**：`src/App.css`（`.app-tile-label-wrap`/`.stage-item`/`.stage-thumb`/`.stage-grid`/`.stage-card*`）、`src/App.tsx`（label 包一层 wrap div）。
-
-### 续93（2026-07-09，src/App.tsx，用户已确认测试通过并提交）——启动器网格新增键盘导航（Start 菜单风）
-- **需求**：启动器（收藏托盘）加键盘操作——↑↓←→ 移动选中、Enter 打开，此前只有「顶栏搜索非空时 Enter 起动 filteredApps[0]」的兜底。
-- **实现**：新增 `launcherSelIdx` state（-1=未选中/焦点在搜索框）。keydown 处理器加 launcher 网格导航块：
-  - 未选中(idx<0)：仅 `↓` 进入网格（setIdx 0）；`←→↑` 不 preventDefault，留给搜索输入框做光标编辑（Start 菜单式：先打字过滤，↓ 才进结果）。
-  - 已选中(idx>=0)：`←→` ±1、`↑↓` ±cols 二维移动并 clamp；行首 `←`/首行 `↑` 退回搜索框（setIdx -1 + searchRef.focus）；`Enter` 打开选中项（复用 `openLauncherItem`，含放大动画，iconEl 取 `.app-tile.selected .app-tile-icon`）。
-  - **列数 `cols` 按 DOM 动态算**（`.app-tile` 首行同 `offsetTop` 计数），不硬编码——契合高 DPI/响应式铁律。
-- **兜底保留**：未进入网格(idx<0)时 Enter 仍走旧 `filteredApps[0]` 起动路径。
-- **Esc 分层链新增一段**：选中态(idx>=0)先解除选中+回搜索框、再关页（插在 stageSel 之后、settings 之前，用直接值非 ref——已随 idx 入 effect deps）。
-- **复用与零新增**：高亮复用既有 `.app-tile.selected`（CSS 行 91，与 :hover 同背景）→ **CSS 零新增**；两 effect——选中项 `scrollIntoView` + `visible`/`search` 变化复位 idx=-1（打字过滤即退出网格，语义自洽）。`.app-tile` className 加 `${i===launcherSelIdx?" selected":""}`。
-- **未碰最高危区**：呼出 set_focus 不动，纯 JS 键处理。effect deps 补 `filteredLauncher/launcherSelIdx/openLauncherItem`。
-- **验证**：`npx tsc --noEmit` 零错误；用户 GUI 实测 ↓进网格/四向移动/Enter起动+动画/搜索框内←→编辑不误入网格/首行↑·行首←·Esc 回搜索框 均确认通过。
-- **提交**：`822017f`（feat）+ `3825372`（chore 版本号 0.3.4→0.3.5，PATCH）。
-- **文件**：`src/App.tsx`（`launcherSelIdx` state / 两 effect / keydown 网格导航块 + Esc 一段 / `.app-tile` selected class）。
 
 ---
 
@@ -86,14 +87,29 @@ npm run tauri build    # 打包
 
 ```
 src/
-  App.tsx          # 主组件：三栏布局 + 剪贴板面板 + 热键事件监听
+  App.tsx          # 主组件：三栏布局 + 剪贴板面板 + 热键事件监听（~2000行，仍是单组件）
   App.css          # Win11 暗色主题 + 毛玻璃 + 全屏布局
+  lib/format.ts    # 纯函数：fmtSize/ago/extIcon/dirOf/IMG_EXTS（续96 抽出）
+  lib/fuzzy.ts     # 纯函数：fuzzyScore/typeKeywords/matchItem/MatchResult（续96 抽出）
+  icons.tsx        # 复用 SVG 图标组件：IconCheck/Copy/Trash/Open/Pin/Search（续96 抽出）
+  i18n.ts          # 中/英文案与 makeT
   main.tsx         # React DOM 入口
   index.css        # Tailwind CSS v4 入口
   vite-env.d.ts    # Vite 类型声明
 ```
 
 关键依赖：`react@18`、`@tauri-apps/api@2`、`@tauri-apps/plugin-store`、`framer-motion`（已安装未使用，CSS 动画已替代）
+
+**前端优化清单（续96 静态审查产出，已做打√，余为候选）**：
+- √ 剪贴板列表 index key → `key={c.time}`（prepend 列表错位复用修复）
+- √ `.stage-card-actions` 浅色主题上书（暗色硬编码漏配修复）
+- √ 纯函数（format/fuzzy）+ 复用 SVG（icons）抽出文件
+- ▢ App.tsx 仍 2000 行单组件——可继续拆表现层组件（SettingsModal / EnhSearchLayer / AppPickerModal / ClipList），show/hide/焦点结线须留 App 侧
+- ▢ 巨型 store 加载 useEffect（`App.tsx` ~1 行 2000 字符）违「短行原则」，可展开多行（含 invoke set_hotkey 等，属轻度敏感，改前先读）
+- ▢ grid/list 中转条目 label/icon 算法重复，可提 `stageLabel(s)`/`stageIcon(s)`
+- ▢ 剪贴板/中转列表无键盘导航（仅启动器网格 + 增强搜索有）
+- ▢ 全局 `outline:none` 致设置内按钮键盘焦点不可见 → 加 `:focus-visible`
+- ▢ 图标按钮多缺 `aria-label`（仅 title），无障碍偏弱（个人工具，低优先）
 
 ---
 
