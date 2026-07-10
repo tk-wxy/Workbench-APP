@@ -499,6 +499,30 @@ pub(crate) fn init_thumb_cache(data_dir: &std::path::Path) {
     });
 }
 
+/// 用系统文件管理器打开缩略图缓存目录（stage_thumbs/）。与剪贴板 open_clip_image_dir 对齐。
+#[tauri::command]
+pub fn open_stage_thumb_dir() -> Result<(), String> {
+    let dir = STAGE_THUMB_DIR.get().ok_or_else(|| "缩略图缓存目录未初始化".to_string())?;
+    let file = str_to_wide(&dir.to_string_lossy());
+    let verb = str_to_wide("open");
+    unsafe {
+        let ret = ShellExecuteW(0, verb.as_ptr(), file.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL);
+        if ret as i32 <= 32 { return Err(format!("无法打开目录: {}", ret as i32)); }
+    }
+    Ok(())
+}
+
+/// 删除 stage_thumbs/ 内全部文件（不删目录本身）。与剪贴板 clear_clip_image_cache 对齐。
+/// 当前会话前端 stageThumbs 内存缓存仍在（已显示的缩略图不受影响）；重启后按需重新生成并重建磁盘缓存。
+#[tauri::command]
+pub fn clear_stage_thumb_cache() -> Result<(), String> {
+    let Some(dir) = STAGE_THUMB_DIR.get() else { return Ok(()); };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() { let _ = std::fs::remove_file(entry.path()); }
+    }
+    Ok(())
+}
+
 /// 缩略图缓存总量封顶：超 STAGE_THUMB_CACHE_MAX_BYTES 时从最旧（mtime 升序）删到 ≤ 上限。
 /// 与 clip 缓存不同：缩略图无 Rust 侧「被引用集」（stage 是前端状态），故不做孤儿清理，纯按容量+时间淘汰
 /// （被删的下次呼出会按需重建，非数据丢失）。全程 best-effort，任何 fs 错误跳过、绝不 panic。

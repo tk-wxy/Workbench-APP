@@ -143,6 +143,8 @@ export const EN_DICT: Record<string, string> = {
   "✓ 已清空": "✓ Cleared",
   "清空缓存": "Clear Cache",
   "历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。": "Original images from history are stored here; clearing it reverts history pastes to thumbnail quality.",
+  "缩略图缓存": "Thumbnail Cache",
+  "中转区图片文件的缩略图缓存，命中后重启秒开。清空后下次显示会按需重新生成，不影响原文件。": "Thumbnail cache for image files in the staging area; cache hits make restarts instant. Clearing it regenerates thumbnails on demand next time and doesn't affect the original files.",
 
   // ── 设置：搜索 ──
   "呼出默认搜索": "Default Search on Launch",
