@@ -24,3 +24,12 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Internal dev docs (local only)
+CLAUDE.md
+claude.md
+AGENTS.md
+DECISIONS.md
+MEMORY.md
+HISTORY.md
+DEVLOG.md
