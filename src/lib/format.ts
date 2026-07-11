@@ -20,24 +20,29 @@ export function ago(ms: number, t: TFunc) {
   return t("{n}小时前", { n: Math.floor(s / 3600) });
 }
 
-// 拡張名 → タイプ絵文字（検索結果 + 剪贴板カード共用、単一真相源）
-export function extIcon(ext: string): string {
+// 文件类型分类键（拡張名 → カテゴリ）。単一真相源；実際のアイコン描画は icons.tsx の FileGlyph が担う。
+// 以前は絵文字を直接返していたが、Solar Bold Duotone アイコンに統一するためカテゴリ键のみを返すよう変更。
+export type FileCat =
+  | "image" | "video" | "audio" | "archive" | "pdf" | "doc" | "sheet" | "ppt"
+  | "ebook" | "disk" | "font" | "code" | "exe" | "text" | "folder" | "generic" | "box";
+
+export function fileCategory(ext: string): FileCat {
   const e = ext.toLowerCase().replace(/^\./, "");
-  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "heic", "heif", "avif", "psd"].includes(e)) return "🖼️";
-  if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "ts", "3gp"].includes(e)) return "🎬";
-  if (["mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "opus", "aiff", "mid"].includes(e)) return "🎵";
-  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "tgz"].includes(e)) return "🗜️";
-  if (e === "pdf") return "📕";
-  if (["doc", "docx", "odt", "rtf", "pages"].includes(e)) return "📝";
-  if (["xls", "xlsx", "csv", "ods", "tsv"].includes(e)) return "📊";
-  if (["ppt", "pptx", "odp", "key"].includes(e)) return "📽️";
-  if (["epub", "mobi", "azw", "azw3", "fb2"].includes(e)) return "📚";
-  if (["iso", "img", "dmg", "vhd", "vhdx"].includes(e)) return "💿";
-  if (["ttf", "otf", "woff", "woff2", "fon"].includes(e)) return "🔤";
-  if (["js", "mjs", "cjs", "ts", "jsx", "tsx", "py", "rs", "go", "cpp", "cc", "cxx", "c", "h", "hpp", "java", "cs", "php", "rb", "swift", "kt", "scala", "html", "htm", "css", "scss", "sass", "less", "vue", "json", "yaml", "yml", "xml", "toml", "sql", "lua", "r", "dart"].includes(e)) return "💻";
-  if (["exe", "msi", "bat", "cmd", "ps1", "sh", "appx", "apk", "deb", "rpm"].includes(e)) return "⚙️";
-  if (["txt", "md", "markdown", "log", "ini", "cfg", "conf", "env", "properties"].includes(e)) return "📃";
-  return "📎";
+  if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "heic", "heif", "avif", "psd"].includes(e)) return "image";
+  if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "ts", "3gp"].includes(e)) return "video";
+  if (["mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "opus", "aiff", "mid"].includes(e)) return "audio";
+  if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "tgz"].includes(e)) return "archive";
+  if (e === "pdf") return "pdf";
+  if (["doc", "docx", "odt", "rtf", "pages"].includes(e)) return "doc";
+  if (["xls", "xlsx", "csv", "ods", "tsv"].includes(e)) return "sheet";
+  if (["ppt", "pptx", "odp", "key"].includes(e)) return "ppt";
+  if (["epub", "mobi", "azw", "azw3", "fb2"].includes(e)) return "ebook";
+  if (["iso", "img", "dmg", "vhd", "vhdx"].includes(e)) return "disk";
+  if (["ttf", "otf", "woff", "woff2", "fon"].includes(e)) return "font";
+  if (["js", "mjs", "cjs", "ts", "jsx", "tsx", "py", "rs", "go", "cpp", "cc", "cxx", "c", "h", "hpp", "java", "cs", "php", "rb", "swift", "kt", "scala", "html", "htm", "css", "scss", "sass", "less", "vue", "json", "yaml", "yml", "xml", "toml", "sql", "lua", "r", "dart"].includes(e)) return "code";
+  if (["exe", "msi", "bat", "cmd", "ps1", "sh", "appx", "apk", "deb", "rpm"].includes(e)) return "exe";
+  if (["txt", "md", "markdown", "log", "ini", "cfg", "conf", "env", "properties"].includes(e)) return "text";
+  return "generic";
 }
 
 // 絶対パスから親ディレクトリを抽出（検索結果のディレクトリ表示用）

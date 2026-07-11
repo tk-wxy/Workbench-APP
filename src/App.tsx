@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, extIcon, dirOf } from "./lib/format";
+import { IMG_EXTS, fmtSize, ago, dirOf, type FileCat } from "./lib/format";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
-import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch } from "./icons";
+import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
+         IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
+         IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip } from "./icons";
 
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
@@ -88,23 +90,23 @@ type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
 
 // 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
 const SETTINGS_TABS = [
-  { id: "general",   icon: "⚙",  label: "常规" },
-  { id: "launcher",  icon: "🚀", label: "启动台" },
-  { id: "stage",     icon: "📦", label: "中转站" },
-  { id: "clipboard", icon: "📋", label: "剪贴板" },
-  { id: "search",    icon: "🔍", label: "搜索" },
-  { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
-  { id: "about",     icon: "ℹ",  label: "关于" },
+  { id: "general",   Icon: IconSettings,  label: "常规" },
+  { id: "launcher",  Icon: IconRocket,    label: "启动台" },
+  { id: "stage",     Icon: IconBox,       label: "中转站" },
+  { id: "clipboard", Icon: IconClipboard, label: "剪贴板" },
+  { id: "search",    Icon: IconSearch,    label: "搜索" },
+  { id: "hotkeys",   Icon: IconKeyboard,  label: "快捷键" },
+  { id: "about",     Icon: IconInfo,      label: "关于" },
 ] as const;
 type SettingsTab = typeof SETTINGS_TABS[number]["id"];
 
 const SHORTCUTS = [
-  { l: "文件管理器", e: "🖥️", a: "explorer.exe"    },
-  { l: "下载",       e: "⬇️", a: "shell:Downloads" },
-  { l: "桌面",       e: "🖼️", a: "shell:Desktop"   },
-  { l: "终端",       e: "⬛", a: "wt"              },
-  { l: "计算器",     e: "🔢", a: "calc"            },
-  { l: "设置",       e: "⚙️", a: "ms-settings:"   },
+  { l: "文件管理器", Icon: IconExplorer,   a: "explorer.exe"    },
+  { l: "下载",       Icon: IconDownload,   a: "shell:Downloads" },
+  { l: "桌面",       Icon: IconMonitor,    a: "shell:Desktop"   },
+  { l: "终端",       Icon: IconTerminal,   a: "wt"              },
+  { l: "计算器",     Icon: IconCalculator, a: "calc"            },
+  { l: "设置",       Icon: IconSettings,   a: "ms-settings:"   },
 ] as const;
 
 // 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
@@ -112,16 +114,20 @@ const SHORTCUTS = [
 const LAUNCH_ANIM_MS = 200;
 // 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
-interface LaunchAnim { icon: string | null; name: string; iconText?: string; rect: { top: number; left: number; width: number; height: number }; }
+interface LaunchAnim { icon: string | null; name: string; fileGlyph?: FileGlyphArgs; rect: { top: number; left: number; width: number; height: number }; }
 
-function getFileIcon(item: ClipItem): string {
+// FileGlyph に渡す最小引数（クリップ/ステージ/起動アニメ共用）
+type FileGlyphArgs = { cat?: FileCat; ext?: string; isDir?: boolean; isImage?: boolean };
+
+// 剪贴板条目 → FileGlyph 引数（多文件=box、图片=image、其余按扩展名）
+function fileGlyphFor(item: ClipItem): FileGlyphArgs {
   const items = item.items ?? [];
-  if (items.length > 1) return "📦";
+  if (items.length > 1) return { cat: "box" };
   const first = items[0];
-  if (!first) return "📎";
-  if (first.isImage) return "🖼️"; // 剪贴板图片（可能无扩展名）
+  if (!first) return { cat: "generic" };
+  if (first.isImage) return { isImage: true }; // 剪贴板图片（可能无扩展名）
   const ext = first.ext || first.path.split(".").pop() || "";
-  return extIcon(ext);
+  return { ext };
 }
 
 // ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
@@ -331,6 +337,31 @@ export default function App() {
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
   const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
+  // 启动台文件/文件夹图标回填：历史存的旧条目 icon 为 null（走 Solar 兜底），这里补取系统默认图标（与桌面一致）。
+  // tried 集合防止对提取失败（返回 null）的路径反复 invoke；每个缺图路径只尝试一次。
+  const launcherIconTriedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const need = launcher
+      .filter(it => (it.kind==="file"||it.kind==="folder") && !it.icon && !launcherIconTriedRef.current.has(it.path))
+      .map(it => it.path);
+    if (!need.length) return;
+    need.forEach(p => launcherIconTriedRef.current.add(p));
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const res = await invoke<[string, string|null][]>("get_file_icons", { paths: need });
+        if (cancelled) return;
+        const map = new Map(res);
+        const cur = launcherRef.current;
+        // 仅当确有取到图标时才写回并持久化，避免无意义的 store 写入
+        if (cur.some(it => !it.icon && map.get(it.path))) {
+          saveLauncher(cur.map(it => (!it.icon && map.get(it.path)) ? { ...it, icon: map.get(it.path)! } : it));
+        }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [launcher, saveLauncher]);
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
   const changeStagePersist = useCallback(async (v:boolean) => { setStagePersist(v); if(store){ await store.set("stage-persist",v); await store.save(); } }, [store]);
@@ -390,7 +421,7 @@ export default function App() {
                   newItem = { id: launcherId(), kind: "app", name: lnk.name, icon: lnk.icon, path: lnk.path };
                 } else {
                   const f = await invoke<FileEntry>("get_file_info", { path: p });
-                  newItem = { id: launcherId(), kind: f.isDir ? "folder" : "file", name: f.name, path: f.path, ext: f.ext };
+                  newItem = { id: launcherId(), kind: f.isDir ? "folder" : "file", name: f.name, path: f.path, ext: f.ext, icon: f.icon ?? null };
                 }
                 next = [...next, newItem];
               } catch {}
@@ -656,9 +687,14 @@ export default function App() {
   }, [stage, search]);
   // 续99b：为中转区图片文件懒生成缩略图（Rust 侧解码缩图，前端只缓存小 base64）。pending ref 去重：每个 path 只发起一次，失败不重试（回退 emoji）。
   useEffect(() => {
-    const paths = stage
+    const stagePaths = stage
       .filter(s => s.type === "file" && s.items?.[0]?.isImage && s.items?.[0]?.path)
       .map(s => s.items![0].path);
+    // 启动台的图片文件也生成缩略图（与中转区共用同一缓存 stageThumbs）
+    const launcherPaths = launcher
+      .filter(it => it.kind === "file" && !!it.ext && IMG_EXTS.includes(it.ext.toLowerCase()))
+      .map(it => it.path);
+    const paths = [...stagePaths, ...launcherPaths];
     for (const p of paths) {
       if (stageThumbPendingRef.current.has(p)) continue;
       stageThumbPendingRef.current.add(p);
@@ -667,10 +703,10 @@ export default function App() {
           const { invoke } = await import("@tauri-apps/api/core");
           const url = await invoke<string>("get_stage_thumbnail", { path: p });
           setStageThumbs(prev => ({ ...prev, [p]: url }));
-        } catch { /* 失败：保留 pending 标记不再重试，卡片显示 emoji 兜底 */ }
+        } catch { /* 失败：保留 pending 标记不再重试，显示图标兜底 */ }
       })();
     }
-  }, [stage]);
+  }, [stage, launcher]);
   // 续100：中转区失踪扫描。收集所有 file 条目路径 → Rust 批量 exists() → 记下失踪集合。
   // 复用既有 stageRef（行 216，已随渲染更新）供 hotkey-show 闭包读最新 stage；scanStageMissing 无依赖、稳定。
   const scanStageMissing = useCallback(async (list?: StageItem[]) => {
@@ -780,9 +816,9 @@ export default function App() {
     if (reduce || !iconEl) { hideWorkbench(); return; }
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
-    // 用 emoji 文字作克隆内容（与 .app-tile-icon 里 <span> 保持一致）
-    const iconText = it.kind === "folder" ? "📁" : extIcon(it.ext ?? "");
-    setLaunchAnim({ icon: null, name: it.name, iconText, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    // 克隆内容与磁贴一致：有真实系统图标用图标，否则回退 FileGlyph
+    const fileGlyph: FileGlyphArgs = it.kind === "folder" ? { isDir: true } : { ext: it.ext ?? "" };
+    setLaunchAnim({ icon: it.icon ?? null, name: it.name, fileGlyph, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
     setDismissing(true);
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
   }, [launchApp]);
@@ -944,10 +980,19 @@ export default function App() {
     const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
     saveStage([item, ...stage].slice(0, stageMax));
   }, [stage, saveStage, stageMax]);
-  // 增强搜索 fs 结果加入启动台（按 path 去重）
-  const addFsToLauncher = useCallback((r:{path:string;name:string;ext?:string;isDir:boolean}) => {
+  // 增强搜索 fs 结果加入启动台（按 path 去重）；图标用系统默认图标（与桌面/资源管理器一致）：
+  // 优先复用结果自带 icon（搜索索引已附），缺失则回退 get_file_info 取一次。
+  const addFsToLauncher = useCallback(async (r:{path:string;name:string;ext?:string;isDir:boolean;icon?:string|null}) => {
     if (launcher.some(x => x.path === r.path)) return;
-    saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon:null, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
+    let icon: string | null = r.icon ?? null;
+    if (!icon) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const info = await invoke<FileEntry>("get_file_info", { path: r.path });
+        icon = info.icon ?? null;
+      } catch {}
+    }
+    saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
   }, [launcher, saveLauncher]);
   // 从启动器移除（右键）
   const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
@@ -1511,7 +1556,7 @@ export default function App() {
       });
     }
     items.push({ label: t("复制到剪贴板"), action: () => copyToClipboard(c) });
-    items.push({ label: t("📌 钉到中转区"),  action: () => addToStage(c) });
+    items.push({ label: t("钉到中转区"),  action: () => addToStage(c) });
     items.push({ label: t("删除该条目"),    action: () => deleteClipItem(c.time) });
     openCtxMenu(e, items);
   }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem, t]);
@@ -1563,7 +1608,6 @@ export default function App() {
     } catch {}
   }, []);
 
-  const fi = extIcon; // 文件类型图标统一走模块级 extIcon（搜索结果 + 中转条目共用）
 
   // ── 键盘 ──
   useEffect(() => {
@@ -1651,9 +1695,11 @@ export default function App() {
                 onPointerDown={e=>handleLauncherPointerDown(e, it.id)}
                 title={it.kind==="app"?t("单击启动"):t("单击打开")}>
                 <div className="app-tile-icon">
-                  {it.kind==="app" && it.icon ? <img src={it.icon} alt="" draggable={false}/>
-                   : it.kind==="folder" ? <span>📁</span>
-                   : it.kind==="file" ? <span>{fi(it.ext??"")}</span>
+                  {it.kind==="file" && it.ext && IMG_EXTS.includes(it.ext.toLowerCase()) && stageThumbs[it.path]
+                     ? <img className="app-tile-thumb" src={stageThumbs[it.path]} alt="" draggable={false}/>
+                   : it.icon ? <img src={it.icon} alt="" draggable={false}/>
+                   : it.kind==="folder" ? <FileGlyph isDir size={32}/>
+                   : it.kind==="file" ? <FileGlyph ext={it.ext??""} size={32}/>
                    : <span>{it.name[0]}</span>}
                 </div>
                 <div className="app-tile-label-wrap"><span className="app-tile-label">{it.name}</span></div>
@@ -1724,14 +1770,14 @@ export default function App() {
                   );
                   return (
                   <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用")))}>
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}>⚠️</span>}
+                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         {dotEl}
                         {s.content
                           ? <img className="cover" draggable={false} src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
-                          : <span style={{fontSize:32}}>🖼️</span>}
+                          : <FileGlyph isImage size={34}/>}
                       </div>
                     )}
                     {s.type==="text" && (
@@ -1746,9 +1792,7 @@ export default function App() {
                         <div className="stage-card-icon-wrap">
                           {s.items?.[0]?.icon
                             ? <img src={s.items[0].icon} alt="" draggable={false} style={{width:34,height:34,objectFit:"contain"}}/>
-                            : isAnyDir
-                              ? <svg width="32" height="32" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
-                              : <span style={{fontSize:28}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
+                            : <FileGlyph size={30} isDir={isAnyDir} isImage={s.items?.[0]?.isImage} ext={s.ext??s.items?.[0]?.ext??""}/>}
                         </div>
                         {/* 续99b：图片文件显示 Rust 生成的小缩略图（避免原图全分辨率常驻内存）；未就绪/失败则无此层，露出下方 emoji 兜底 */}
                         {s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path] && (
@@ -1781,8 +1825,8 @@ export default function App() {
                         ?<img className="stage-thumb" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/> /* 续99e：列表视图图片文件缩略图，与方格视图一致（复用同一 stageThumbs 缓存）*/
                         :s.type==="file" && s.items?.[0]?.icon
                           ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
-                          :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}>⚠️</span>}
+                          :<span className="stage-emoji">{s.type==="text"?<FileGlyph cat="doc" size={20}/>:<FileGlyph size={20} isDir={s.isDir} isImage={s.items?.[0]?.isImage} ext={s.ext??s.items?.[0]?.ext??""}/>}</span>}
+                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
                     <span className="stage-title">{label}</span>
                     {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
                     {/* 续99e：列表视图「固定」开关，与方格视图 dot 同语义——未固定 hover 才现、已固定常驻 accent；全局持久化开启时隐藏 */}
@@ -1798,15 +1842,15 @@ export default function App() {
                     </div>
                   </div>);
                 })}</div>
-            ) : <p className="empty-hint">{search.trim()?t("无匹配"):t("拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入")}</p>}
+            ) : <p className="empty-hint">{search.trim()?t("无匹配"):t("拖入文件 / 文件夹，或在剪贴板卡片点固定按钮钉入")}</p>}
           </div>
           {/* 快捷入口：可在设置→中转站关闭；关闭后本行不渲染，上方 .drop-area(flex:1) 自动铺满归还的空间 */}
           {showShortcuts && (<>
           <div className="section-label" style={{marginTop:16}}>{t("快捷入口")}</div>
           <div className="shortcut-row">
-            <button className="shortcut-chip" onClick={handleScreenshot}><span>📸</span><span>{t("截屏")}</span></button>
+            <button className="shortcut-chip" onClick={handleScreenshot}><span><IconCamera/></span><span>{t("截屏")}</span></button>
             {SHORTCUTS.map(s=>(
-              <button key={s.l} className="shortcut-chip" onClick={()=>openShortcut(s.a)}><span>{s.e}</span><span>{t(s.l)}</span></button>
+              <button key={s.l} className="shortcut-chip" onClick={()=>openShortcut(s.a)}><span><s.Icon/></span><span>{t(s.l)}</span></button>
             ))}
           </div>
           </>)}
@@ -1828,11 +1872,11 @@ export default function App() {
                 </div>
                 {c.type==="image"? <img className="clip-image" src={c.content} alt="" draggable={false}/>
                 : c.type==="file"? <div className="file-clip-preview">
-                    <span className="clip-file-icon">{getFileIcon(c)}</span>
+                    <span className="clip-file-icon"><FileGlyph size={20} {...fileGlyphFor(c)}/></span>
                     <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : t("{n}个文件", {n: c.count ?? 0})}</span>
                   </div>
                 : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
-                <span className="clip-time">{c.type==="image"?"📷 ":c.type==="file"?"📎 ":""}{ago(c.time, t)}</span>
+                <span className="clip-time">{c.type==="image"?<IconCamera size={12} className="clip-time-ic"/>:c.type==="file"?<IconPaperclip size={12} className="clip-time-ic"/>:null}{ago(c.time, t)}</span>
               </div>
             )): <p className="empty-hint">{search.trim()?t("无匹配"):t("显示时自动读取")}</p>}
           </div>
@@ -1852,10 +1896,10 @@ export default function App() {
           {enhResults.length ? enhResults.map((r,i)=>{
             const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : r.kind==="clip" ? "clip:"+r.item.time : "fs:"+r.path;
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
-                       : r.kind==="stage" ? <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>
-                       : r.kind==="clip" ? <span>{r.item.type==="text"?"📝":r.item.type==="image"?"🖼️":fi(r.item.items?.[0]?.ext??"")}</span>
+                       : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
+                       : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
                        : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
-                                                 : <span>{r.kind==="fs" && r.isDir?"📁":fi(r.kind==="fs"?r.ext:"")}</span>;
+                                                 : <FileGlyph size={22} isDir={r.kind==="fs" && r.isDir} ext={r.kind==="fs"?r.ext:""}/>;
             const label = r.kind==="app" ? r.app.name : r.name;
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
             const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
@@ -1877,8 +1921,8 @@ export default function App() {
                   <span className="enh-result-badge">{badge}</span>
                   {(r.kind==="fs" || r.kind==="app") && (
                     <div className="enh-result-actions">
-                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();addFsToStage(r);setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?"✓":t("中转")}</button>}
-                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();r.kind==="app"?addAppToLauncher(r.app):addFsToLauncher(r);setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?"✓":t("启动台")}</button>
+                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();addFsToStage(r);setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
+                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();r.kind==="app"?addAppToLauncher(r.app):addFsToLauncher(r);setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
                     </div>
                   )}
                 </div>
@@ -1893,7 +1937,7 @@ export default function App() {
           <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
             <div className="settings-head">
               <span className="settings-title">{t("添加应用")}</span>
-              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}>×</button>
+              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}><IconClose/></button>
             </div>
             <div className="picker-search">
               <IconSearch size={16}/>
@@ -1916,13 +1960,13 @@ export default function App() {
           <div className="settings-modal" onClick={e=>e.stopPropagation()}>
             <div className="settings-head">
               <span className="settings-title">{t("设置")}</span>
-              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}>×</button>
+              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose/></button>
             </div>
             <div className="settings-layout">
               <nav className="settings-nav">
                 {SETTINGS_TABS.map(tab=>(
                   <button key={tab.id} className={`settings-nav-item${settingsTab===tab.id?" settings-nav-active":""}`} onClick={()=>setSettingsTab(tab.id)}>
-                    <span className="settings-nav-icon">{tab.icon}</span>{t(tab.label)}
+                    <span className="settings-nav-icon"><tab.Icon size={16}/></span>{t(tab.label)}
                   </button>
                 ))}
               </nav>
@@ -2024,7 +2068,7 @@ export default function App() {
                     <span className="settings-row-label">{t("缩略图缓存")}</span>
                     <div style={{display:"flex",gap:4}}>
                       <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_stage_thumb_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${thumbCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_stage_thumb_cache");setThumbCacheCleared(true);setTimeout(()=>setThumbCacheCleared(false),1500);}catch{}}}>{thumbCacheCleared?t("✓ 已清空"):t("清空缓存")}</button>
+                      <button className={`settings-action danger${thumbCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_stage_thumb_cache");setThumbCacheCleared(true);setTimeout(()=>setThumbCacheCleared(false),1500);}catch{}}}>{thumbCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
                     </div>
                   </div>
                   <p className="settings-hint">{t("中转区图片文件的缩略图缓存，命中后重启秒开。清空后下次显示会按需重新生成，不影响原文件。")}</p>
@@ -2048,7 +2092,7 @@ export default function App() {
                     <span className="settings-row-label">{t("图片原图缓存")}</span>
                     <div style={{display:"flex",gap:4}}>
                       <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?t("✓ 已清空"):t("清空缓存")}</button>
+                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
                     </div>
                   </div>
                   <p className="settings-hint">{t("历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。")}</p>
@@ -2073,7 +2117,7 @@ export default function App() {
                   {searchEngine==="everything" && (
                     <div className="settings-row">
                       <span className="settings-row-label">{t("连接状态")}<span className="settings-row-sub">{everythingAvailable?t("已连接"):t("未连接")}</span></span>
-                      <button className={`settings-action${evtRedetected?" copied":""}`} onClick={redetectEverything}>{evtRedetected?t("✓ 已检测"):t("重新检测")}</button>
+                      <button className={`settings-action${evtRedetected?" copied":""}`} onClick={redetectEverything}>{evtRedetected?<><IconCheck size={12}/> {t("已检测")}</>:t("重新检测")}</button>
                     </div>
                   )}
                   {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">{t("未检测到 Everything（需安装 Everything 并保持其后台运行，DLL 已随应用内置）。查询将自动回退到内置引擎。换 DLL / 启动 Everything 后点「重新检测」即可热更新，无需重启。")}</p>}
@@ -2095,7 +2139,7 @@ export default function App() {
                       </div>
                     </div>
                     {searchDirs.length>0 ? <div className="search-dir-list">{searchDirs.map(d=>(
-                      <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title={t("移除")}>✕</button></div>
+                      <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title={t("移除")}><IconClose size={14}/></button></div>
                     ))}</div> : <p className="settings-hint">{t("默认仅扫描用户目录（桌面/下载/文档…）。如需搜其他盘符，在此添加根目录。")}</p>}
                     <p className="settings-hint">{t("添加目录后约几秒完成后台重建即可搜到；node_modules / .git 等噪音目录自动跳过。")}</p>
                   </>)}
@@ -2169,7 +2213,7 @@ export default function App() {
     {launchAnim && (
       <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
         {launchAnim.icon ? <img src={launchAnim.icon} alt=""/>
-          : launchAnim.iconText ? <span>{launchAnim.iconText}</span>
+          : launchAnim.fileGlyph ? <FileGlyph {...launchAnim.fileGlyph} size={34}/>
           : <span>{launchAnim.name[0]}</span>}
       </div>
     )}
