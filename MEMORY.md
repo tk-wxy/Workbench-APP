@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-11（续100 中转站原文件失踪处理：拖出崩溃修复 + 按豁免规则自动移除/⚠️标记；已确认测试通过并提交，见 §0/§0A）
+> **最后更新**：2026-07-11（续101 剪贴板历史纳入增强搜索 + 续102 降全屏模糊解呼出/淡出掉帧；已确认测试通过并提交，见 §0/§0A）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）+ **单条「固定」豁免**（卡片右上点点，续99），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；中转卡片**图片文件显示缩略图**（Rust 侧生成小图，续99b）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续101/续102（已提交 `919eba8`+版本 `cec4855`，用户已确认测试通过，合并一次提交）**：①**续101 剪贴板历史纳入增强搜索**——`EnhResult` 加 `clip` 类型，聚合进 Tier1（「文件」分隔线之上），徽标「剪贴板」、按类型图标、命中高亮；匹配=文本按内容/文件按名模糊 + 类型词兜底（「图片」「txt」）；激活（Enter/单击/右键「取走粘贴」）复用 `copyAndPaste`（写回剪贴板+焦点交还+Ctrl+V，经 `copyAndPasteRef` 转接避 TDZ）；增强搜索输入框占位改「搜索应用、中转、剪贴板…」。②**续102 呼出/淡出掉帧优化（纯 CSS）**——`.overlay-simple`/`.enh-layer` 的 `backdrop-filter` 由 `blur(24px)`→`blur(12px)`。根因：`--bg` 0.97 不透明、静止时模糊仅 ~3% 可见，却在全屏实时桌面 @200%DPI 每帧重算（淡出 opacity 动画 + 呼出首帧合成）→ 掉帧主因；降半径后滤镜成本约减半、静止观感几乎无差。版本号 0.4.4→0.4.5（PATCH）。详见 §0A。
 - **续100（已提交 `c3b2795`+版本 `e3e2cbe`，用户已确认测试通过）**：中转站「原文件失踪」处理，含一个崩溃 bug 修复。**崩溃根因**：拖动源文件已删除的中转条目到 cmd → 死路径进 CF_HDROP → OLE 在目标侧与本进程双双闪退。**三层修复**：①Rust `build_formats` 过滤不存在路径（根治，死路径永不进 CF_HDROP；全部失空则命中 `run_drag_out` 已有 `formats.is_empty()` 守卫干净中止、清 `STAGE_REORDER_ACTIVE` 不打断续88 握手；兜住 batch 部分失踪）；②前端拖出/取走提前拦截失踪项；③新增 `check_stage_paths` 命令，每次呼出后台批量 `exists()` 扫（<1ms，**不实时监听**——分散父目录 watcher 代价高/网络盘不支持）。**失踪处理复用「拖出移除」同一豁免规则**：`!persist && !pinned` 直接移除并落盘（用户要的「源文件没了直接消失」）；固定/持久化则保留 + ⚠️ 灰化，隐藏复制/打开等对死文件无效操作、只留删除；设置→中转站「清理失踪」手动清保留项。版本号 0.4.3→0.4.4（PATCH）。详见 §0A。
 - **续99（已提交，用户已确认测试通过）**：中转区界面优化 4 项 + 缩略图内存优化。①封面图标放大（icon-wrap 30→40px 等）；②图片文件显示真缩略图；③标题行变矮（`.stage-section-header` padding 12/6→6/4，启动器+中转站共用）；④右上点点从纯类型色标升级为**每条目「固定」开关**（点亮=📌 常驻，拖出成功也不自动移除；全局持久化开启时整体隐藏）。**续99b（同批，解性能）**：缩略图首版用 asset 协议直读原图→WebView 常驻全分辨率解码位图（一张 4000×3000≈48MB）→图多即卡顿+内存暴涨；改由 Rust `get_stage_thumbnail` 解码缩到 160px 返回小 base64（原图瞬时释放），撤掉 asset 协议。版本号 0.3.9→0.4.0（MINOR）。详见 §0A。
 - **续99c/99d（已提交，用户已确认测试通过）**：①**99c 缩略图落盘缓存**（重启秒开）——`get_stage_thumbnail` 先查 `app_data/stage_thumbs/{crc32(path)}_{mtime}.png`，命中直接读小 PNG（零解码原图），未命中才解码缩图并写盘；后台 janitor 50MB 封顶（`apps.rs`/`lib.rs`）。②**99d 去中转区落地闪烁**——用户报"拖新图落地、缩略图替换占位图标那一刻中转区闪蓝"；**染色测试**（把 drop-flash/file-drag-active/drag-over 三处染不同色）定位到闪的是 🔴 `drop-flash`（落地确认动画，与缩略图生成窗口时间重合，非缩略图 bug）；从 CSS + JS 两层摘掉**中转区** `drop-flash`（`.drop-area.drop-flash` 选择器删除 + `files-dropped` 里加类两行删除），启动台 `.app-grid.drop-flash` 保留，悬停高亮 `file-drag-active` 未碰。版本号 0.4.0→0.4.1（PATCH）。详见 §0A。
@@ -39,6 +40,19 @@
 - **下一步候选（无阻塞）**：① 增强搜索结果的键盘导航已具备（↑↓/Enter），启动器键盘导航续93 已完成——可考虑「Ctrl+K 增强搜索也支持 ←→ 或 Tab 在 Tier 间跳」等细化；② 索引目录可配置；③ 增强搜索纳入剪贴板条目（让搜索成唯一入口）；④ file/folder 收藏的非拖入入口；⑤ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑥ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续101 + 续102（2026-07-11，src/App.tsx + App.css + i18n.ts，用户已确认测试通过并合并一次提交）——剪贴板进增强搜索 + 降全屏模糊解掉帧
+- **续101 剪贴板历史纳入增强搜索**（用户「剪贴板内容进入增强搜索」+「Tab 进入后输入框文案也改」）：
+  - `EnhResult` 新增 `| { kind:"clip"; item:ClipItem; name; ranges }`。`enhTier1` 加 `clipHits`：名称=文本内容(slice 80)/图片标签/文件名，`fuzzyScore` 打分；名称未命中时 `typeKeywords` 子串兜底给基础分 5（无 ranges）。并入 `[...appHits,...stageHits,...clipHits]` 排序、slice(0,10)。deps 加 `clipboard`、`t`。
+  - **激活** `activateEnh` 加 `clip` 分支 → `copyAndPasteRef.current?.(r.item)`：`copyAndPaste` 定义在 `activateEnh` 之后，直接引用会 **TDZ 崩**（useCallback deps 在 render 期求值），故新增 `copyAndPasteRef`，在 `copyAndPaste` 定义后赋值、activateEnh 经 ref 调用。
+  - 渲染：`key`/`icon`(📝/🖼️/文件图标)/`badge`(「剪贴板」) 三处 ternary 加 clip 分支；`label`/`ranges` 已天然兼容。右键菜单 `openEnhCtxMenu`：`else`→`else if(stage)`，clip 落到「只默认项」，默认项 label 对 clip 显「取走粘贴」。
+  - 增强搜索输入框占位 `搜索应用、中转文件…`→`搜索应用、中转、剪贴板…`（复用顶栏已有 i18n）。i18n 补「取走粘贴」。
+- **续102 呼出/淡出掉帧优化（纯 CSS，用户报「呼出/关闭动画掉帧」）**：
+  - **诊断**：整层唯一动画=启动/粘贴的 200ms「淡出露桌面」（`.overlay-simple.dismissing` opacity transition）；Esc/热键关闭与呼出均即时无 CSS 动画。掉帧根因=`.overlay-simple` 的 `backdrop-filter:blur(24px) saturate(1.4)` 作用在**全屏实时桌面** @200%DPI（48px 物理核×640万像素），backdrop 采样活桌面**无法层缓存**，淡出 opacity 每帧逼迫重算整块滤镜。
+  - **关键发现**：`--bg=rgba(13,13,15,0.97)` **97% 不透明** → 静止时那层昂贵模糊仅 ~3% 可见（代价 100%、静止收益 3%），仅淡出中途 alpha 下降时才显形。
+  - **改动**：`.overlay-simple` + `.enh-layer` 的 blur `24px→12px`（含 `-webkit-` 前缀）。滤镜成本约减半、静止观感几乎无差；呼出首帧合成 + 淡出动画同受益。**未碰** `transparent:true`/`focus:false`/show 三约束/Rust 管 hide 等最高危路径。
+  - 备选未采纳：B「淡出期间 `backdrop-filter:none`」（最丝滑、损中途桃面感）、C「彻底去模糊」——用户选 A（降半径）。若仍不够顺可再上 B。
+- **验证**：`npx tsc --noEmit` + `npm run build` 均零错误；用户 GUI 实测两项均通过。版本号 0.4.4→0.4.5（PATCH）。
 
 ### 续100（2026-07-11，src-tauri/src/{apps,dragout,lib}.rs + src/App.tsx + App.css + i18n.ts，用户已确认测试通过并提交）——中转站原文件失踪处理 + 拖出崩溃修复
 - **触发**：用户问「中转站项目的源文件被删了该何去何从」；实测发现拖失踪项到 cmd → cmd 与本软件**双双闪退**（知名 bug）。
@@ -79,15 +93,6 @@
 - **改动**：①Rust `apps.rs` 加 `open_stage_thumb_dir`（`ShellExecuteW` open 目录，复用 `launch_app` 现成 FFI、无新 import）+ `clear_stage_thumb_cache`（read_dir + remove_file 删目录内文件），镜像 clipboard 的 `open_clip_image_dir`/`clear_clip_image_cache`；②`lib.rs` generate_handler 注册两命令；③前端设置→中转站底部加「缩略图缓存」row（打开文件夹 + 清空缓存，`thumbCacheCleared` 状态做 ✓ 反馈），结构照抄剪贴板「图片原图缓存」row；④`i18n.ts` 补「缩略图缓存」+ 说明 hint 中英（「打开文件夹/清空缓存/✓ 已清空」复用现成条目）。
 - **语义**：清空只删磁盘缓存文件，前端 `stageThumbs` 内存缓存与 `stageThumbPendingRef` 不动（当前会话已显示缩略图不受影响）、原图文件不碰；下次重启按需重建。与 clip 的 clear 语义一致。
 - **验证**：`npx tsc --noEmit` + `cargo check` 均通过；用户 GUI 实测确认打开文件夹/清空/英文文案均正常。版本号 0.4.2→0.4.3（PATCH）。
-
-### 续98（2026-07-10，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交）——中转区底部快捷入口可显示/隐藏 + 卡片封面加高
-- **改动①（新功能，PATCH）**：设置→中转站新增「底部快捷入口」显示/隐藏开关。中转区下方那行「截屏 / 文件管理器 / 下载」等快捷按钮（`.shortcut-row`）现在可关闭。
-  - 实现：新增 state `showShortcuts`（默认 `true`）+ store key `show-shortcuts` 持久化（`changeShowShortcuts` 走既有 `store.set+save` idiom）；渲染处 `{showShortcuts && (<>…</>)}` 门控快捷入口行，关闭后本行不渲染，上方 `.drop-area(flex:1)` 自动铺满归还空间、中转区可见更多条目。
-  - 纯前端 store，无需 Rust 同步（同 `stagePersist`/`stageMax` 先例）；i18n 补「底部快捷入口」+ 说明文案中英。
-- **改动②（观感微调）**：中转卡片封面 `.stage-card-thumb` 58→62px（img.cover / text-preview 同步），标签区 `.stage-card-label` padding 3/5→2/2 等量收窄 4px、悬浮操作栏 `.stage-card-actions` 34→30px——**卡片总高 94px 不变**（不破坏续94 建立的 100px 行节奏对齐）。
-- **验证**：`npx tsc --noEmit` 零错误；开关是纯 CSS/渲染门控 + store 持久化，用户 GUI 实测确认通过。
-- **提交**：`0115f9f`（feat 续98）+ `e9aac82`（chore 版本号 0.3.8→0.3.9，PATCH）。
-- **文件**：`src/App.tsx`（showShortcuts state/loader/changeShowShortcuts/门控渲染/设置项）、`src/App.css`（卡片封面+标签区+操作栏尺寸）、`src/i18n.ts`（两条文案）。
 
 ---
 

@@ -9,6 +9,15 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续98（2026-07-10，src/App.tsx + src/App.css + src/i18n.ts，用户已确认测试通过并提交，2026-07-11 续101 迁入）——中转区底部快捷入口可显示/隐藏 + 卡片封面加高
+- **改动①（新功能，PATCH）**：设置→中转站新增「底部快捷入口」显示/隐藏开关。中转区下方那行「截屏 / 文件管理器 / 下载」等快捷按钮（`.shortcut-row`）现在可关闭。
+  - 实现：新增 state `showShortcuts`（默认 `true`）+ store key `show-shortcuts` 持久化（`changeShowShortcuts` 走既有 `store.set+save` idiom）；渲染处 `{showShortcuts && (<>…</>)}` 门控快捷入口行，关闭后本行不渲染，上方 `.drop-area(flex:1)` 自动铺满归还空间、中转区可见更多条目。
+  - 纯前端 store，无需 Rust 同步（同 `stagePersist`/`stageMax` 先例）；i18n 补「底部快捷入口」+ 说明文案中英。
+- **改动②（观感微调）**：中转卡片封面 `.stage-card-thumb` 58→62px（img.cover / text-preview 同步），标签区 `.stage-card-label` padding 3/5→2/2 等量收窄 4px、悬浮操作栏 `.stage-card-actions` 34→30px——**卡片总高 94px 不变**（不破坏续94 建立的 100px 行节奏对齐）。
+- **验证**：`npx tsc --noEmit` 零错误；开关是纯 CSS/渲染门控 + store 持久化，用户 GUI 实测确认通过。
+- **提交**：`0115f9f`（feat 续98）+ `e9aac82`（chore 版本号 0.3.8→0.3.9，PATCH）。
+- **文件**：`src/App.tsx`（showShortcuts state/loader/changeShowShortcuts/门控渲染/设置项）、`src/App.css`（卡片封面+标签区+操作栏尺寸）、`src/i18n.ts`（两条文案）。
+
 ### 续97（2026-07-10，src/App.tsx，用户已确认测试通过并提交，2026-07-11 续100 迁入）——中转区多选拖出「什么也不做却误删」修复（首版 pending 方案已回退）
 - **现象**（用户报）：中转站多选若干条目后，在区内小幅拖动再立刻松手（并未拖到任何外部目标），被选中项也被删除；单个条目拖动无此问题。持久化关闭时的预期是「成功拖到外部落地后才消失」。
 - **根因**：多选/搜索态超阈值即 `beginNativeDragOut` 起 native OLE（`DoDragDrop`）。区内快速松手时落点落在**自身 overlay 的 IDropTarget**（`dragdrop.rs`）——它对含 CF_HDROP 的拖入 `accept` 并回传 `DROPEFFECT_COPY`（`set_effect`），Rust emit `drag-out-done="copy"` → un9 判 `dropped=true` 非持久化 → 删条目。**单项无此症**：单项先进 `reorder`（纯 JS FLIP），只有光标离开 `.drop-area` 才升级 native，小幅拖动+松手只是重排提交、永不 OLE。
