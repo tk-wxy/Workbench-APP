@@ -63,6 +63,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .launch-clone{position:fixed;z-index:100001;display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--fill-2);overflow:hidden;pointer-events:none;transform-origin:center center;animation:launch-pop 200ms ease-out forwards;}
 .launch-clone img{width:75%;height:75%;object-fit:contain;}
 .launch-clone span{font-size:20px;font-weight:600;color:var(--text2);}
+.launch-clone svg{width:70%;height:70%;}
 @keyframes launch-pop{from{transform:scale(1);opacity:1;}to{transform:scale(1.4);opacity:0;}}
 .drag-layer{position:fixed;inset:0;z-index:100003;pointer-events:none;overflow:visible;}
 
@@ -92,6 +93,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .app-tile:hover,.app-tile.selected{background:var(--hover);}
 .app-tile-icon{width:48px;height:48px;border-radius:10px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
 .app-tile-icon img{width:36px;height:36px;object-fit:contain;image-rendering:auto;}
+/* 图片文件缩略图：铺满整个图标方块（cover），比 36px 居中图标更像"预览" */
+.app-tile-icon img.app-tile-thumb{width:100%;height:100%;object-fit:cover;}
 .app-tile-icon span{font-size:20px;font-weight:600;color:var(--text2);}
 /* 名字区固定"两个字高"（29px=2×line-height），无论实际 1 行/2 行都占同样高度，
    短名靠 wrap 的 flex 居中垂直居中，长名两行铺满、被 line-clamp 截断——卡片轮廓高不再随名字长度浮动。
@@ -129,6 +132,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-item:hover{background:var(--fill-2);}
 .stage-item.selected{background:rgba(0,120,212,0.16);box-shadow:inset 0 0 0 1px var(--accent);}
 .stage-emoji{font-size:18px;flex-shrink:0;width:24px;text-align:center;}
+.stage-emoji svg,.clip-file-icon svg{vertical-align:middle;}
 .stage-thumb{width:30px;height:30px;object-fit:cover;border-radius:4px;flex-shrink:0;}
 .stage-title{font-size:12px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text2);}
 .stage-meta{font-size:10px;color:var(--text3);flex-shrink:0;}
@@ -147,8 +151,12 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 /* 续100：原文件失踪、且因固定/持久化被保留的中转条目——灰化 + ⚠️ 角标（非固定/持久化的失踪项直接自动移除，不到这）。 */
 .stage-card.stage-missing,.stage-item.stage-missing{opacity:0.5;filter:grayscale(0.7);}
 .stage-card.stage-missing:hover,.stage-item.stage-missing:hover{opacity:0.7;}
-.stage-missing-badge{position:absolute;top:2px;left:2px;z-index:3;font-size:12px;line-height:1;pointer-events:none;filter:none;}
+.stage-missing-badge{position:absolute;top:2px;left:2px;z-index:3;font-size:12px;line-height:1;pointer-events:none;filter:none;color:#f5a623;display:inline-flex;}/* IconWarn 走 currentColor，这里给告警琥珀色 */
 .stage-item .stage-missing-badge{position:static;margin-right:2px;flex:none;}
+/* 快捷入口 / 关闭 / 移除按钮内的 Solar svg：块级消除基线缝隙 */
+.shortcut-chip svg,.search-dir-remove svg{display:block;}
+/* 剪贴板时间前缀类型图标（截屏=相机 / 文件=回形针），随 9px 时间文字缩小对齐 */
+.clip-time-ic{vertical-align:-2px;margin-right:3px;}
 /* ── 中转区方格卡片（固定 72px 绝对尺寸；行容量 9→10；行节奏与启动台严格对齐，见下）── */
 /* CSS Grid 而非 flex-wrap：flex-wrap 每行各自左对齐，行尾剩余空间只堆在右侧（左右缝隙不对称）；
    grid 的 auto-fill 列数对整个网格只算一次，justify-content:center 把"整块网格"居中，
@@ -284,7 +292,9 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-nav-item{display:flex;align-items:center;gap:9px;padding:10px 14px;border:none;background:none;color:var(--text2);font-size:13px;font-family:var(--font);text-align:left;cursor:pointer;border-radius:7px;transition:all 80ms;}
 .settings-nav-item:hover{background:var(--hover);color:var(--text);}
 .settings-nav-active,.settings-nav-active:hover{background:var(--accent);color:#fff;}
-.settings-nav-icon{font-size:14px;width:16px;text-align:center;flex-shrink:0;}
+.settings-nav-icon{width:16px;height:16px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;}
+/* 导航内 svg 一律继承按钮颜色（含选中态）——覆盖 IconSearch 自带的 .search-icon-svg 静态灰 */
+.settings-nav-icon svg{color:inherit;}
 .settings-panel{flex:1;min-width:0;overflow-y:auto;padding:20px 28px 28px;}
 .settings-panel-title{font-size:14px;font-weight:600;color:var(--text);margin-bottom:10px;}
 .settings-hint{font-size:12px;color:var(--text3);line-height:1.7;margin-top:14px;}
