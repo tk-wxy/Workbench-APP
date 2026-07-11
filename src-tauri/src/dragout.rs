@@ -333,7 +333,10 @@ fn build_formats(items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>, Vec<PathBuf>) {
         match it.r#type.as_str() {
             "file" => {
                 if let Some(paths) = &it.items {
-                    file_paths.extend(paths.iter().cloned());
+                    // 续100：过滤已不存在的路径。死路径进 CF_HDROP → 拖到 cmd 等目标时 OLE 崩溃、连带本进程闪退。
+                    // 整条失踪由前端拦截不发；此处兜底两种情况：① batch 条目部分文件被删；② 前端漏拦的防御。
+                    // 全部过滤空 → 上层 run_drag_out 的 `formats.is_empty()` 守卫会干净中止（并清 STAGE_REORDER_ACTIVE）。
+                    file_paths.extend(paths.iter().filter(|p| std::path::Path::new(p).exists()).cloned());
                 }
             }
             "image" => {
