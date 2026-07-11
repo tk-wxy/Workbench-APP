@@ -143,6 +143,11 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 60ms,background 60ms,color 60ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
+/* 续100：原文件失踪、且因固定/持久化被保留的中转条目——灰化 + ⚠️ 角标（非固定/持久化的失踪项直接自动移除，不到这）。 */
+.stage-card.stage-missing,.stage-item.stage-missing{opacity:0.5;filter:grayscale(0.7);}
+.stage-card.stage-missing:hover,.stage-item.stage-missing:hover{opacity:0.7;}
+.stage-missing-badge{position:absolute;top:2px;left:2px;z-index:3;font-size:12px;line-height:1;pointer-events:none;filter:none;}
+.stage-item .stage-missing-badge{position:static;margin-right:2px;flex:none;}
 /* ── 中转区方格卡片（固定 72px 绝对尺寸；行容量 9→10；行节奏与启动台严格对齐，见下）── */
 /* CSS Grid 而非 flex-wrap：flex-wrap 每行各自左对齐，行尾剩余空间只堆在右侧（左右缝隙不对称）；
    grid 的 auto-fill 列数对整个网格只算一次，justify-content:center 把"整块网格"居中，

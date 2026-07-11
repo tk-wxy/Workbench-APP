@@ -612,6 +612,16 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     Ok(FileInfo { path, name, is_dir: meta.is_dir(), size: meta.len(), ext, icon })
 }
 
+/// 批量存在性检查：返回入参中「已不存在」的路径子集（中转站失踪标记用）。
+/// 纯 Path::exists() stat，微秒级；不读内容、不碰任何锁。前端在每次呼出时后台调用。
+#[tauri::command]
+pub fn check_stage_paths(paths: Vec<String>) -> Vec<String> {
+    paths
+        .into_iter()
+        .filter(|p| !std::path::Path::new(p).exists())
+        .collect()
+}
+
 fn str_to_wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     std::ffi::OsStr::new(s)

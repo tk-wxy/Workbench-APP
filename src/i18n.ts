@@ -123,6 +123,9 @@ export const EN_DICT: Record<string, string> = {
   "列表": "List",
   "方格": "Grid",
   "中转条目": "Staged Items",
+  "失踪条目": "Missing Items",
+  "清理失踪": "Clear Missing",
+  "原文件已失踪（可能被删除或移动）": "Original file is missing (deleted or moved)",
   "上限条数": "Capacity",
   "拖出后自动关闭": "Auto-close on drag out",
   "中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。":
