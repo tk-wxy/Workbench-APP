@@ -128,6 +128,7 @@ function getFileIcon(item: ClipItem): string {
 type EnhResult =
   | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
   | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
+  | { kind: "clip";  item: ClipItem; name: string; ranges: [number, number][] } // 剪贴板历史结果；activate=取走粘贴（copyAndPaste）
   | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
 
 // ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
@@ -576,11 +577,22 @@ export default function App() {
     if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
     const appHits = apps.map(app => { const r = fuzzyScore(q, app.name); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
     const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = s.name || s.items?.[0]?.name || "文件"; const r = fuzzyScore(q, nm); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    return [...appHits, ...stageHits]
+    // 剪贴板历史条目（续101）：名称=文本内容/文件名/图片标签；名称模糊未命中时用类型词（"图片""txt"）兜底给基础分。
+    const ql = q.toLowerCase();
+    const clipHits = clipboard.map(c => {
+      const nm = c.type === "text" ? (c.content || "").trim().slice(0, 80)
+        : c.type === "image" ? t("图片")
+        : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
+      const r = fuzzyScore(q, nm);
+      let score = r.score, ranges = r.ranges;
+      if (score === 0 && typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }).some(k => k.toLowerCase().includes(ql))) { score = 5; ranges = []; }
+      return { kind: "clip" as const, item: c, name: nm, score, ranges };
+    }).filter(x => x.score > 0);
+    return [...appHits, ...stageHits, ...clipHits]
       .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
       .slice(0, 10)
       .map(({ score, ...rest }) => rest as EnhResult);
-  }, [enhQuery, apps, stage, sortedApps, appUsage]);
+  }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t]);
 
   // ── 文件查询：150ms 防抖（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
   useEffect(() => {
@@ -743,9 +755,11 @@ export default function App() {
   }, [recordUse]);
   // 增强搜索激活：app 复用 launchApp（含放大动画+淡出+hide，不在此 setEnhOpen，让整层随 overlay dismiss 一起淡出，hotkey-hide 复位）；
   // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
+  const copyAndPasteRef = useRef<((item: Pasteable) => void) | null>(null); // copyAndPaste 定义在后，activateEnh 经此 ref 调用
   const activateEnh = useCallback((r: EnhResult, iconEl?: HTMLElement | null) => {
     if (r.kind === "app") { launchApp(r.app, iconEl ?? null); }
     else if (r.kind === "fs") { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.path })).catch(() => {}); }
+    else if (r.kind === "clip") { copyAndPasteRef.current?.(r.item); } // 剪贴板结果：取走粘贴（copyAndPaste 定义在后，走 ref 避免 TDZ）
     else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
   }, [launchApp]);
   // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
@@ -1390,6 +1404,7 @@ export default function App() {
       finally { setDismissing(false); launchingRef.current = false; } // 粘贴命令不发 hotkey-hide，手动复位（窗口此时已隐藏，复位不可见）
     }, LAUNCH_ANIM_MS);
   }, []);
+  copyAndPasteRef.current = copyAndPaste; // 供 activateEnh（定义在前）对剪贴板结果取走粘贴，避开 TDZ
   // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
   const copyToClipboard = useCallback(async (item:ClipItem) => {
     try {
@@ -1513,7 +1528,7 @@ export default function App() {
   // stage 结果只有 file 类型（enhTier1 已按 type==="file" 过滤），故其 items[0].path 恒有效
   const revealPath = useCallback(async (path: string) => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
   const openEnhCtxMenu = useCallback((e: React.MouseEvent, r: EnhResult) => {
-    const items: CtxMenuItem[] = [{ label: t("打开"), action: () => activateEnh(r) }];
+    const items: CtxMenuItem[] = [{ label: r.kind === "clip" ? t("取走粘贴") : t("打开"), action: () => activateEnh(r) }];
     if (r.kind === "fs") {
       items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }) });
       items.push({ label: t("打开所在目录"), action: () => revealPath(r.path) });
@@ -1523,14 +1538,14 @@ export default function App() {
       items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }) });
       items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
       items.push({ label: t("加入启动台"), action: () => addAppToLauncher(r.app) });
-    } else { // stage（恒 file 类型）
+    } else if (r.kind === "stage") { // stage（恒 file 类型）
       const path = r.item.items?.[0]?.path;
       items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(r.item) });
       if (path) {
         items.push({ label: t("打开所在目录"), action: () => revealPath(path) });
         items.push({ label: t("加入启动台"), action: () => addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }) });
       }
-    }
+    } // clip：仅默认「取走粘贴」，无附加项（已在剪贴板中，复制冗余）
     openCtxMenu(e, items);
   }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, t]);
 
@@ -1827,7 +1842,7 @@ export default function App() {
       <div className={`enh-layer${enhOpen?" enh-open":""}${enhPinned?" enh-pinned":""}`}>
         <div className="enh-search-box">
           <IconSearch size={18}/>
-          <input ref={enhInputRef} className="enh-search-input" placeholder={t("搜索应用、中转文件…")}
+          <input ref={enhInputRef} className="enh-search-input" placeholder={t("搜索应用、中转、剪贴板…")}
             value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
           <span className="enh-hint">{searchDefaultMode==="enhanced"&&<><kbd>{comboLabel(enhHotkey)}</kbd> {t("界面搜索")} · </>}<kbd>Esc</kbd> {t("关闭")}</span>
         </div>
@@ -1835,14 +1850,15 @@ export default function App() {
         {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null)}
         <div className="enh-results">
           {enhResults.length ? enhResults.map((r,i)=>{
-            const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : "fs:"+r.path;
+            const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : r.kind==="clip" ? "clip:"+r.item.time : "fs:"+r.path;
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
                        : r.kind==="stage" ? <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>
+                       : r.kind==="clip" ? <span>{r.item.type==="text"?"📝":r.item.type==="image"?"🖼️":fi(r.item.items?.[0]?.ext??"")}</span>
                        : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
                                                  : <span>{r.kind==="fs" && r.isDir?"📁":fi(r.kind==="fs"?r.ext:"")}</span>;
             const label = r.kind==="app" ? r.app.name : r.name;
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
-            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : (r.isDir?t("文件夹"):t("文件"));
+            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
             const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
             // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
             const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">{t("文件 / 文件夹")}</div> : null;

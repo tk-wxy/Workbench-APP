@@ -50,7 +50,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 
 /* ── 简化版 overlay（无动画）── */
 .overlay-simple{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;z-index:99999;
-  background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  /* blur 由 24→12px（续102）：--bg 为 0.97 不透明，静止时模糊仅 ~3% 可见，24px 核在全屏实时桌面 @200%DPI 每帧重算是呼出/淡出掉帧主因；12px 半径滤镜成本约减半、静止观感几乎无差。 */
+  background:var(--bg);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);
   border:none;outline:none;margin:0;padding:0;}
 .overlay-visible{opacity:1;pointer-events:auto;}
 .overlay-hidden{opacity:0;pointer-events:none;}
@@ -316,7 +317,7 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
    打开：@keyframes 单向飞入（opacity+transform）；关闭：只 fade opacity，无 transform 回弹
    —— 避免关闭时出现"掉落缩小"的关闭感，让切换视图更平滑 */
 .enh-layer{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;
-  padding-top:8vh;background:var(--bg);backdrop-filter:blur(24px) saturate(1.4);-webkit-backdrop-filter:blur(24px) saturate(1.4);
+  padding-top:8vh;background:var(--bg);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);/* 续102：同 overlay 降 24→12px */
   opacity:0;transform:none;pointer-events:none;transition:opacity 100ms ease;}
 .enh-layer.enh-open{animation:enh-layer-in 160ms ease forwards;pointer-events:auto;}
 @keyframes enh-layer-in{from{opacity:0;transform:translateY(10px) scale(0.985);}to{opacity:1;transform:none;}}

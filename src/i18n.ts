@@ -9,6 +9,7 @@ export const EN_DICT: Record<string, string> = {
   "启动台": "Launcher",
   "中转站": "Stage",
   "剪贴板": "Clipboard",
+  "取走粘贴": "Take & paste",
   "搜索": "Search",
   "快捷键": "Shortcuts",
   "关于": "About",
