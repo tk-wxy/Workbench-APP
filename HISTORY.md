@@ -9,6 +9,16 @@
 
 ## 一、会话详记归档（原 MEMORY §0A 老化条目，大致按 续N 倒序；2026-07-07 续81 迁入）
 
+### 续97（2026-07-10，src/App.tsx，用户已确认测试通过并提交，2026-07-11 续100 迁入）——中转区多选拖出「什么也不做却误删」修复（首版 pending 方案已回退）
+- **现象**（用户报）：中转站多选若干条目后，在区内小幅拖动再立刻松手（并未拖到任何外部目标），被选中项也被删除；单个条目拖动无此问题。持久化关闭时的预期是「成功拖到外部落地后才消失」。
+- **根因**：多选/搜索态超阈值即 `beginNativeDragOut` 起 native OLE（`DoDragDrop`）。区内快速松手时落点落在**自身 overlay 的 IDropTarget**（`dragdrop.rs`）——它对含 CF_HDROP 的拖入 `accept` 并回传 `DROPEFFECT_COPY`（`set_effect`），Rust emit `drag-out-done="copy"` → un9 判 `dropped=true` 非持久化 → 删条目。**单项无此症**：单项先进 `reorder`（纯 JS FLIP），只有光标离开 `.drop-area` 才升级 native，小幅拖动+松手只是重排提交、永不 OLE。
+- **首版方案（已回退）**：给多选/搜索态加 `pending` 态、与单项一样等光标离开 `.drop-area` 才 `beginNativeDragOut`。用户实测：**多选拖到外部无法落地**（原拖出功能失效），单项仍正常——**延迟起 OLE 破坏了多选原生拖出的成功投放**（单项 reorder→native 之所以行得通有其自身链路，多选照搬失败，根因未深究，因方向本身错——不应改拖出起手时机）。已完整回退全部 pending 改动（类型/init/move/up 复原）。
+- **改采方案（落点结果侧，不碰拖出起手时机）**：新增 `droppedOnSelfRef`。① `beginNativeDragOut` 起手清 false；② `files-dropped` 内部落点分支（`internalDrag && !inLauncher`，即落回自身 overlay 非启动台）置 true；③ `drag-out-done`(un9) 开头若命中则复位标志 + 清 `draggedIds` + **直接返回不删不清选区**。
+- **成立依据**：`dragdrop.rs` Drop 中 `accept = !paths.is_empty()`，`emit("files-dropped")` 与 `set_effect(copy)` **同一 `accept` 门控**——故「落回自身且回传 copy」⟺「files-dropped 必被 emit」，标志一定被置上；且 files-dropped 在 DoDragDrop 阻塞期内 emit（早于其返回后 emit 的 drag-out-done），前端按序处理、标志同步先置（handler 首个 await 前）。真正拖到外部落地：落点非本窗口→无 files-dropped 自标记→照常删。附带修复 keepOpen 模式「多选拖回区内也被误删」的同源变体。
+- **验证**：`npx tsc --noEmit` + `npm run build` 均零错误；拖拽无法模拟输入，用户 GUI 实测确认：①多选区内小幅拖动+松手不删/不掉选区；②多选拖到外部文件夹**恢复正常落地并消失**（首版回归点）均通过。CLAUDE.md 反查表行已改写为落点侧方案。
+- **提交**：`772b2ce`（refactor 续96+续97 代码合并提交）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。
+- **文件**：`src/App.tsx`（`droppedOnSelfRef` + `beginNativeDragOut`/`files-dropped`/`drag-out-done` 三处）。
+
 ### 续96（2026-07-10，src/App.tsx + src/App.css + 新增 src/lib/format.ts·src/lib/fuzzy.ts·src/icons.tsx，用户已确认测试通过并提交，2026-07-10 续99 迁入）——前端可维护性重构 + 2 处小 bug 修复
 - **触发**：用户问「前端/界面有什么值得优化」，静态审查后按「先修 2 个实害 → 再抽纯函数+SVG」的优先级推进（未动最高危区）。
 - **bug①（实害）**：剪贴板历史列表 `filteredClip.map((c,i)=><div key={i}>`（`App.tsx`）。新复制项 **prepend 到头部**，用 index 做 key 会让 React 错位复用 DOM——每个 clip-block 挂着 pointer 拖拽 handler + `copiedTime` ✓ 反馈 + 图片 src，可能导致复制后拖拽态/✓ 串到相邻卡。改 `key={c.time}`（`time` 本就是删除/✓ 判定的 identity，唯一）。

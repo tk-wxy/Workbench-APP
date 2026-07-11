@@ -1,6 +1,6 @@
 # Workbench — 项目记忆（memory）
 
-> **最后更新**：2026-07-10（续99f 缩略图缓存 stage_thumbs/ 加手动打开/清空入口，与剪贴板 clip_images/ 对齐；已确认测试通过，见 §0/§0A）
+> **最后更新**：2026-07-11（续100 中转站原文件失踪处理：拖出崩溃修复 + 按豁免规则自动移除/⚠️标记；已确认测试通过并提交，见 §0/§0A）
 >
 > **文档分工**：规则铁律 → `CLAUDE.md`（唯一 agent 规则入口）；决策根因 → `DECISIONS.md`（目录带一行摘要，按需选读）；本文件 = 现状快照 + 最近 ≤3 个会话详记；历史 → `HISTORY.md`（默认不读，考古用 Grep 按「续N」定位）。
 >
@@ -16,6 +16,7 @@
 ## 0. 当前状态 / 下一步 〔快照，会话入口〕
 
 - **当前稳定功能**：热键呼出（长按 momentary + 短按 toggle，键态轮询驱动，组合可自定义/录制式）+ Esc 关闭 + light dismiss；三类型剪贴板历史/粘贴/复制/持久化 + 图片原图缓存 janitor；中转区多选/框选/批量 file/拖入/拖出，条目**可选持久化**（设置→中转站「持久化」，默认关闭=拖出成功后自动消失）+ **单条「固定」豁免**（卡片右上点点，续99），**容量可调**（设置→中转站「上限条数」20/50/100/200，默认 20）；中转卡片**图片文件显示缩略图**（Rust 侧生成小图，续99b）；启动器收藏托盘（含拖拽排序）；增强搜索 + 文件索引（内置/可选 Everything 双引擎）；设置面板（常规/启动台/中转站/剪贴板/搜索/快捷键/关于）；**界面语言中/英文切换**（设置→常规，含托盘菜单同步）。
+- **续100（已提交 `c3b2795`+版本 `e3e2cbe`，用户已确认测试通过）**：中转站「原文件失踪」处理，含一个崩溃 bug 修复。**崩溃根因**：拖动源文件已删除的中转条目到 cmd → 死路径进 CF_HDROP → OLE 在目标侧与本进程双双闪退。**三层修复**：①Rust `build_formats` 过滤不存在路径（根治，死路径永不进 CF_HDROP；全部失空则命中 `run_drag_out` 已有 `formats.is_empty()` 守卫干净中止、清 `STAGE_REORDER_ACTIVE` 不打断续88 握手；兜住 batch 部分失踪）；②前端拖出/取走提前拦截失踪项；③新增 `check_stage_paths` 命令，每次呼出后台批量 `exists()` 扫（<1ms，**不实时监听**——分散父目录 watcher 代价高/网络盘不支持）。**失踪处理复用「拖出移除」同一豁免规则**：`!persist && !pinned` 直接移除并落盘（用户要的「源文件没了直接消失」）；固定/持久化则保留 + ⚠️ 灰化，隐藏复制/打开等对死文件无效操作、只留删除；设置→中转站「清理失踪」手动清保留项。版本号 0.4.3→0.4.4（PATCH）。详见 §0A。
 - **续99（已提交，用户已确认测试通过）**：中转区界面优化 4 项 + 缩略图内存优化。①封面图标放大（icon-wrap 30→40px 等）；②图片文件显示真缩略图；③标题行变矮（`.stage-section-header` padding 12/6→6/4，启动器+中转站共用）；④右上点点从纯类型色标升级为**每条目「固定」开关**（点亮=📌 常驻，拖出成功也不自动移除；全局持久化开启时整体隐藏）。**续99b（同批，解性能）**：缩略图首版用 asset 协议直读原图→WebView 常驻全分辨率解码位图（一张 4000×3000≈48MB）→图多即卡顿+内存暴涨；改由 Rust `get_stage_thumbnail` 解码缩到 160px 返回小 base64（原图瞬时释放），撤掉 asset 协议。版本号 0.3.9→0.4.0（MINOR）。详见 §0A。
 - **续99c/99d（已提交，用户已确认测试通过）**：①**99c 缩略图落盘缓存**（重启秒开）——`get_stage_thumbnail` 先查 `app_data/stage_thumbs/{crc32(path)}_{mtime}.png`，命中直接读小 PNG（零解码原图），未命中才解码缩图并写盘；后台 janitor 50MB 封顶（`apps.rs`/`lib.rs`）。②**99d 去中转区落地闪烁**——用户报"拖新图落地、缩略图替换占位图标那一刻中转区闪蓝"；**染色测试**（把 drop-flash/file-drag-active/drag-over 三处染不同色）定位到闪的是 🔴 `drop-flash`（落地确认动画，与缩略图生成窗口时间重合，非缩略图 bug）；从 CSS + JS 两层摘掉**中转区** `drop-flash`（`.drop-area.drop-flash` 选择器删除 + `files-dropped` 里加类两行删除），启动台 `.app-grid.drop-flash` 保留，悬停高亮 `file-drag-active` 未碰。版本号 0.4.0→0.4.1（PATCH）。详见 §0A。
 - **续99e（已提交，用户已确认测试通过）**：中转区**列表视图**补齐图片缩略图 + 固定开关（此前只有方格视图有，而 `stageLayout` 默认 `"list"`→列表用户看不到 99 的成果，属覆盖盲区）。纯前端渲染层：列表项图片文件优先显示 `stageThumbs[path]`（复用同一缓存，缩略图生成与视图无关，早已就绪）；新增 `.stage-pin-btn`（未固定 hover 淡显、已固定常驻 accent 📌、全局持久化开启时隐藏，与方格 dot 同语义）。版本号 0.4.1→0.4.2（PATCH）。详见 §0A。
@@ -38,6 +39,18 @@
 - **下一步候选（无阻塞）**：① 增强搜索结果的键盘导航已具备（↑↓/Enter），启动器键盘导航续93 已完成——可考虑「Ctrl+K 增强搜索也支持 ←→ 或 Tab 在 Tier 间跳」等细化；② 索引目录可配置；③ 增强搜索纳入剪贴板条目（让搜索成唯一入口）；④ file/folder 收藏的非拖入入口；⑤ 拖出边角补测（text→记事本等；核心路径已实测通过，低风险）；⑥ Gemini/contenteditable 文本拖入硬边界（用户计划未来攻克，方向需绕开「dragover 不落 caret」根因，见 HISTORY 续73 记录）。
 
 ## 0A. 最近状态细节 〔滚动窗口 ≤3 会话；更早的详记在 HISTORY.md〕
+
+### 续100（2026-07-11，src-tauri/src/{apps,dragout,lib}.rs + src/App.tsx + App.css + i18n.ts，用户已确认测试通过并提交）——中转站原文件失踪处理 + 拖出崩溃修复
+- **触发**：用户问「中转站项目的源文件被删了该何去何从」；实测发现拖失踪项到 cmd → cmd 与本软件**双双闪退**（知名 bug）。
+- **崩溃根因**：`dragout.rs::build_formats` 对 `file` 条目**无条件**把路径塞进 CF_HDROP，从不查存在性；死路径进 OLE `IDataObject` → 拖到 cmd 松手时目标侧 + 本进程 `DoDragDrop` 双双在死路径上崩。
+- **三层修复**：
+  - ①**Rust `build_formats` 过滤不存在路径（根治）**：死路径永不进 CF_HDROP。全部过滤空 → 命中 `run_drag_out` 早已存在的 `formats.is_empty()` 守卫**干净中止**（return 前清 `STAGE_REORDER_ACTIVE`，此刻 `DRAG_IN_PROGRESS` 未置位、不打断续88 握手交接——这是特意选的安全落点）。**顺带兜住 batch 条目部分文件被删**（只保留仍在的路径）。
+  - ②**前端提前拦截**：`handleStagePointerMove` 决策处把失踪 id 滤出拖出集（全失踪则复位手势不起 OLE；处理了多选混合、按下项正好是失踪格的边角——剩余单项非按下项时走原生而非重排）；`handleStageClick` 失踪项单击 no-op。
+  - ③**新增 `check_stage_paths(paths)->Vec<String>` 命令**（`apps.rs`，返回不存在子集，纯 `exists()` stat、不碰锁）+ `lib.rs` 注册。前端 `scanStageMissing` 每次 `hotkey-show` + 启动加载后调；**不用实时文件监听**（分散父目录 watcher 代价高、网络盘不支持、与 ~30MB 目标冲突；懒扫 200 条 <1ms 零常驻）。
+- **失踪处理策略（复用「拖出移除」同一豁免规则，用户拍板）**：`scanStageMissing` 拿到失踪集后——`!persist && !pinned` 的条目**直接移除并落盘**（函数式 `setStage` + `storeRef` 落盘，避开 `saveStage` 闭包过期）；**固定/持久化则保留**并进 `missingPaths`。`missingIds` 派生（条目全部文件都失踪才算，batch 部分尚在不误标）→ 两视图灰化 + ⚠️ 角标 + **隐藏复制/打开等对死文件无效操作、只留删除**（解决用户吐槽的「操作还在」不一致）。设置→中转站「清理失踪」（`cleanupMissingStage`）手动清保留项，无视固定豁免。
+- **为何不「一律直接删」**：唯一代价是固定/持久化项在 U盘/网络盘/OneDrive 临时掉线时被误杀，而这类项恰是用户明确要留的；用既有 `!persist && !pinned` 规则区分，零新概念。保留 ⚠️ 项三条出路：盘恢复→下次扫描自动消、取消固定→下次扫描清、手动删/清理失踪。
+- **验证**：`tsc` + `cargo check` + `npm run build` 均零错误；用户 GUI 实测 1–4（崩溃回归 / 失踪不可取走 / 正常项回归 / 多选混合只落地正常项）+ 自动移除策略均通过。
+- **提示后人**：中转 file 条目拖出/取走前，凡走 CF_HDROP 的路径都要保证路径存在——死路径进 OLE 会崩目标+本进程。前端拦 + Rust `build_formats` 兜底双保险，别只依赖一层。
 
 ### 续99（2026-07-10，src/App.tsx + src/App.css + src-tauri/src/apps.rs + lib.rs，用户已确认测试通过并提交）——中转卡片界面优化 4 项 + 图片缩略图内存优化（99b）
 - **触发**：用户「界面优化」请求——封面图标大些 / 图片显示缩略图 / 标题行减高 / 讨论右上点点用途。
@@ -75,16 +88,6 @@
 - **验证**：`npx tsc --noEmit` 零错误；开关是纯 CSS/渲染门控 + store 持久化，用户 GUI 实测确认通过。
 - **提交**：`0115f9f`（feat 续98）+ `e9aac82`（chore 版本号 0.3.8→0.3.9，PATCH）。
 - **文件**：`src/App.tsx`（showShortcuts state/loader/changeShowShortcuts/门控渲染/设置项）、`src/App.css`（卡片封面+标签区+操作栏尺寸）、`src/i18n.ts`（两条文案）。
-
-### 续97（2026-07-10，src/App.tsx，用户已确认测试通过并提交）——中转区多选拖出「什么也不做却误删」修复（首版 pending 方案已回退）
-- **现象**（用户报）：中转站多选若干条目后，在区内小幅拖动再立刻松手（并未拖到任何外部目标），被选中项也被删除；单个条目拖动无此问题。持久化关闭时的预期是「成功拖到外部落地后才消失」。
-- **根因**：多选/搜索态超阈值即 `beginNativeDragOut` 起 native OLE（`DoDragDrop`）。区内快速松手时落点落在**自身 overlay 的 IDropTarget**（`dragdrop.rs`）——它对含 CF_HDROP 的拖入 `accept` 并回传 `DROPEFFECT_COPY`（`set_effect`），Rust emit `drag-out-done="copy"` → un9 判 `dropped=true` 非持久化 → 删条目。**单项无此症**：单项先进 `reorder`（纯 JS FLIP），只有光标离开 `.drop-area` 才升级 native，小幅拖动+松手只是重排提交、永不 OLE。
-- **首版方案（已回退）**：给多选/搜索态加 `pending` 态、与单项一样等光标离开 `.drop-area` 才 `beginNativeDragOut`。用户实测：**多选拖到外部无法落地**（原拖出功能失效），单项仍正常——**延迟起 OLE 破坏了多选原生拖出的成功投放**（单项 reorder→native 之所以行得通有其自身链路，多选照搬失败，根因未深究，因方向本身错——不应改拖出起手时机）。已完整回退全部 pending 改动（类型/init/move/up 复原）。
-- **改采方案（落点结果侧，不碰拖出起手时机）**：新增 `droppedOnSelfRef`。① `beginNativeDragOut` 起手清 false；② `files-dropped` 内部落点分支（`internalDrag && !inLauncher`，即落回自身 overlay 非启动台）置 true；③ `drag-out-done`(un9) 开头若命中则复位标志 + 清 `draggedIds` + **直接返回不删不清选区**。
-- **成立依据**：`dragdrop.rs` Drop 中 `accept = !paths.is_empty()`，`emit("files-dropped")` 与 `set_effect(copy)` **同一 `accept` 门控**——故「落回自身且回传 copy」⟺「files-dropped 必被 emit」，标志一定被置上；且 files-dropped 在 DoDragDrop 阻塞期内 emit（早于其返回后 emit 的 drag-out-done），前端按序处理、标志同步先置（handler 首个 await 前）。真正拖到外部落地：落点非本窗口→无 files-dropped 自标记→照常删。附带修复 keepOpen 模式「多选拖回区内也被误删」的同源变体。
-- **验证**：`npx tsc --noEmit` + `npm run build` 均零错误；拖拽无法模拟输入，用户 GUI 实测确认：①多选区内小幅拖动+松手不删/不掉选区；②多选拖到外部文件夹**恢复正常落地并消失**（首版回归点）均通过。CLAUDE.md 反查表行已改写为落点侧方案。
-- **提交**：`772b2ce`（refactor 续96+续97 代码合并提交）+ `99376a3`（chore 版本号 0.3.7→0.3.8，PATCH）。
-- **文件**：`src/App.tsx`（`droppedOnSelfRef` + `beginNativeDragOut`/`files-dropped`/`drag-out-done` 三处）。
 
 ---
 
