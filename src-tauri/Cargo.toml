@@ -27,6 +27,7 @@ windows = { version = "0.58", features = [
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_System_Com",
   # 原生拖入（中转区 drag-in）：自注册 IDropTarget 所需
   "Win32_System_Ole",

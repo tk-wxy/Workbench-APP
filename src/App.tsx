@@ -1533,6 +1533,7 @@ export default function App() {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
+          hideWorkbench(); // 先隐藏全屏毛玻璃覆盖层，避免 explorer 在其下冷起时 backdrop-filter 抢 GPU 卡顿
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("reveal_in_explorer", { path: s.items![0].path });
         },
@@ -1550,6 +1551,7 @@ export default function App() {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
+          hideWorkbench(); // 同上：先隐藏覆盖层再唤起 explorer
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("reveal_in_explorer", { path: c.items![0].path });
         },
@@ -1564,14 +1566,14 @@ export default function App() {
   // 启动器条目右键菜单（file/folder 额外加「打开所在目录」；通用：从启动器移除）
   const openLauncherCtxMenu = useCallback((e: React.MouseEvent, it: LauncherItem) => {
     const items: CtxMenuItem[] = [];
-    if (it.kind !== "app") items.push({ label: t("打开所在目录"), action: async () => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
+    if (it.kind !== "app") items.push({ label: t("打开所在目录"), action: async () => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
     items.push({ label: t("从启动器移除"), action: () => removeLauncherItem(it.id) });
     openCtxMenu(e, items);
   }, [openCtxMenu, removeLauncherItem, t]);
 
   // 增强搜索结果右键菜单：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区（按 kind 取可用子集）
   // stage 结果只有 file 类型（enhTier1 已按 type==="file" 过滤），故其 items[0].path 恒有效
-  const revealPath = useCallback(async (path: string) => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
+  const revealPath = useCallback(async (path: string) => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
   const openEnhCtxMenu = useCallback((e: React.MouseEvent, r: EnhResult) => {
     const items: CtxMenuItem[] = [{ label: r.kind === "clip" ? t("取走粘贴") : t("打开"), action: () => activateEnh(r) }];
     if (r.kind === "fs") {

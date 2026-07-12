@@ -202,13 +202,30 @@ fn open_file(path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
-    // explorer /select,"<path>" 在资源管理器中选中并高亮该文件
-    let cmd = format!("explorer.exe /select,\"{}\"", path);
-    std::process::Command::new("cmd")
-        .args(["/c", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("无法打开所在目录: {}", e))?;
+    // 在资源管理器中定位并高亮该文件。走 Shell COM API `SHOpenFolderAndSelectItems`，
+    // 不再 spawn `explorer.exe /select` 子进程——后者每次都新建一个 explorer.exe 进程再让它
+    // 转去跟已运行的 shell 通信开窗，进程创建/启动开销即"稍慢"来源；COM API 在本进程内直接
+    // 跟 shell 通信、可复用已开窗口，明显更快。历史坑仍适用：路径先归一化为反斜杠。
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+
+    let win_path = path.replace('/', "\\");
+    unsafe {
+        // is_ok() 覆盖 S_OK（首次）与 S_FALSE（已初始化，仍加了引用计数需配平）→ 两者都要 Uninit；
+        // 仅 RPC_E_CHANGED_MODE 等错误码 is_ok()=false（未加引用）→ 不 Uninit，但仍可继续调用。
+        let did_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let pidl = ILCreateFromPathW(&HSTRING::from(win_path.as_str()));
+        if pidl.is_null() {
+            if did_init { CoUninitialize(); }
+            return Err(format!("无法解析路径: {}", win_path));
+        }
+        // apidl=None（cidl=0）+ pidl 指向文件本身 = 打开其父目录并选中该文件（标准用法）。
+        let res = SHOpenFolderAndSelectItems(pidl, None, 0);
+        ILFree(Some(pidl));
+        if did_init { CoUninitialize(); }
+        res.map_err(|e| format!("无法打开所在目录: {}", e))?;
+    }
     Ok(())
 }
 
