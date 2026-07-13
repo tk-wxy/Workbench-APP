@@ -39,7 +39,7 @@ interface LauncherItem {
   path: string;           // app=launch_app 的 path；file/folder=open_file 的 path
   ext?: string;           // file 显示图标用
 }
-const LAUNCHER_MAX = 60;
+const LAUNCHER_MAX = 200;
 const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
 
