@@ -27,6 +27,7 @@ const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
 const STAGE_REORDER_ESCAPE_PX = 6; // 中转区内重排：光标离开 .drop-area 边界超过此距离才升级为真实拖出（防边缘抖动误触发）
+const STAGE_MOAT_PX = 6; // 中转卡片"边缘缓冲带"：非多选态下、从卡片外沿此宽度内按下拖动→判为框选而非拖出（紧凑布局下框选难起手的补偿，续108）
 
 
 // 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
@@ -257,7 +258,7 @@ export default function App() {
   const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
   // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
-  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
+  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" | "lasso" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
   // 续97：本次 OLE 拖出的落点其实落回自身 overlay（内部拖，非真正投放到外部）→ files-dropped 置位、drag-out-done 据此不删条目。
   const droppedOnSelfRef = useRef(false);
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
@@ -1258,9 +1259,29 @@ export default function App() {
     if (itemId === null || dr.mode === "native") return; // native：已交给 Rust，JS 侧不再处理
     if (dr.mode === "idle") {
       if (!dr.pressing) return;
-      if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < DRAG_OUT_THRESHOLD_PX) return;
+      // ── 本手势"框选 or 拖出/重排"意图判定（续108）──
+      // 多选态：拖未选中卡=框选（拖已选中卡仍=拖出全部选中）；非多选态：从卡片外沿 STAGE_MOAT_PX 内起手=框选（紧凑布局补偿）。
+      // 框选走较小的 LASSO 阈值（更跟手），拖出/重排仍走较大的 DRAG_OUT 阈值（防误触）。
+      let lassoIntent: boolean;
+      if (stageMultiselectRef.current) {
+        lassoIntent = !stageSelRef.current.has(itemId);
+      } else {
+        const rc = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        lassoIntent = (dr.origin.x - rc.left < STAGE_MOAT_PX) || (rc.right - dr.origin.x < STAGE_MOAT_PX)
+                   || (dr.origin.y - rc.top < STAGE_MOAT_PX) || (rc.bottom - dr.origin.y < STAGE_MOAT_PX);
+      }
+      const threshold = lassoIntent ? LASSO_THRESHOLD_PX : DRAG_OUT_THRESHOLD_PX;
+      if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < threshold) return;
       dr.pressing = false; // 一次性阈值判定，避免重复进入下面的分支决策
-      suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴
+      suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴/切换选中
+      if (lassoIntent) { // 从卡片起手的框选：复用空白框选同一套 lasso 状态（指针已被卡片捕获，直接由卡片 move/up 驱动，无需捕获交接）
+        dr.mode = "lasso";
+        setLassoState({ active: true, origin: dr.origin, current: { x: e.clientX, y: e.clientY } });
+        dropAreaRef.current?.classList.add("lasso-active");
+        setStageMultiselect(true);
+        computeLassoSelection(dr.origin, { x: e.clientX, y: e.clientY });
+        return;
+      }
       // 多选且按下项在选区内 → 拖全部选中项；否则 → 拖当前单项（与原有 ids 判定一致）
       const sel = stageSelRef.current;
       let ids = (sel.size > 0 && sel.has(itemId)) ? Array.from(sel) : [itemId];
@@ -1276,6 +1297,11 @@ export default function App() {
       startStageReorder(itemId, e.currentTarget as HTMLElement, e.clientX, e.clientY);
       return;
     }
+    if (dr.mode === "lasso") { // 卡片起手的框选：持续刷新选区矩形 + 命中计算（镜像 handleLassoPointerMove 的激活态）
+      setLassoState(s => ({ ...s, current: { x: e.clientX, y: e.clientY } }));
+      computeLassoSelection(dr.origin, { x: e.clientX, y: e.clientY });
+      return;
+    }
     if (dr.mode === "reorder") {
       const rect = dropAreaRef.current?.getBoundingClientRect();
       const outside = !rect || e.clientX < rect.left - STAGE_REORDER_ESCAPE_PX || e.clientX > rect.right + STAGE_REORDER_ESCAPE_PX
@@ -1288,10 +1314,15 @@ export default function App() {
       }
       updateStageReorder(e.clientX, e.clientY);
     }
-  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder]);
+  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder, computeLassoSelection]);
   const handleStagePointerUp = useCallback((e: React.PointerEvent) => {
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
     if (dragOutRef.current.mode === "reorder") commitStageReorder();
+    else if (dragOutRef.current.mode === "lasso") { // 卡片起手的框选收尾（镜像 handleLassoPointerUp 激活态）：清 class；框中为空则退出多选
+      dropAreaRef.current?.classList.remove("lasso-active");
+      setLassoState(s => ({ ...s, active: false }));
+      if (stageSelRef.current.size === 0) setStageMultiselect(false);
+    }
     dragOutRef.current.pressing = false; // 未超阈值=普通点击，交给 onClick（取走/选中）
     dragOutRef.current.mode = "idle";
   }, [commitStageReorder]);
@@ -1302,6 +1333,7 @@ export default function App() {
   const handleStageLostPointerCapture = useCallback(() => {
     console.log("[stage-drag] lost pointer capture", { mode: dragOutRef.current.mode, reorderActive: stageReorderRef.current.active }); // 续88 诊断
     if (stageReorderRef.current.active) cancelStageReorder();
+    if (dragOutRef.current.mode === "lasso") { dropAreaRef.current?.classList.remove("lasso-active"); setLassoState(s => ({ ...s, active: false })); } // 续108：capture 被外部撤销时清框选现场
     dragOutRef.current.pressing = false;
     dragOutRef.current.mode = "idle";
     setStageReorderActiveNative(false);
