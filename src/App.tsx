@@ -1700,8 +1700,8 @@ export default function App() {
                   {it.kind==="file" && it.ext && IMG_EXTS.includes(it.ext.toLowerCase()) && stageThumbs[it.path]
                      ? <img className="app-tile-thumb" src={stageThumbs[it.path]} alt="" draggable={false}/>
                    : it.icon ? <img src={it.icon} alt="" draggable={false}/>
-                   : it.kind==="folder" ? <FileGlyph isDir size={32}/>
-                   : it.kind==="file" ? <FileGlyph ext={it.ext??""} size={32}/>
+                   : it.kind==="folder" ? <FileGlyph isDir size={42}/>
+                   : it.kind==="file" ? <FileGlyph ext={it.ext??""} size={42}/>
                    : <span>{it.name[0]}</span>}
                 </div>
                 <div className="app-tile-label-wrap"><span className="app-tile-label">{it.name}</span></div>
@@ -1858,7 +1858,9 @@ export default function App() {
           </>)}
         </section>
         <section className="clip-panel">
-          <div className="section-label">{t("剪贴板历史")}</div>
+          <div className="stage-section-header">
+            <span className="section-label">{t("剪贴板历史")}</span>
+          </div>
           <div className="clip-list">
             {filteredClip.length? filteredClip.map((c)=>(
               <div key={c.time} className="clip-block"
