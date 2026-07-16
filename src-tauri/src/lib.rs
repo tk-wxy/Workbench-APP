@@ -439,6 +439,22 @@ fn start_hotkey_monitor(app: AppHandle) {
                 continue;
             }
 
+            // 续110：剪贴板项纯 JS 拖动阶段 + 热键 = "隐藏界面并拖到外部"。与上方区内重排分支同构——
+            // 既不能直接 hide（DoDragDrop 起手前隐藏 → SetCapture 失败 → 松手无落地），也不能单纯让路
+            // （热键整段失效）。按下沿 emit "clip-drag-hotkey"，前端把纯 JS ghost 升级为原生拖出
+            // （start_drag_out force_hide=true，窗口仍可见时先起手 DoDragDrop、再由 dragout 自身隐藏）。
+            // 升级后 CLIP_DRAG_ACTIVE 转为 DRAG_IN_PROGRESS（do_drag_on_main 无缝交接），下一拍落入下方让路分支。
+            if dragout::clip_drag_active() {
+                if combo && !prev_combo {
+                    let _ = app.emit("clip-drag-hotkey", ());
+                    println!("[hotkey] 剪贴板拖动 + 热键 → emit clip-drag-hotkey（升级为原生拖出并隐藏）");
+                }
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
             // 原生拖出期间（DRAG_IN_PROGRESS）让路：窗口可见性由 dragout 独占（自动隐藏 / keepOpen 自轮询
             // 手动隐藏），此处只跟踪键态、不做 show/hide toggle，避免拖动中按热键去外部时 monitor 并发操作
             // 窗口→白闪。更新 prev_combo 保证拖动结束恢复时不产生虚假边沿；清空 down_at 防遗留按下态误判。
@@ -515,7 +531,7 @@ fn start_focus_watch(app: AppHandle) {
             // 就因前台瞬时切走而自行 hide()，会打断整个手势（ghost/让路 transform 永久卡死，且
             // 因从未真正调用 start_drag_out，「拖到外部目标」这个操作本身也没发生）。让路但保持
             // armed 状态，重排结束后继续正常侦测（不清 armed，防止重排期间的假前台切换污染状态）。
-            if dragout::drag_in_progress() || dragout::stage_reorder_active() {
+            if dragout::drag_in_progress() || dragout::stage_reorder_active() || dragout::clip_drag_active() {
                 std::thread::sleep(std::time::Duration::from_millis(FOCUS_POLL_MS));
                 continue;
             }
@@ -571,6 +587,7 @@ pub fn run() {
             everything::reload_everything,
             dragout::start_drag_out,
             dragout::get_dragout_auto_close, dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
+            dragout::set_clip_drag_active,
             set_hotkey, set_tray_language
         ])
         .plugin(tauri_plugin_store::Builder::default().build())

@@ -243,10 +243,17 @@ export default function App() {
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
   const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
   const stageAnchorRef = useRef<number|null>(null); // shift 区间选择锚点 index
-  // 剪贴板卡片长按拖拽到中转区（纯前端，Pointer Events，移动超阈值才激活）
-  const [dragState, setDragState] = useState<{ item: ClipItem; originX: number; originY: number; currentX: number; currentY: number; active: boolean } | null>(null);
-  const dragStateRef = useRef(dragState); // 供 pointermove/up 闭包读最新值（setState 异步）
-  useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
+  // 剪贴板卡片长按拖拽到中转区（纯前端，Pointer Events，移动超阈值才激活）。
+  // 唯一用途 = 拖进中转区，落到别处一律无操作——别给它加第二个落点语义。
+  // 续109 性能铁律：坐标只进 ref + 直写 ghost DOM style，**绝不进 React state**。
+  //   （原实现每次 pointermove 都 setDragState → 重渲整个 App（三栏 + 全部卡片）→ 掉帧不跟手。
+  //     与 launcher-drag-ghost / stage-drag-ghost 同款「零 React 渲染」跟手方案对齐。）
+  // state 只留 item：激活时挂载 ghost 渲染一次、收尾时卸载一次，全程仅 2 次渲染。
+  const [clipDragItem, setClipDragItem] = useState<ClipItem | null>(null);
+  const clipDragRef = useRef<
+    { item: ClipItem; originX: number; originY: number; x: number; y: number; active: boolean; dropRect: DOMRect | null } | null
+  >(null);
+  const clipGhostRef = useRef<HTMLDivElement | null>(null); // ghost 节点，move 时直写 style.left/top
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const dragLayerRef = useRef<HTMLDivElement | null>(null); // 顶层拖拽预览层，承载 DOM clone ghost
@@ -261,6 +268,9 @@ export default function App() {
   const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" | "lasso" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
   // 续97：本次 OLE 拖出的落点其实落回自身 overlay（内部拖，非真正投放到外部）→ files-dropped 置位、drag-out-done 据此不删条目。
   const droppedOnSelfRef = useRef(false);
+  // 续110：本次原生拖出的来源——中转站(stage) 还是剪贴板(clip)。drag-out-done handler 据此分流：
+  //   clip 来源"拖出后剪贴板不变"，不走任何删条目/copyAndPaste 逻辑（中转站的 draggedIds 与其无关）。
+  const dragOutSourceRef = useRef<"stage" | "clip">("stage");
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
   // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动、光标仍在 .drop-area 内时走此逻辑；
   // 光标离开区域边界 → 升级为原生 OLE 拖出（沿用既有 start_drag_out 链路，见 beginNativeDragOut）。
@@ -379,7 +389,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留）
+        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留）
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -474,6 +484,15 @@ export default function App() {
         // 移除仍严格挂在 Rust 回传的「非 none」（已确认成功投放）之后，只是多加一道门。
         const un9 = await listen<string>("drag-out-done", async (event) => {
           const dr = dragOutRef.current;
+          // 续110：剪贴板来源的原生拖出——"拖出后剪贴板不变"。中转站的 draggedIds/持久化/copyAndPaste
+          // 逻辑与其无关，全部跳过；复位来源 + 兜底清 clip 让路标志（Rust do_drag_on_main 通常已清，幂等）后返回。
+          if (dragOutSourceRef.current === "clip") {
+            dragOutSourceRef.current = "stage";
+            droppedOnSelfRef.current = false;
+            setClipDragActiveNative(false);
+            console.log("[clip-drag] drag-out-done effect=", event.payload, "→ 剪贴板不变，不删任何条目");
+            return;
+          }
           console.log("[stage-drag] drag-out-done effect=", event.payload, "draggedIds=", dr.draggedIds, "onSelf=", droppedOnSelfRef.current); // 续88/续97 诊断
           // 续97：本次 OLE 落点落回自身 overlay（files-dropped 已置位 droppedOnSelfRef）——非真正外部投放。
           // OS 仍回传 copy（overlay 自身 IDropTarget 接受），但不应删条目/清选区。命中则保留一切、直接返回。
@@ -537,7 +556,15 @@ export default function App() {
           dr.mode = "native";
           beginNativeDragOut([itemId], true); // force_hide：起手 DoDragDrop（窗口仍可见）后由 dragout 自身隐藏
         });
-        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10];
+        // 续110：剪贴板项纯 JS 拖动中按热键 → Rust monitor emit 此事件（而非直接 hide）。仿 un10：把纯 JS ghost
+        // 升级为原生拖出（beginClipDragOut：force_hide=true，窗口仍可见时先起手 DoDragDrop，再由 Rust 隐藏 overlay）。
+        const un11 = await listen("clip-drag-hotkey", () => {
+          const ds = clipDragRef.current;
+          if (!ds?.active) return; // 未激活（理论上 monitor 不会在此发）——保险起见忽略
+          console.log("[clip-drag] hotkey during drag → 升级为原生拖出 + 隐藏", ds.item.type); // 续110 诊断
+          beginClipDragOut(ds.item);
+        });
+        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10, un11];
       } catch (e) { console.error("listen error:", e); }
     })();
     return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
@@ -1013,40 +1040,91 @@ export default function App() {
     }
     saveStage([item, ...stage].slice(0,stageMax));
   }, [stage,saveStage,stageMax]);
+  // 清拖拽现场（**不投放**）：卸载 ghost + 复位光标/高亮。
+  // 凡非「正常松手」的收尾都必须走这里——热键关页 / Esc / pointercancel / 丢 capture。
+  // 续109 bug 根因：hotkey-hide 复位了重排/框选/多选等全部现场，唯独漏了剪贴板拖拽 →
+  //   拖着不松手按热键关页，pointerup 再也到不了卡片 → ghost 永久悬浮到下次呼出。
+  // 续109b bug（**由续109 修复衍生**）：热键关页时本函数清掉了 clipDragRef，再呼出松手时
+  //   handleClipPointerUp 已读不到拖拽态（active=false 提前 return、不设 suppress）→ 浏览器
+  //   随后在卡片上合成的 click 落到 onClick 的 copyAndPaste（写回剪贴板+焦点交还+Ctrl+V）
+  //   → 剪贴板项被"点击粘贴"进外部焦点窗口、界面消失。**根治**：凡在「已激活拖拽」中被清场
+  //   （含热键关页/丢 capture/cancel/正常松手），一律在此置 suppressClickRef，吞掉随后的 click。
+  //   （suppressClickRef 会被下次 pointerdown 复位 → 不会误伤后续正常点击粘贴，自愈。）
+  // 幂等：ref 已空 / state 已 null 时 React 自动 bail out，可安全重复调用。
+  // 续110 clearNativeFlag：默认 true=非升级收尾（落点 A/B/丢 capture/cancel/热键关页），一并清 Rust
+  //   CLIP_DRAG_ACTIVE 让路标志；升级为原生拖出时（beginClipDragOut）传 false——标志留给 Rust 无缝交接
+  //   （do_drag_on_main 先置 DRAG_IN_PROGRESS 再清它），中间不留空窗被 monitor/light-dismiss 钻空提前 hide。
+  const setClipDragActiveNative = useCallback((active: boolean) => {
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_clip_drag_active", { active })).catch(() => {});
+  }, []);
+  const endClipDrag = useCallback((clearNativeFlag = true) => {
+    if (clipDragRef.current?.active) suppressClickRef.current = true;
+    clipDragRef.current = null;
+    document.getElementById("overlay")?.classList.remove("dragging");
+    dropAreaRef.current?.classList.remove("drag-over");
+    setClipDragItem(null);
+    if (clearNativeFlag) setClipDragActiveNative(false);
+  }, [setClipDragActiveNative]);
   // 拖拽：按下记录起点（不立刻激活，等移动超阈值），但跳过 .clip-actions 内的按钮区，且仅左键
   const handleClipPointerDown = useCallback((e: React.PointerEvent, c: ClipItem) => {
     if (e.button !== 0) return;
     if ((e.target as Element).closest(".clip-actions")) return; // 复制/删除/📌 按钮区不参与拖拽
     suppressClickRef.current = false; // 每次新交互复位，避免上次拖拽残留误抑制本次点击
-    setDragState({ item: c, originX: e.clientX, originY: e.clientY, currentX: e.clientX, currentY: e.clientY, active: false });
+    clipDragRef.current = { item: c, originX: e.clientX, originY: e.clientY, x: e.clientX, y: e.clientY, active: false, dropRect: null };
     e.currentTarget.setPointerCapture(e.pointerId); // 捕获指针，移动出卡片也持续收到 move/up
   }, []);
   // 拖拽：移动超阈值激活；激活后跟手并按命中与否高亮中转区
   const handleClipPointerMove = useCallback((e: React.PointerEvent) => {
-    const ds = dragStateRef.current;
+    const ds = clipDragRef.current;
     if (!ds) return;
+    ds.x = e.clientX; ds.y = e.clientY; // ghost ref 回调按此就位，无 (0,0) 闪帧
     if (!ds.active) {
       if (Math.hypot(e.clientX - ds.originX, e.clientY - ds.originY) < DRAG_THRESHOLD_PX) return;
+      ds.active = true;
+      // 落点矩形在拖拽全程不变（.drop-area 为 flex:1 定尺、不随内容/滚动移动）→ 激活时快照一次，
+      // 避免每次 move 都 getBoundingClientRect 与 classList 写形成「写后读」强制同步布局。
+      ds.dropRect = dropAreaRef.current?.getBoundingClientRect() ?? null;
       document.getElementById("overlay")?.classList.add("dragging"); // 防泛蓝 + grabbing 光标
-      setDragState({ ...ds, active: true, currentX: e.clientX, currentY: e.clientY });
+      setClipDragItem(ds.item); // 全程唯一一次「挂载 ghost」渲染
+      // 续110：告知 Rust 剪贴板纯 JS 拖动已激活 → light-dismiss 让路、热键 monitor 改 emit clip-drag-hotkey。
+      setClipDragActiveNative(true);
       return;
     }
-    const rect = dropAreaRef.current?.getBoundingClientRect();
-    const over = !!rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    const g = clipGhostRef.current; // 跟手：直写 DOM transform，零 React 渲染 + 零布局重绘
+    if (g) g.style.transform = `translate3d(${e.clientX + 12}px,${e.clientY + 12}px,0)`;
+    const r = ds.dropRect;
+    const over = !!r && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
     dropAreaRef.current?.classList.toggle("drag-over", over);
-    setDragState({ ...ds, currentX: e.clientX, currentY: e.clientY });
-  }, []);
-  // 拖拽结束：仅在激活且落点命中中转区时入中转（不粘贴）；未激活则放手让 onClick 正常粘贴
+  }, [setClipDragActiveNative]);
+  // 拖拽结束：仅在激活且落点命中中转区时入中转（不粘贴）；未激活则放手让 onClick 正常粘贴。
+  // 落点只认中转区——落在启动台/剪贴板/空白一律无操作（拖拽的唯一功能就是进中转区）。
   const handleClipPointerUp = useCallback((e: React.PointerEvent) => {
-    const ds = dragStateRef.current;
-    document.getElementById("overlay")?.classList.remove("dragging");
-    dropAreaRef.current?.classList.remove("drag-over");
-    setDragState(null);
-    if (!ds?.active) return; // 短按 / cancel：不拦截，交给原有 onClick 粘贴
-    suppressClickRef.current = true; // 抑制紧随的 onClick（落点处可能触发粘贴）
-    const rect = dropAreaRef.current?.getBoundingClientRect();
-    if (rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) addToStage(ds.item);
-  }, [addToStage]);
+    const ds = clipDragRef.current;
+    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
+    const active = !!ds?.active, item = ds?.item, r = ds?.dropRect;
+    endClipDrag(); // 先清场（active 时 endClipDrag 已置 suppressClickRef 吞掉随后 onClick），投放与否都不留残留
+    if (!active) return; // 短按 / 未越阈值：不拦截，交给原有 onClick 粘贴（未 suppress）
+    if (item && r && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) addToStage(item);
+  }, [addToStage, endClipDrag]);
+  // pointercancel（系统/浏览器撤销手势）：坐标已不可信 → 只清场、**绝不按落点投放**。
+  // 原实现把 cancel 直接接到 pointerUp 上，会拿着可疑坐标去判中转区命中而误投放。
+  // suppress 由 endClipDrag 统一处理（active 时置位，防 cancel 后补发 click 误粘贴）。
+  const handleClipPointerCancel = useCallback(() => {
+    endClipDrag();
+  }, [endClipDrag]);
+  // 续110：剪贴板项纯 JS 拖动中按热键 → 升级为原生 OLE 拖出（拖到外部桌面/文件夹/输入框/文本框）。
+  // 完全仿续88 stage-drag-hotkey 升级路径：force_hide=true 让 Rust 在窗口仍可见时先起手 DoDragDrop
+  // （SetCapture 成功）、再由 dragout 自身隐藏 overlay。清 JS ghost 但 endClipDrag(false)**保留
+  // CLIP_DRAG_ACTIVE 标志**——留给 Rust do_drag_on_main 无缝交接（先置 DRAG_IN_PROGRESS 再清它）。
+  // 数据映射同 beginNativeDragOut：items → 路径数组；来源置 "clip" 供 drag-out-done 不删任何条目。
+  const beginClipDragOut = useCallback((c: ClipItem) => {
+    dragOutSourceRef.current = "clip";
+    droppedOnSelfRef.current = false;
+    const dragItem = { type: c.type, content: c.content ?? null, items: c.items?.map(f => f.path) ?? null, orig_path: c.orig_path ?? null };
+    console.log("[clip-drag] → native drag-out", c.type); // 续110 诊断
+    import("@tauri-apps/api/core").then(({ invoke }) => invoke("start_drag_out", { items: [dragItem], forceHide: true })).catch(() => {});
+    endClipDrag(false); // 清 ghost；CLIP_DRAG_ACTIVE 不清，交给 Rust 无缝交接
+  }, [endClipDrag]);
   // ── 中转区框选多选（续70）──
   // 实时计算选区矩形与各条目 DOM 的相交，命中者写入 stageSel；与显式多选共用同一套状态。
   const computeLassoSelection = useCallback((origin:{x:number;y:number}, current:{x:number;y:number}) => {
@@ -1066,7 +1144,7 @@ export default function App() {
   const handleLassoPointerDown = useCallback((e: React.PointerEvent) => {
     lassoArmedRef.current = false;
     if (e.button !== 0) return; // 仅左键
-    if (dragStateRef.current?.active) return; // 剪贴板卡片拖拽进行中不框选（复用现有 dragState 检查）
+    if (clipDragRef.current?.active) return; // 剪贴板卡片拖拽进行中不框选（复用现有 clipDrag 检查）
     // 命中条目 / 操作按钮 / 工具栏则交给原有点击逻辑，不框选
     if ((e.target as Element).closest(".stage-item,.stage-card,.stage-multi-toolbar,.stage-batch-bar,button")) return;
     lassoArmedRef.current = true;
@@ -1128,6 +1206,7 @@ export default function App() {
     console.log("[stage-drag] → native drag-out", ids, "forceHide=", forceHide); // 续88 诊断
     dr.mode = "native";
     dr.draggedIds = ids;
+    dragOutSourceRef.current = "stage"; // 续110：中转站来源，drag-out-done 走原有删条目/持久化逻辑
     droppedOnSelfRef.current = false; // 续97：每次拖出重置「落回自身」标记，等 files-dropped 内部落点再置位
     const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
       type: s.type,
@@ -1578,6 +1657,9 @@ export default function App() {
 
   // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
   const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
+    // 拖拽中不弹菜单：右键的 pointerdown 因 button!==0 提前返回、不打断拖拽，但 contextmenu 照样触发 →
+    // 菜单浮出而 ghost 仍在跟手、松手照旧投放，纯属添乱。拖拽期间右键一律吞掉。
+    if (clipDragRef.current?.active) { e.preventDefault(); return; }
     const items: CtxMenuItem[] = [];
     if (c.type === "file" && c.items?.[0]?.path) {
       items.push({
@@ -1650,7 +1732,7 @@ export default function App() {
       // 右键菜单是纯鼠标浮层（无键盘交互）：任何键盘/热键操作都顺带关掉它，避免切页/关页后残留悬浮。
       // Escape 交由下方分层逻辑处理（第一次 Esc 只关菜单、不关页），故此处排除。
       if(ctxMenuRef.current && e.key!=="Escape") setCtxMenu(null);
-      if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(clipDragRef.current?.active){endClipDrag();return;}if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
@@ -1897,7 +1979,8 @@ export default function App() {
             {filteredClip.length? filteredClip.map((c)=>(
               <div key={c.time} className="clip-block"
                 onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
-                onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp} onPointerCancel={handleClipPointerUp}
+                onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp}
+                onPointerCancel={handleClipPointerCancel} onLostPointerCapture={()=>endClipDrag()}
                 onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?t("单击左键粘贴"):c.type==="file"?t("单击左键粘贴文件"):t("单击左键复制")}>
                 <div className="clip-actions">
                   <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin/></button>
@@ -1973,7 +2056,7 @@ export default function App() {
           <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
             <div className="settings-head">
               <span className="settings-title">{t("添加应用")}</span>
-              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}><IconClose/></button>
+              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
             </div>
             <div className="picker-search">
               <IconSearch size={16}/>
@@ -1996,7 +2079,7 @@ export default function App() {
           <div className="settings-modal" onClick={e=>e.stopPropagation()}>
             <div className="settings-head">
               <span className="settings-title">{t("设置")}</span>
-              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose/></button>
+              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
             </div>
             <div className="settings-layout">
               <nav className="settings-nav">
@@ -2266,14 +2349,18 @@ export default function App() {
         ))}
       </div>
     )}
-    {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测 */}
-    {dragState?.active && (
-      <div className="clip-drag-ghost" style={{position:"fixed",left:dragState.currentX+12,top:dragState.currentY+12,pointerEvents:"none",zIndex:100002}}>
-        {dragState.item.type==="image"
-          ? <img src={dragState.item.content} className="clip-ghost-img" alt=""/>
-          : dragState.item.type==="file"
-          ? <span>📄 {dragState.item.items?.[0]?.name ?? t("文件")}</span>
-          : <span>{String(dragState.item.content ?? "").slice(0,40)}</span>}
+    {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测。
+        位移不进 React style（避免每次 move 重渲，续109）——由 ref 回调按 clipDragRef 当前坐标就位、move 时直写 transform。
+        ref 回调在 commit 阶段跑（paint 前），且 App 因他因重渲时会重跑并按最新坐标复位 → 天然自愈、无 (0,0) 闪帧。 */}
+    {clipDragItem && (
+      <div className="clip-drag-ghost"
+        ref={el=>{ clipGhostRef.current=el; const d=clipDragRef.current; if(el&&d) el.style.transform=`translate3d(${d.x+12}px,${d.y+12}px,0)`; }}
+        style={{position:"fixed",pointerEvents:"none",zIndex:100002}}>
+        {clipDragItem.type==="image"
+          ? <img src={clipDragItem.content} className="clip-ghost-img" alt="" draggable={false}/>
+          : clipDragItem.type==="file"
+          ? <span className="clip-ghost-file"><FileGlyph size={14} {...fileGlyphFor(clipDragItem)}/><span className="clip-ghost-name">{clipDragItem.items?.[0]?.name ?? t("文件")}</span></span>
+          : <span>{String(clipDragItem.content ?? "").slice(0,40)}</span>}
       </div>
     )}
    </>

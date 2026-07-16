@@ -14,6 +14,10 @@
   --accent: #0078D4;
   --radius: 8px;
   --font: 'Segoe UI Variable','Segoe UI',system-ui,'Microsoft YaHei',sans-serif;
+  /* 拖拽 ghost 背景（续109）：取「--fill-2 叠在 --bg 上」的合成值定死为不透明色。
+     ghost 每帧移动，backdrop-filter 会让合成器逐帧重算新区域的背景模糊（续102 同类根因）；
+     而它背后本就是 0.97 不透明的 --bg，模糊几乎不可见 → 收益≈0、代价实打实，故改用等效实色。 */
+  --ghost-bg: rgba(28,28,30,0.98);
   /* 中转卡片专用颜色（暗色主题） */
   --card-bg: rgba(255,255,255,0.07);
   --card-thumb-bg: rgba(255,255,255,0.035);
@@ -27,6 +31,7 @@
   --border: rgba(0, 0, 0, 0.08);
   --fill-1: rgba(0, 0, 0, 0.03);
   --fill-2: rgba(0, 0, 0, 0.06);
+  --ghost-bg: rgba(229,230,232,0.98); /* 同上，浅色主题下的等效合成实色 */
   --text: #1a1a1c;
   --text2: rgba(0,0,0,0.60);
   --text3: rgba(0,0,0,0.40);
@@ -280,8 +285,15 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .file-drag-active .app-panel{box-shadow:inset 0 0 0 2px var(--accent);background:rgba(96,165,250,0.05);transition:box-shadow 80ms,background 80ms;}
 .file-drag-active .drop-area{box-shadow:inset 0 0 0 2px var(--accent,#60a5fa);background:rgba(96,165,250,0.06);border-radius:var(--radius);transition:box-shadow 80ms,background 80ms;}
 /* 跟手克隆 */
-.clip-drag-ghost{background:var(--fill-2);border:1px solid var(--border);border-radius:8px;padding:6px 10px;max-width:180px;backdrop-filter:blur(12px);box-shadow:0 8px 24px rgba(0,0,0,0.5);font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;}
+/* 每帧移动 → ① 不加 backdrop-filter（见 --ghost-bg 注释）；② 跟手用 transform 而非 left/top：
+   transform 是合成器属性，逐帧写不触发布局/重绘（left/top 每帧都要重算布局再重绘）。
+   固定 left/top 为 0，位移全交给 translate3d；will-change 对 transform 才有意义（对 left/top 无效）。 */
+.clip-drag-ghost{background:var(--ghost-bg);border:1px solid var(--border);border-radius:8px;padding:6px 10px;max-width:180px;box-shadow:0 8px 24px rgba(0,0,0,0.5);font-size:12px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;left:0;top:0;will-change:transform;}
+.clip-ghost-img{width:80px;height:50px;object-fit:cover;border-radius:4px;display:block;-webkit-user-drag:none;}
+/* file 型 ghost：图标定宽 + 文件名自身截断（父级 ellipsis 管不到 flex 子元素，长名会溢出圆角） */
+.clip-ghost-file{display:flex;align-items:center;gap:6px;min-width:0;}
+.clip-ghost-file svg{flex-shrink:0;}
+.clip-ghost-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
 /* ── 中转区标题行 + 多选工具栏 ── */
 /* min-height 让三栏标题行等高：启动器/中转区含按钮（≈34px），剪贴板仅文字本会矮一截、
@@ -311,8 +323,8 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .settings-modal{width:720px;max-width:92vw;height:540px;max-height:85vh;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);border:1px solid var(--border);border-radius:12px;box-shadow:0 16px 56px rgba(0,0,0,0.45);}
 .settings-head{display:flex;align-items:center;justify-content:space-between;padding:18px 24px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0;}
 .settings-title{font-size:15px;font-weight:600;color:var(--text);}
-.settings-close{width:26px;height:26px;border:none;background:none;color:var(--text3);font-size:18px;line-height:1;cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;}
-.settings-close:hover{background:var(--hover);color:var(--text);}
+.settings-close{width:28px;height:28px;border:none;background:none;color:var(--text3);font-size:18px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;}
+.settings-close:hover{color:var(--text);}
 .settings-layout{display:flex;flex:1;min-height:0;}
 .settings-nav{width:176px;flex-shrink:0;border-right:1px solid var(--border);padding:12px 10px;display:flex;flex-direction:column;gap:2px;overflow-y:auto;}
 .settings-nav-item{display:flex;align-items:center;gap:9px;padding:10px 14px;border:none;background:none;color:var(--text2);font-size:13px;font-family:var(--font);text-align:left;cursor:pointer;border-radius:7px;transition:all 80ms;}

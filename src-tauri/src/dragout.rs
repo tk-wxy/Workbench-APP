@@ -87,6 +87,22 @@ pub fn set_stage_reorder_active(active: bool) {
     STAGE_REORDER_ACTIVE.store(active, Ordering::Relaxed);
 }
 
+// 续110 剪贴板项拖出：与 STAGE_REORDER_ACTIVE 完全同构、独立隔离的标志。剪贴板卡片的纯 JS ghost 拖动
+// 激活期间（尚未升级为原生 DoDragDrop）置真——同样让 light-dismiss 让路、让热键 monitor 改 emit
+// "clip-drag-hotkey"（而非直接 hide / 单纯让路，理由见 STAGE_REORDER_ACTIVE 注释与 lib.rs monitor）。
+// 升级为原生拖出时在 do_drag_on_main 与 DRAG_IN_PROGRESS 无缝交接（先置 DRAG_IN_PROGRESS 再清本标志）。
+static CLIP_DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 是否正处于剪贴板项纯 JS 拖动阶段（供 lib.rs light-dismiss / 热键 monitor 判定是否让路）。
+pub fn clip_drag_active() -> bool {
+    CLIP_DRAG_ACTIVE.load(Ordering::Relaxed)
+}
+
+#[tauri::command]
+pub fn set_clip_drag_active(active: bool) {
+    CLIP_DRAG_ACTIVE.store(active, Ordering::Relaxed);
+}
+
 #[tauri::command]
 pub fn get_dragout_auto_close() -> bool {
     DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed)
@@ -114,6 +130,8 @@ extern "system" {
     fn GetForegroundWindow() -> isize;
     fn GetClassNameW(hwnd: isize, lp: *mut u16, n: i32) -> i32;
     fn AttachThreadInput(id_attach: u32, id_attach_to: u32, f_attach: i32) -> i32;
+    // 续110：模拟 Alt 键解 SetForegroundWindow 前台锁（Windows Terminal 即使 AttachThreadInput 仍被拒）。
+    fn keybd_event(b_vk: u8, b_scan: u8, dw_flags: u32, dw_extra_info: usize);
 }
 
 /// 读前台窗口 class（续82：activate 后确认焦点确实落到落点窗口）。
@@ -160,19 +178,25 @@ fn activate_drop_target(self_hwnd: isize) {
         // ① 裸调：本进程仍持前台许可即成（自我激活目标走这条）。
         let _ = SetForegroundWindow(top);
         if GetForegroundWindow() != top_h {
-            // ② 被前台锁挡住（隐藏后仍持前台 → cmd/终端 2-3s 拿不到焦点像卡死）：
-            //    AttachThreadInput 把本线程输入队列临时挂到目标线程绕过锁，强制转移后立即解挂。
+            // ② 被前台锁挡住（隐藏后仍持前台 → cmd/终端拿不到焦点像卡死）：AttachThreadInput 把本线程输入
+            //    队列临时挂到目标线程绕过锁。**续110 实测**：对 Windows Terminal(CASCADIA_HOSTING_WINDOW_CLASS)
+            //    AttachThreadInput 挂上后 SetForegroundWindow 仍被前台锁拒（ok2=false）——须再模拟一次 Alt
+            //    down+up「欺骗」系统认为用户正在交互、解除前台锁，SetForegroundWindow 才生效。经典绕过手法；
+            //    Alt 成对快速、DoDragDrop 已结束，对终端无可见副作用。VK_MENU=0x12，KEYEVENTF_KEYUP=0x0002。
+            //    传统 conhost(ConsoleWindowClass) 走 AttachThreadInput 即成（续82），Alt tap 对其是无害重申。
             let target_tid = GetWindowThreadProcessId(top, None);
             let our_tid = GetCurrentThreadId();
             let attached = target_tid != 0
                 && target_tid != our_tid
                 && AttachThreadInput(our_tid, target_tid, 1) != 0;
+            keybd_event(0x12, 0, 0, 0);
+            keybd_event(0x12, 0, 0x0002, 0);
             let _ = SetForegroundWindow(top);
             if attached {
                 AttachThreadInput(our_tid, target_tid, 0);
             }
         }
-        println!("[dragout] 前台交还落点 → {}", foreground_class());
+        println!("[dragout] 前台交还落点 → [{}]", foreground_class());
     }
 }
 
@@ -504,6 +528,7 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
     if formats.is_empty() {
         eprintln!("[dragout] 无可拖出格式，放弃");
         STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
+        CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110：clip 来源同理，防标志悬置
         return;
     }
     let hwnd = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
@@ -511,6 +536,7 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
         None => {
             eprintln!("[dragout] 取主窗口 HWND 失败");
             STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
+            CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110
             return;
         }
     };
@@ -519,6 +545,7 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
     if let Err(e) = app.run_on_main_thread(move || do_drag_on_main(app_main, formats, temp_files, hwnd, force_hide)) {
         eprintln!("[dragout] run_on_main_thread 调度失败: {e}");
         STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
+        CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110
     }
 }
 
@@ -536,6 +563,7 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
     // 中间无空窗可被 monitor / light-dismiss 钻空提前 hide 窗口（否则 DoDragDrop 尚未起手就被隐藏→SetCapture
     // 失败→松手无文件落地，正是续88 四轮反馈的症状）。非重排来源（多选/搜索直出）本就为 false，这里清是无害幂等。
     STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
+    CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110：clip 来源同理无缝交接（先置 DRAG_IN_PROGRESS 再清此处），幂等
 
     // "保持界面"模式的拖动中手动隐藏协调：manually_hidden=用户按热键触发过 SW_HIDE（去外部应用）；
     // drag_done=DoDragDrop 已返回、通知自轮询线程退出。
