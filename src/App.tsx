@@ -304,7 +304,7 @@ export default function App() {
   // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
-  const [searchDirInput, setSearchDirInput] = useState(""); // 添加目录输入框
+  const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
   const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
   const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 呼出默认搜索模式：page=顶栏界面搜索（默认），enhanced=直接进增强搜索层
@@ -1519,12 +1519,23 @@ export default function App() {
     if (store) { await store.set("search-dirs", dirs); await store.save(); }
     try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("set_search_dirs", { dirs }); } catch {}
   }, [store]);
-  const addSearchDir = useCallback(async () => {
-    const d = searchDirInput.trim();
-    if (!d || searchDirs.includes(d)) { setSearchDirInput(""); return; }
-    await applySearchDirs([...searchDirs, d]);
-    setSearchDirInput("");
-  }, [searchDirInput, searchDirs, applySearchDirs]);
+  // 弹系统文件夹选择框加目录（续111，取代手输——打错路径会被 Rust 侧 exists() 静默跳过，用户无从察觉）。
+  // Rust 的 pick_folder 在对话框存续期间置 DIALOG_ACTIVE，light-dismiss / 热键让路，故此处**不需要**
+  // 也**不应该** hideWorkbench()：界面全程保持，对话框以主窗口为 owner 浮在其上。
+  // dirPicking 防重复弹（Show 是模态阻塞的，重入会叠出第二个对话框）。
+  const pickSearchDir = useCallback(async () => {
+    if (dirPicking) return;
+    setDirPicking(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const d = await invoke<string|null>("pick_folder");
+      if (d && !searchDirs.includes(d)) await applySearchDirs([...searchDirs, d]);
+    } catch (e) {
+      console.error("[pick_folder]", e);
+    } finally {
+      setDirPicking(false);
+    }
+  }, [dirPicking, searchDirs, applySearchDirs]);
   const removeSearchDir = useCallback(async (d: string) => {
     await applySearchDirs(searchDirs.filter(x => x !== d));
   }, [searchDirs, applySearchDirs]);
@@ -2245,17 +2256,7 @@ export default function App() {
                   {searchEngine==="builtin" && (<>
                     <div className="settings-row">
                       <span className="settings-row-label">{t("额外扫描目录")}</span>
-                      <div style={{display:"flex",gap:6}}>
-                        <input
-                          className="hotkey-input"
-                          value={searchDirInput}
-                          onChange={e=>setSearchDirInput(e.target.value)}
-                          onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addSearchDir();}}}
-                          placeholder={t("如 D:\\Work")}
-                          spellCheck={false}
-                        />
-                        <button className="settings-action" onClick={addSearchDir}>{t("添加")}</button>
-                      </div>
+                      <button className="settings-action" onClick={pickSearchDir} disabled={dirPicking}>{t("浏览…")}</button>
                     </div>
                     {searchDirs.length>0 ? <div className="search-dir-list">{searchDirs.map(d=>(
                       <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title={t("移除")}><IconClose size={14}/></button></div>

@@ -6,6 +6,7 @@ mod everything; // 可选 Everything 搜索引擎（libloading 动态加载 SDK 
 mod clipboard; // 剪贴板子系统（历史/粘贴/复制/janitor/监听）
 
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 // CREATE_NO_WINDOW：防止 cmd.exe 子进程在开发模式下弹出控制台窗口
@@ -229,6 +230,100 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── 文件夹选择对话框（续111）─────────────────────────────────
+//
+// 让路标志：与 dragout 的 DRAG_IN_PROGRESS / STAGE_REORDER_ACTIVE / CLIP_DRAG_ACTIVE 同类——
+// 对话框一弹出就拿走前台，start_focus_watch 的判定（可见 + armed + 前台非自己非空 → hide）会在
+// 50ms 内把 overlay 隐藏掉，对话框随即变成孤儿。故对话框存续期间 light-dismiss 必须让路。
+//
+// 与续88 的区别：热键此处**直接让路**（既不 toggle 也不 emit 升级）。续88 的纯 JS 重排阶段不能
+// 让路是因为它没有别的退出方式、让路 = 用户被困住；对话框自带 Esc / 取消按钮，用户永远有出路，
+// 而 toggle 一个正挂着模态子窗口的 owner 只会制造混乱。
+static DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn dialog_active() -> bool {
+    DIALOG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// RAII 守卫：保证**任何**退出路径（选中 / 取消 / COM 报错 / panic）都清掉让路标志。
+/// 标志一旦悬置，light-dismiss 与热键永远让路、窗口再也无法自动隐藏——这正是 dragout 里
+/// 「任何没走到 do_drag_on_main 的中止路径都必须清标志」那段注释的教训，用 Drop 从类型上根治。
+struct DialogGuard;
+impl Drop for DialogGuard {
+    fn drop(&mut self) {
+        DIALOG_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 弹系统文件夹选择框，返回所选目录（用户取消 → Ok(None)，非错误）。
+/// 供设置→搜索的「浏览…」用，取代手输路径（手输打错时 scan_dirs 的 p.exists() 会静默跳过，
+/// 用户只会觉得"搜不到"而不知为何；选择器选出的目录必然存在）。
+#[tauri::command]
+fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    };
+
+    // owner 必不可少：overlay 是 alwaysOnTop 的全屏窗口，无 owner 的对话框会被压在它**下面**——
+    // 用户只看到界面卡住、根本没有对话框（比"界面消失"更糟）。owned window 永远显示在 owner 之上
+    // （即使 owner 是 topmost），且模态期间 owner 自动禁用。
+    // HWND 经 isize 中转：tauri 的 hwnd() 与本 crate 的 windows 版本可能不同，直接传会踩 trait 冲突
+    // （同 start_focus_watch / dragout 的既有做法）。
+    let owner_raw = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .ok_or_else(|| "主窗口 HWND 不可用".to_string())?;
+
+    unsafe {
+        // 本命令跑在 Tauri 命令线程（非主线程——dragout 需 run_on_main_thread 才拿得到主线程即为
+        // 反证），故此处自行 STA 初始化；模态循环也因此不会卡住 tao 事件循环。
+        // 绝不能学 dragout 切主线程跑：DoDragDrop 短暂尚可，文件夹对话框可能开着一分钟。
+        // is_ok() 覆盖 S_OK / S_FALSE 两者都需配平 Uninit（同 reveal_in_explorer）。
+        let did_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+
+        DIALOG_ACTIVE.store(true, Ordering::Relaxed); // 必须先于 Show() 置位
+        let guard = DialogGuard;
+
+        let result = (|| -> Result<Option<String>, String> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("无法创建文件夹对话框: {e}"))?;
+            let opts = dialog
+                .GetOptions()
+                .map_err(|e| format!("读对话框选项失败: {e}"))?;
+            // FOS_PICKFOLDERS：把「文件」选择框变成「文件夹」选择框（Vista+ 标准做法）
+            dialog
+                .SetOptions(opts | FOS_PICKFOLDERS)
+                .map_err(|e| format!("设置对话框选项失败: {e}"))?;
+            // Show 阻塞至用户确定/取消。取消返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)——
+            // 是正常流程不是错误，故映射为 Ok(None) 而非 Err（前端据此静默返回）。
+            if dialog.Show(HWND(owner_raw as *mut _)).is_err() {
+                return Ok(None);
+            }
+            let item = dialog
+                .GetResult()
+                .map_err(|e| format!("读取选择结果失败: {e}"))?;
+            let pwstr = item
+                .GetDisplayName(SIGDN_FILESYSPATH)
+                .map_err(|e| format!("读取路径失败: {e}"))?;
+            let path = pwstr.to_string().map_err(|e| format!("路径解码失败: {e}"))?;
+            CoTaskMemFree(Some(pwstr.0 as *const _)); // GetDisplayName 的 PWSTR 由调用方释放
+            Ok(Some(path))
+        })();
+
+        drop(guard); // 先清让路标志，再 Uninit / 返回
+        if did_init {
+            CoUninitialize();
+        }
+        result
+    }
+}
 
 // ── 入口 ───────────────────────────────────────────────────
 
@@ -465,6 +560,17 @@ fn start_hotkey_monitor(app: AppHandle) {
                 continue;
             }
 
+            // 续111：文件夹选择框存续期间让路——toggle 一个正挂着模态子窗口的 owner 只会制造混乱
+            // （隐藏 owner 会留下孤儿对话框）。此处**可以**单纯让路，与续88 的重排阶段不同：对话框
+            // 自带 Esc / 取消出口，让路不会把用户困住，故无需 emit 升级那套。同样更新 prev_combo /
+            // 清 down_at，防对话框关闭后产生虚假边沿。
+            if dialog_active() {
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
             if combo && !prev_combo {
                 // ── 按下沿 ──
                 down_at = Some(std::time::Instant::now());
@@ -531,7 +637,13 @@ fn start_focus_watch(app: AppHandle) {
             // 就因前台瞬时切走而自行 hide()，会打断整个手势（ghost/让路 transform 永久卡死，且
             // 因从未真正调用 start_drag_out，「拖到外部目标」这个操作本身也没发生）。让路但保持
             // armed 状态，重排结束后继续正常侦测（不清 armed，防止重排期间的假前台切换污染状态）。
-            if dragout::drag_in_progress() || dragout::stage_reorder_active() || dragout::clip_drag_active() {
+            // 续111：文件夹选择框存续期间同样让路——它拿走前台，不让路则 50ms 内 overlay 被
+            // 自动隐藏、对话框变孤儿。同样不清 armed（对话框关闭后继续正常侦测）。
+            if dragout::drag_in_progress()
+                || dragout::stage_reorder_active()
+                || dragout::clip_drag_active()
+                || dialog_active()
+            {
                 std::thread::sleep(std::time::Duration::from_millis(FOCUS_POLL_MS));
                 continue;
             }
@@ -575,7 +687,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
-            hide_window, open_file, reveal_in_explorer, trigger_screenshot,
+            hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
