@@ -165,7 +165,7 @@ export const EN_DICT: Record<string, string> = {
   "已连接 Everything，查询覆盖全盘、即时。": "Connected to Everything — queries cover the whole drive, instantly.",
   "内置引擎扫描整个用户目录（含下方额外目录），无需任何外部依赖；Everything 覆盖全盘但需另装。": "The built-in engine scans your whole user folder (plus any extra directories below) with no external dependency; Everything covers the entire drive but needs a separate install.",
   "额外扫描目录": "Extra Scan Directories",
-  "如 D:\\Work": "e.g. D:\\Work",
+  "浏览…": "Browse…",
   "默认仅扫描用户目录（桌面/下载/文档…）。如需搜其他盘符，在此添加根目录。": "By default, only your user folder is scanned (Desktop/Downloads/Documents…). To search other drives, add a root directory here.",
   "添加目录后约几秒完成后台重建即可搜到；node_modules / .git 等噪音目录自动跳过。": "After adding a directory, the background index rebuilds in a few seconds; noisy folders like node_modules / .git are skipped automatically.",
 

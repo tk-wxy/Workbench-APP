@@ -1,4 +1,4 @@
-// 文件系统搜索：双引擎（内置自建内存索引 + 可选 Everything），设置可切换。
+﻿// 文件系统搜索：双引擎（内置自建内存索引 + 可选 Everything），设置可切换。
 //
 // 架构命脉（违反任一条都会卡前端，见 DECISIONS §17 / CLAUDE.md 不变量）：
 // 1. 内置索引建立只在独立后台线程（start_index_worker 内 spawn），永不经 Tauri 命令 / invoke / 阻塞 IPC。
@@ -28,6 +28,8 @@ pub struct IndexEntry {
     pub name_lower: String,
     pub ext: String,
     pub is_dir: bool,
+    /// 是否来自用户手动添加的额外扫描目录（EXTRA_DIRS）。查询时据此加分，见 EXTRA_DIR_BONUS。
+    pub extra: bool,
 }
 
 /// 返回给前端的查询结果（不含 name_lower 内部字段）。内置与 Everything 共用此结构。
@@ -62,21 +64,37 @@ const REBUILD_INTERVAL_SECS: u64 = 30 * 60; // 30 分钟周期重建
 const INITIAL_DELAY_SECS: u64 = 3; // 避开开机高峰后再首次建索引
 const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全盘可返回大量结果，前端按引擎传不同 limit）
 
-// 默认扫描根 = 整个用户目录；额外根目录由前端配置注入 EXTRA_DIRS。不存在的目录跳过。
-fn scan_dirs() -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
+/// 额外扫描目录（用户手动添加）的条目加分（续111b）。
+///
+/// 为什么需要：打分只看**文件名**，故同名文件（一台开发机上 README 有 436 个、index.html 79 个）
+/// 得分完全相同；`sort_by` 稳定排序 → 并列时保持索引原始顺序 → 而 build_index 先走 USERPROFILE、
+/// 额外目录**排在最后** → 额外目录的同名文件永远垫底，被前端 limit(50) 截掉 = 用户眼中的"加了目录
+/// 却搜不到里面的东西"（实测：vue-app/index.html 排第 71/79、README.md 排第 345/436）。
+/// home 排在前面纯属遍历顺序的副产品、并无道理；而"用户手动添加了这个目录"本身是明确的意图信号。
+///
+/// 取值 300 的依据：必须**小于**「子串命中(≥1500)」与「子序列模糊(≤1000)」两层的间距，
+/// 使额外目录的模糊命中(≤1300)仍排在用户目录的子串命中(≥1500)之后——即不破坏
+/// token_score 那条「直接含永远排在拆字母前」的分层不变量，只翻转同层内的并列。
+/// 按条目加一次（非按 token），故与 `60 - name.len()` 短名加分同处一行之后。
+const EXTRA_DIR_BONUS: i32 = 300;
+
+/// 扫描根目录清单。返回 (目录, 是否为用户手动添加的额外目录)——第二项一路带进 IndexEntry.extra
+/// 供查询加分用（见 EXTRA_DIR_BONUS）。默认根 = 整个用户目录；额外根由前端经 set_search_dirs 注入。
+/// 不存在的目录跳过（故手输打错的路径会被静默忽略——续111 改用文件夹选择器后不再可能）。
+fn scan_dirs() -> Vec<(PathBuf, bool)> {
+    let mut dirs: Vec<(PathBuf, bool)> = Vec::new();
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     if !home.is_empty() {
         let p = PathBuf::from(&home);
         if p.exists() {
-            dirs.push(p);
+            dirs.push((p, false));
         }
     }
     if let Some(lock) = EXTRA_DIRS.get() {
         if let Ok(guard) = lock.lock() {
             for p in guard.iter() {
-                if p.exists() && !dirs.iter().any(|d| d == p) {
-                    dirs.push(p.clone());
+                if p.exists() && !dirs.iter().any(|(d, _)| d == p) {
+                    dirs.push((p.clone(), true));
                 }
             }
         }
@@ -101,9 +119,10 @@ fn should_skip_dir(name: &str) -> bool {
 }
 
 // 耗时部分：纯遍历构建，绝不持 FILE_INDEX 锁。
-fn build_index(dirs: &[PathBuf]) -> Vec<IndexEntry> {
+// dirs 的第二项 = 该根是否为用户手动添加的额外目录，逐条记进 IndexEntry.extra（查询时加分用）。
+fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
     let mut out = Vec::new();
-    for dir in dirs {
+    for (dir, is_extra) in dirs {
         if out.len() >= MAX_INDEX_ENTRIES {
             break;
         }
@@ -140,6 +159,7 @@ fn build_index(dirs: &[PathBuf]) -> Vec<IndexEntry> {
                 name,
                 ext,
                 is_dir,
+                extra: *is_extra,
             });
         }
     }
@@ -275,6 +295,9 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
         }
         if all {
             total += 60 - (e.name.len() as i32).min(60); // 短名优先（轻微）
+            if e.extra {
+                total += EXTRA_DIR_BONUS; // 用户手动添加的目录 = 明确意图信号，翻转同名并列（见常量注释）
+            }
             scored.push((total, e));
         }
     }
@@ -404,6 +427,94 @@ pub fn set_search_engine(engine: String) {
     SEARCH_ENGINE.store(v, Ordering::Relaxed);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// 额外目录端到端契约（跑真实的 set_search_dirs 命令，含其后台重建与图标预热）：
+    /// 调用后，EXTRA_DIRS 里的文件必须在有限时间内出现在 FILE_INDEX，且能被 builtin_search 查到。
+    /// 用临时目录顶掉 USERPROFILE，避免测试真去遍历 18 万条的真实用户目录（快 + 可复现）。
+    /// ⚠️ 用了全局 OnceLock（FILE_INDEX/EXTRA_DIRS）与 USERPROFILE 环境变量，故只此一个测试、勿并行加测。
+    #[test]
+    fn set_search_dirs_indexes_extra_dir() {
+        let base = std::env::temp_dir().join("wb_idx_test");
+        let home = base.join("home");
+        let extra = base.join("extra");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(home.join("sub")).unwrap();
+        fs::create_dir_all(extra.join("sub")).unwrap();
+        fs::write(home.join("sub").join("home_marker.txt"), b"x").unwrap();
+        fs::write(extra.join("sub").join("zzmarker_extra.txt"), b"x").unwrap();
+        // 复刻续111b 的 bug 形态：同名文件 home 里一大堆、额外目录里一个（真机上 README 有 436 个）。
+        // 打分只看文件名 → 全部同分 → 稳定排序保持索引顺序 → 额外目录（遍历在后）永远垫底 → 被 limit 截掉。
+        for i in 0..60 {
+            let d = home.join(format!("proj{i}"));
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("dupname.md"), b"x").unwrap();
+        }
+        fs::write(extra.join("dupname.md"), b"x").unwrap();
+        std::env::set_var("USERPROFILE", &home);
+
+        // ① 纯遍历层：scan_dirs + build_index
+        EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
+        *EXTRA_DIRS.get().unwrap().lock().unwrap() = vec![extra.clone()];
+        let idx = build_index(&scan_dirs());
+        let names: Vec<&str> = idx.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"home_marker.txt"), "USERPROFILE 未进索引: {names:?}");
+        assert!(names.contains(&"zzmarker_extra.txt"), "额外目录未进索引: {names:?}");
+
+        // ② 命令层：set_search_dirs 的后台重建是否真把新目录换进 FILE_INDEX
+        *EXTRA_DIRS.get().unwrap().lock().unwrap() = Vec::new();
+        set_search_dirs(vec![extra.to_string_lossy().to_string()]);
+        let mut hit = false;
+        for _ in 0..100 {
+            std::thread::sleep(Duration::from_millis(100));
+            if !builtin_search("zzmarker_extra", 10).is_empty() {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "set_search_dirs 调用后 10s 内仍搜不到额外目录里的文件");
+
+        // ③ 排名回归（续111b）：61 个同名 dupname.md 里，额外目录那个必须排进前列而非垫底。
+        // 修复前它恒排第 61（索引顺序），被前端 ENH_FILE_LIMIT_BUILTIN=50 截掉 = "加了目录搜不到内容"。
+        let all = builtin_search("dupname", 1000);
+        let rank = all
+            .iter()
+            .position(|r| r.path.contains("extra"))
+            .expect("同名竞争中额外目录的文件完全没命中");
+        assert_eq!(all.len(), 61, "同名文件应共 61 个（home 60 + extra 1）");
+        assert!(
+            rank == 0,
+            "额外目录的同名文件应因 EXTRA_DIR_BONUS 排第 1，实际排第 {}",
+            rank + 1
+        );
+    }
+
+    /// 诊断用（默认 #[ignore]，手动跑：cargo test measure_real_rebuild -- --ignored --nocapture）：
+    /// 量真实用户目录的「遍历」与「图标预热」各自耗时——set_search_dirs 的后台重建要把这两步全跑完
+    /// 才会原子替换 FILE_INDEX，这段时间内新加的目录搜不到。
+    #[test]
+    #[ignore]
+    fn measure_real_rebuild() {
+        let home = PathBuf::from(std::env::var("USERPROFILE").unwrap());
+        let t1 = Instant::now();
+        let idx = build_index(&[(home, false)]);
+        let walk = t1.elapsed();
+        let exe_lnk = idx.iter().filter(|e| e.ext == "exe" || e.ext == "lnk").count();
+        let t2 = Instant::now();
+        let icons = build_icon_cache(&idx);
+        println!(
+            "遍历: {walk:?} / {} 条（其中 exe+lnk {exe_lnk} 个 → 每个单独提图标）\n图标预热: {:?} / {} key\n合计: {:?}",
+            idx.len(),
+            t2.elapsed(),
+            icons.len(),
+            t1.elapsed()
+        );
+    }
+}
+
 /// 设置内置引擎的额外扫描根目录，并触发一次后台重建（仅内置引擎时）。持久化由前端 store 负责。
 #[tauri::command]
 pub fn set_search_dirs(dirs: Vec<String>) {
@@ -420,9 +531,11 @@ pub fn set_search_dirs(dirs: Vec<String>) {
     FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
     ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(|| {
+        let started = Instant::now();
         let dirs = scan_dirs();
         let new_index = build_index(&dirs);
         let new_icons = build_icon_cache(&new_index); // 同步预热图标，与索引一起换入
+        let (total, extra) = (new_index.len(), new_index.iter().filter(|e| e.extra).count());
         if let Some(lock) = FILE_INDEX.get() {
             if let Ok(mut guard) = lock.lock() {
                 *guard = new_index;
@@ -433,5 +546,11 @@ pub fn set_search_dirs(dirs: Vec<String>) {
                 *guard = new_icons;
             }
         }
+        // 与 start_index_worker 的 [fileindex] ready 同款日志。此前本重建**完全静默**——
+        // 排查「加了目录搜不到」时无从判断是没重建、还是重建了但没收进去（续111b 诊断的实际阻力）。
+        eprintln!(
+            "[fileindex] set_search_dirs 重建完成: {total} 条（额外目录 {extra} 条）({:?})",
+            started.elapsed()
+        );
     });
 }
