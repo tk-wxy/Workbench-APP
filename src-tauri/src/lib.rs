@@ -260,6 +260,21 @@ impl Drop for DialogGuard {
 /// 用户只会觉得"搜不到"而不知为何；选择器选出的目录必然存在）。
 #[tauri::command]
 fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, true)
+}
+
+/// 弹系统**文件**选择框，返回所选文件（用户取消 → Ok(None)）。
+/// 供启动台「浏览文件…」用——此前把任意文件收藏进启动台只能靠拖入（overlay 全屏覆盖时很别扭）
+/// 或增强搜索命中（索引外的路径搜不到）。与 pick_folder 唯一差别是不加 FOS_PICKFOLDERS。
+#[tauri::command]
+fn pick_file(app: AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, false)
+}
+
+/// 文件 / 文件夹选择框的共用实现（`folders=true` 即加 FOS_PICKFOLDERS 变成文件夹选择器）。
+/// 让路标志、owner、STA 三处约束对两者完全一致，故合并——别为了"文件版更简单"另写一份，
+/// 漏掉其中任何一条都会复现续111 踩过的坑（见下方各段注释）。
+fn pick_path(app: AppHandle, folders: bool) -> Result<Option<String>, String> {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -293,14 +308,17 @@ fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
         let result = (|| -> Result<Option<String>, String> {
             let dialog: IFileOpenDialog =
                 CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
-                    .map_err(|e| format!("无法创建文件夹对话框: {e}"))?;
+                    .map_err(|e| format!("无法创建选择对话框: {e}"))?;
             let opts = dialog
                 .GetOptions()
                 .map_err(|e| format!("读对话框选项失败: {e}"))?;
-            // FOS_PICKFOLDERS：把「文件」选择框变成「文件夹」选择框（Vista+ 标准做法）
-            dialog
-                .SetOptions(opts | FOS_PICKFOLDERS)
-                .map_err(|e| format!("设置对话框选项失败: {e}"))?;
+            // FOS_PICKFOLDERS：把「文件」选择框变成「文件夹」选择框（Vista+ 标准做法）。
+            // 不加即为默认的文件选择框。
+            if folders {
+                dialog
+                    .SetOptions(opts | FOS_PICKFOLDERS)
+                    .map_err(|e| format!("设置对话框选项失败: {e}"))?;
+            }
             // Show 阻塞至用户确定/取消。取消返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)——
             // 是正常流程不是错误，故映射为 Ok(None) 而非 Err（前端据此静默返回）。
             if dialog.Show(HWND(owner_raw as *mut _)).is_err() {
@@ -687,7 +705,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
-            hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder,
+            hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,

@@ -40,7 +40,10 @@ export const EN_DICT: Record<string, string> = {
 
   // ── 启动器 ──
   "启动器": "Launcher",
-  "添加应用": "Add App",
+  "添加到启动台": "Add to Launcher",
+  "或收藏任意文件 / 文件夹：": "Or add any file / folder:",
+  "浏览文件…": "Browse Files…",
+  "浏览文件夹…": "Browse Folders…",
   "单击启动": "Click to launch",
   "单击打开": "Click to open",
   "拖入或点「添加」收藏应用": "Drag in or click \"Add\" to save an app",

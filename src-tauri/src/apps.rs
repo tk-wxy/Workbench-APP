@@ -575,7 +575,11 @@ pub fn launch_app(path: String) -> Result<(), String> {
 
 // ── 文件信息 ───────────────────────────────────────────────
 
+// camelCase：前端 FileEntry 接口读 `isDir`（Tauri 不会自动转换 serde 字段名，同 filesearch.rs
+// SearchResult 的既有约定）。此前缺这行属潜伏错配——历史调用点只读 .icon 故未暴露，
+// 续112 的「浏览文件…」要靠 isDir 区分 file/folder，补齐。
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     pub path: String,
     pub name: String,
@@ -653,4 +657,28 @@ pub fn resolve_lnk(path: String) -> LnkInfo {
     };
     let icon = extract_icon_base64(&path); // SHGetFileInfoW 自动解析 .lnk 图标
     LnkInfo { name, path, icon }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FileInfo 必须以 camelCase 过 IPC——前端 `FileEntry` 接口读的是 `isDir`。
+    /// 缺 `#[serde(rename_all)]` 时前端拿到的是 undefined（不是报错，是静默 falsy），
+    /// 表现为「拖进来的文件夹被当成文件」：磁贴/卡片显通用文件字形、中转卡片元信息不显示「文件夹」。
+    /// 这个错配曾潜伏很久（历史调用点只读 .icon 故没暴露），故用测试钉死。
+    #[test]
+    fn file_info_serializes_is_dir_as_camel_case() {
+        let json = serde_json::to_string(&FileInfo {
+            path: "C:\tmp".into(),
+            name: "tmp".into(),
+            is_dir: true,
+            size: 0,
+            ext: String::new(),
+            icon: None,
+        })
+        .expect("FileInfo 应可序列化");
+        assert!(json.contains("\"isDir\":true"), "前端读 isDir，实际序列化为: {json}");
+        assert!(!json.contains("is_dir"), "不应残留 snake_case 字段: {json}");
+    }
 }

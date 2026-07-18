@@ -305,6 +305,7 @@ export default function App() {
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
   const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
+  const [launcherPicking, setLauncherPicking] = useState(false); // 启动台「浏览…」选择框是否已弹出（同上，防重入叠弹）
   const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
   const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 呼出默认搜索模式：page=顶栏界面搜索（默认），enhanced=直接进增强搜索层
@@ -1022,6 +1023,28 @@ export default function App() {
     }
     saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
   }, [launcher, saveLauncher]);
+  // 启动台「浏览文件…/浏览文件夹…」：经系统选择框收藏任意路径（续112）。
+  // 补的是覆盖盲区——此前非拖入的唯一入口是增强搜索命中，索引外的路径（网络盘 / 被 skip 名单剪掉的
+  // 目录 / 刚新建的目录）根本搜不到，只能去资源管理器拖，而 overlay 全屏覆盖时这一步很别扭。
+  // 与 pickSearchDir 同理：Rust 的 pick_file/pick_folder 在对话框存续期间置 DIALOG_ACTIVE，
+  // light-dismiss 与热键都让路，故此处**不需要也不应该** hideWorkbench()。
+  const pickLauncherPath = useCallback(async (kind:"file"|"folder") => {
+    if (launcherPicking) return;
+    setLauncherPicking(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const p = await invoke<string|null>(kind==="folder" ? "pick_folder" : "pick_file");
+      if (!p) return;                               // 用户取消 → Rust 返回 null，静默收场
+      if (launcher.some(x => x.path === p)) return; // 已收藏；addFsToLauncher 也去重，此处早退省一次 IPC
+      // 名称/扩展名/是否目录/图标一律由 Rust 取，避免前端切路径字符串（UNC、尾斜杠、无扩展名等边角）
+      const info = await invoke<FileEntry>("get_file_info", { path: p });
+      await addFsToLauncher({ path:p, name:info.name, ext:info.ext, isDir:info.isDir, icon:info.icon ?? null });
+    } catch (e) {
+      console.error("[pick_launcher_path]", e);
+    } finally {
+      setLauncherPicking(false);
+    }
+  }, [launcherPicking, launcher, addFsToLauncher]);
   // 从启动器移除（右键）
   const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
 
@@ -1809,7 +1832,7 @@ export default function App() {
         <section className="app-panel">
           <div className="stage-section-header">
             <span className="section-label">{t("启动器")}</span>
-            <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加应用")}>{t("添加")}</button>
+            <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加到启动台")}>{t("添加")}</button>
           </div>
           <div className="app-grid" ref={launcherDropRef}>
             {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
@@ -2066,12 +2089,18 @@ export default function App() {
         <div className="settings-mask" onClick={()=>{setPickerOpen(false);setPickerQuery("");}}>
           <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
             <div className="settings-head">
-              <span className="settings-title">{t("添加应用")}</span>
+              <span className="settings-title">{t("添加到启动台")}</span>
               <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
             </div>
             <div className="picker-search">
               <IconSearch size={16}/>
               <input ref={pickerInputRef} className="picker-search-input" autoFocus placeholder={t("搜索要添加的应用…")} value={pickerQuery} onChange={e=>setPickerQuery(e.target.value)} spellCheck={false}/>
+            </div>
+            {/* 列表只含扫描到的「应用」；任意文件/文件夹走系统选择框（索引外路径搜索命中不了） */}
+            <div className="picker-browse">
+              <span className="picker-browse-label">{t("或收藏任意文件 / 文件夹：")}</span>
+              <button className="settings-action" onClick={()=>pickLauncherPath("file")} disabled={launcherPicking}>{t("浏览文件…")}</button>
+              <button className="settings-action" onClick={()=>pickLauncherPath("folder")} disabled={launcherPicking}>{t("浏览文件夹…")}</button>
             </div>
             <div className="picker-list">
               {pickerResults.length ? pickerResults.map(({app,ranges})=>(
@@ -2133,7 +2162,7 @@ export default function App() {
                   <div className="settings-row">
                     <span className="settings-row-label">{t("收藏条目")}<span className="settings-row-sub">{launcher.length} / {LAUNCHER_MAX}</span></span>
                     <div className="settings-inline-actions">
-                      <button className="settings-action" onClick={()=>{setPickerQuery("");setPickerOpen(true);}}>{t("添加应用")}</button>
+                      <button className="settings-action" onClick={()=>{setPickerQuery("");setPickerOpen(true);}}>{t("添加到启动台")}</button>
                       <button className="settings-action danger" onClick={clearLauncher} disabled={!launcher.length}>{t("清空")}</button>
                     </div>
                   </div>
