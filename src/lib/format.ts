@@ -65,6 +65,14 @@ export function fileGroup(ext: string, isDir: boolean): FileGroup {
   }
 }
 
+// Unix 秒 → 「YYYY-MM-DD HH:mm」。プレビュー面板の作成/更新時刻用（ago() の相対表記と違い、
+// ここは「いつ」を正確に見たい場面なので絶対表記）。
+export function fmtDateTime(unixSec: number) {
+  const d = new Date(unixSec * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 // 絶対パスから親ディレクトリを抽出（検索結果のディレクトリ表示用）
 export const dirOf = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));

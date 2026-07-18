@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-version-sync.mjs && node scripts/test-enh-sections.mjs && tsc && vite build",
-    "test": "node scripts/test-enh-sections.mjs",
+    "build": "node scripts/check-version-sync.mjs && node scripts/test-enh-sections.mjs && node scripts/check-css.mjs && tsc && vite build",
+    "test": "node scripts/test-enh-sections.mjs && node scripts/check-css.mjs",
+    "css:check": "node scripts/check-css.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "version:check": "node scripts/check-version-sync.mjs"

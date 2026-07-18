@@ -120,6 +120,28 @@ extern "system" {
     fn ImageList_GetIcon(himl: isize, i: i32, flags: u32) -> isize;
 }
 
+// ── Jumbo（256px）图标：预览面板的「大图标」用（续115）──
+// SHGFI_LARGEICON 只有 32px，放进预览放大 3 倍会糊（@200%DPI 尤其明显）。
+// 系统图像列表另有 SHIL_JUMBO 一档（256px），即 Explorer「超大图标」视图所用。
+// 取法：先用 SHGFI_SYSICONINDEX 拿到图标在系统列表里的下标 iIcon（与档位无关），
+// 再向 SHGetImageList 要 JUMBO 档的列表句柄，用同一个 iIcon 取出大图。
+const SHIL_JUMBO: i32 = 0x4;
+
+#[repr(C)]
+struct GUID { data1: u32, data2: u16, data3: u16, data4: [u8; 8] }
+// IID_IImageList {46EB5926-582E-4017-9FDF-E8998DAA0950}
+const IID_IIMAGELIST: GUID = GUID {
+    data1: 0x46EB_5926, data2: 0x582E, data3: 0x4017,
+    data4: [0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50],
+};
+
+#[link(name = "shell32")]
+extern "system" {
+    // 返回的 IImageList* 可直接当 HIMAGELIST 传给 ImageList_GetIcon（Windows 上两者可互换，
+    // 是既有的通行做法）；故此处只当不透明句柄用，不做任何 COM 方法调用。
+    fn SHGetImageList(iImageList: i32, riid: *const GUID, ppv: *mut isize) -> i32;
+}
+
 #[link(name = "gdi32")]
 extern "system" {
     fn CreateCompatibleDC(hdc: isize) -> isize;
@@ -316,6 +338,40 @@ pub fn extract_icon_base64(path: &str) -> Option<String> {
         DestroyIcon(shfi.hIcon);
         result
     }
+}
+
+/// 提取 256px 大图标（预览面板用）。失败返回 None，前端回退到既有 32px 图标 / 矢量字形。
+/// 与 `extract_icon_base64` **并存而非替换**：列表里几十个 32px 图标够用且省得多，
+/// 只有预览这一处需要大图。
+pub fn extract_large_icon_base64(path: &str) -> Option<String> {
+    let wide = str_to_wide(path);
+    unsafe {
+        let mut shfi: SHFILEINFOW = std::mem::zeroed();
+        // 只要下标，不要 SHGFI_ICON（那会额外造一个 32px HICON 还得记着销毁）
+        if SHGetFileInfoW(
+            wide.as_ptr(), 0, &mut shfi,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX,
+        ) == 0 { return None; }
+
+        let mut himl: isize = 0;
+        if SHGetImageList(SHIL_JUMBO, &IID_IIMAGELIST, &mut himl) != 0 || himl == 0 { return None; }
+
+        let hicon = ImageList_GetIcon(himl, shfi.iIcon, ILD_NORMAL);
+        if hicon == 0 { return None; }
+        let result = hicon_to_png(hicon);
+        DestroyIcon(hicon); // 系统列表本身不释放（进程级共享），只销毁取出的副本
+        result
+    }
+}
+
+/// 预览面板取大图标（COM 仅在本次调用线程临时初始化，同 get_file_info）。
+#[tauri::command]
+pub fn get_large_icon(path: String) -> Option<String> {
+    let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+    let icon = extract_large_icon_base64(&path);
+    if com_hr == 0 { unsafe { CoUninitialize(); } }
+    icon
 }
 
 fn hicon_to_png(hicon: isize) -> Option<String> {
@@ -588,6 +644,15 @@ pub struct FileInfo {
     pub ext: String,
     /// Windows 系统图标，base64 PNG data URL（SHGetFileInfoW 提取，可为 None）
     pub icon: Option<String>,
+    /// 修改 / 创建时间（Unix 秒）。取不到则 None——网络盘、部分文件系统不保证提供创建时间，
+    /// 故前端必须容忍缺失（预览面板对 None 直接不渲染该行，而不是显示 1970）。
+    pub modified: Option<u64>,
+    pub created: Option<u64>,
+}
+
+/// SystemTime → Unix 秒。早于 epoch（异常时钟 / 某些网络盘）返回 None，不返回负数或 0。
+fn unix_secs(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+    t.ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
 
 /// 批量获取文件/文件夹的 Shell 图标（base64 PNG data URL），供搜索结果异步填充图标用。
@@ -613,7 +678,10 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
     let icon = extract_icon_base64(&path);
     if com_hr == 0 { unsafe { CoUninitialize(); } } // 仅 S_OK 时配对反初始化
-    Ok(FileInfo { path, name, is_dir: meta.is_dir(), size: meta.len(), ext, icon })
+    Ok(FileInfo {
+        path, name, is_dir: meta.is_dir(), size: meta.len(), ext, icon,
+        modified: unix_secs(meta.modified()), created: unix_secs(meta.created()),
+    })
 }
 
 /// 批量存在性检查：返回入参中「已不存在」的路径子集（中转站失踪标记用）。

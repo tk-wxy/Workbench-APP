@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, dirOf, type FileCat, type FileGroup } from "./lib/format";
+import { IMG_EXTS, fmtSize, ago, dirOf, fmtDateTime, type FileCat, type FileGroup } from "./lib/format";
 import { groupFiles } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
@@ -11,7 +11,8 @@ import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
 // ── 类型 ──
 interface AppInfo { name: string; path: string; icon: string | null; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
-interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; }
+// modified/created 为 Unix 秒，可能缺失（网络盘等不保证提供创建时间）——预览面板对缺失直接不渲染该行
+interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; modified?: number | null; created?: number | null; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
@@ -25,6 +26,10 @@ const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
 // 分组不足此条数则并入「其他文件」（续114b）。没有这道闸，一个只返回 3 个文件的查询会得到
 // 3 个标题配 3 条内容——标题比内容还多，比不分组更难看。这条阈值对实际观感的影响大于分类表本身。
 const ENH_MIN_SECTION = 3;
+// 预览面板（续115）：按住 ↓ 连续穿过结果时不能每项都发 IPC，故未命中缓存的取用防抖；
+// 命中缓存则**立即出**（不等防抖），来回移动时面板不闪。
+const PREVIEW_DEBOUNCE_MS = 130;
+const PREVIEW_CACHE_MAX = 300; // 超出直接整表清空：预览是纯展示，重取代价低，不值得上 LRU
 const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
@@ -147,6 +152,16 @@ type EnhResult =
   | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
   | { kind: "clip";  item: ClipItem; name: string; ranges: [number, number][] } // 剪贴板历史结果；activate=取走粘贴（copyAndPaste）
   | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
+
+// 结果唯一键：渲染 key + 预览缓存键 + 预览竞态守卫共用一套，避免三处各写一份跑偏
+const enhKey = (r: EnhResult) =>
+  r.kind === "app" ? "app:" + r.app.path : r.kind === "stage" ? "stage:" + r.item.id
+  : r.kind === "clip" ? "clip:" + r.item.time : "fs:" + r.path;
+// 结果对应的真实文件路径（取不到=空串，如纯文本/图片剪贴板项）。
+// 与渲染里的 rPath 不同：那个只服务「加入启动台/中转」的按钮反馈、故意排除 stage/clip；
+// 预览要对 stage/clip 里的文件项也显示位置与时间，所以单独一份。
+const enhPath = (r: EnhResult) =>
+  r.kind === "app" ? r.app.path : r.kind === "fs" ? r.path : (r.item.items?.[0]?.path ?? "");
 
 // ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
 const HOTKEY_MAIN_TOKENS = new Set<string>([
@@ -760,6 +775,100 @@ export default function App() {
     enhSections.forEach((s, i) => m.set(enhSectionStarts[i], `${s.label} (${s.items.length})`));
     return m;
   }, [enhSections, enhSectionStarts]);
+
+  // ── 预览面板异步元数据（续115）：大图标 + 时间戳/大小，仅文件系统类结果需要 ──
+  // 同步能算的部分（名称/类型/徽标/已有小图标）在 enhPreview 里直接出，**不等这里**，
+  // 所以快速 ↑↓ 时面板不会空白闪烁，只是详细行稍后补上。
+  const [previewMeta, setPreviewMeta] = useState<{ key: string; info: FileEntry | null; icon: string | null; thumb: string | null } | null>(null);
+  const previewCacheRef = useRef(new Map<string, { info: FileEntry | null; icon: string | null; thumb: string | null }>());
+  const previewKeyRef = useRef("");
+  useEffect(() => {
+    if (!enhOpen) { setPreviewMeta(null); return; }
+    const r = enhResults[enhSelIdx] ?? enhResults[0];
+    const key = r ? enhKey(r) : "";
+    const path = r ? enhPath(r) : "";
+    previewKeyRef.current = key;              // 竞态守卫基准：响应回来时若已不等，说明选中变了
+    if (!r || !path) { setPreviewMeta(null); return; } // 纯文本/图片剪贴板项无路径，无需取
+    const hit = previewCacheRef.current.get(key);
+    if (hit) { setPreviewMeta({ key, ...hit }); return; }
+    const timer = setTimeout(async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        // 图片文件另取真缩略图（复用续99c 的落盘缓存，重复访问零解码原图）；非图片跳过这次 IPC
+        const isImg = IMG_EXTS.includes((path.split(".").pop() ?? "").toLowerCase());
+        // 三个命令并行；任一失败不影响其余（大图标失败会回退到小图标/矢量字形）
+        const [info, icon, thumb] = await Promise.all([
+          invoke<FileEntry>("get_file_info", { path }).catch(() => null),
+          invoke<string | null>("get_large_icon", { path }).catch(() => null),
+          isImg ? invoke<string>("get_stage_thumbnail", { path }).catch(() => null) : Promise.resolve(null),
+        ]);
+        const entry = { info, icon: icon ?? null, thumb: thumb ?? null };
+        previewCacheRef.current.set(key, entry);
+        if (previewCacheRef.current.size > PREVIEW_CACHE_MAX) previewCacheRef.current.clear();
+        if (previewKeyRef.current === key) setPreviewMeta({ key, ...entry }); // 迟到的响应直接丢弃
+      } catch {}
+    }, PREVIEW_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [enhOpen, enhSelIdx, enhResults]);
+
+  // ── 预览面板视图模型（续115）──
+  // 同步部分（标题/徽标/字形/已有小图标）恒可算；异步部分（大图标/缩略图/时间/大小）到了才补，
+  // 故快速导航时面板结构稳定、只有细节行渐显，不会整块闪。
+  const enhPreview = useMemo(() => {
+    const r = enhResults[enhSelIdx] ?? enhResults[0];
+    if (!r) return null;
+    const key = enhKey(r);
+    const meta = previewMeta?.key === key ? previewMeta : null; // 只认当前选中项的元数据，防串味
+    const info = meta?.info ?? null;
+    // rtl：只给「位置」行——用 direction:rtl 让超长路径省略头部、保住尾部（文件名侧）。
+    // 绝不能全表铺开：时间/大小含中性字符，RTL 排版会把它们的标点顺序弄错。
+    const rows: { label: string; value: string; rtl?: boolean; pending?: boolean }[] = [];
+    const push = (label: string, value?: string | null, rtl?: boolean) => { if (value) rows.push({ label, value, rtl }); };
+    const fileRows = (path: string, extHint?: string, isDir?: boolean) => {
+      push(t("位置"), dirOf(path), true);
+      push(t("类型"), isDir ? t("文件夹") : ((extHint || info?.ext || "").replace(/^\./, "").toUpperCase() || t("文件")));
+      // ↓ 三行**恒占位**：它们的值要等 get_file_info 回来。若按「有值才渲染」，面板会在元数据
+      // 到达的瞬间长高——肉眼可见的抖动（用户实测反馈的正是这个）。故行数由同步已知的 isDir 定死：
+      //   加载中 →「…」；加载完但该字段确实缺失（网络盘常无创建时间）→「—」。两种结局高度都不变。
+      // 不给整个面板写死高度：文本预览与文件信息的内容量差很多，写死会让短内容拖一片空白。
+      // pending 看的是「元数据是否已返回」(meta) 而非「值是否非空」(info)：取失败时 info 为 null
+      // 但 meta 已到，此时该显示「—」而不是永远停在「…」（否则失败与加载中无法区分）。
+      const pending = !meta;
+      const slot = (v?: number | null) => pending ? "…" : (v ? fmtDateTime(v) : "—");
+      if (!isDir) rows.push({ label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending });
+      rows.push({ label: t("修改时间"), value: slot(info?.modified), pending });
+      rows.push({ label: t("创建时间"), value: slot(info?.created), pending });
+    };
+
+    // photo=true 表示 big 是「照片缩略图」（应铺满裁切）；false 表示是图标（应居中留白）。
+    // 混为一谈会把应用图标按 cover 裁掉边缘。
+    let title = "", badge = "", big: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
+    if (r.kind === "app") {
+      title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" };
+      big = meta?.icon ?? r.app.icon ?? null;
+      fileRows(r.app.path);
+    } else if (r.kind === "fs") {
+      title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
+      glyph = r.isDir ? { isDir: true } : { ext: r.ext };
+      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = !!meta?.thumb;
+      fileRows(r.path, r.ext, r.isDir);
+    } else if (r.kind === "stage") {
+      const it = r.item, p = it.items?.[0]?.path;
+      badge = t("中转站");
+      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); glyph = { cat: "doc" }; text = it.content ?? null; push(t("类型"), t("文本")); push(t("字数"), String((it.content || "").length)); }
+      else if (it.type === "image") { title = t("图片"); glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; push(t("类型"), t("图片")); }
+      else { title = r.name; glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileRows(p, it.ext, it.isDir); }
+      if (it.pinned) push(t("状态"), t("已固定"));
+    } else { // clip
+      const it = r.item, p = it.items?.[0]?.path;
+      badge = t("剪贴板");
+      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); glyph = { cat: "doc" }; text = it.content ?? null; push(t("类型"), t("文本")); push(t("字数"), String((it.content || "").length)); }
+      else if (it.type === "image") { title = t("图片"); glyph = { isImage: true }; big = it.content ?? null; photo = !!big; push(t("类型"), t("图片")); }
+      else { title = r.name; glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileRows(p, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
+      push(t("复制时间"), fmtDateTime(Math.floor(it.time / 1000))); // ClipItem.time 是毫秒（ago() 按毫秒用）
+    }
+    return { r, key, title, badge, big, photo, glyph, text, rows, path: enhPath(r) };
+  }, [enhResults, enhSelIdx, previewMeta, stageThumbs, t]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
@@ -2157,9 +2266,11 @@ export default function App() {
         </div>
         {/* 索引未就绪提示：不阻塞 Tier 1（应用/中转）结果显示 */}
         {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null)}
+        {/* 结果区：列表恒居中；预览由 CSS 绝对定位挂在本容器左外侧，不参与布局流 */}
+        <div className="enh-body">
         <div className="enh-results">
           {enhResults.length ? enhResults.map((r,i)=>{
-            const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : r.kind==="clip" ? "clip:"+r.item.time : "fs:"+r.path;
+            const key = enhKey(r);
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
                        : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
                        : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
@@ -2195,6 +2306,50 @@ export default function App() {
               </Fragment>
             );
           }) : <p className="empty-hint">{enhQuery.trim()?t("无匹配"):t("输入以搜索")}</p>}
+        </div>
+        {/* ── 预览面板（续115）：当前选中项的详情 + 快捷操作 ── */}
+        {enhPreview && (
+          <aside className="enh-preview">
+            <div className="enh-pv-head">
+              <div className={`enh-pv-icon${enhPreview.photo?" enh-pv-icon-img":""}`}>
+                {enhPreview.big
+                  ? <img src={enhPreview.big} alt="" draggable={false}/>
+                  : <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
+              </div>
+              <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
+              <div className="enh-pv-badge">{enhPreview.badge}</div>
+            </div>
+            {/* 文本类条目：给一段真正的内容预览，比任何元信息都有用 */}
+            {enhPreview.text && <div className="enh-pv-text">{enhPreview.text.slice(0, 600)}</div>}
+            {enhPreview.rows.length > 0 && (
+              <dl className="enh-pv-rows">
+                {enhPreview.rows.map((row,i)=>(
+                  <Fragment key={i}>
+                    <dt>{row.label}</dt>
+                    <dd className={`${row.rtl?"enh-pv-rtl":""}${row.pending?" enh-pv-pending":""}`.trim()||undefined} title={row.value}>{row.value}</dd>
+                  </Fragment>
+                ))}
+              </dl>
+            )}
+            <div className="enh-pv-actions">
+              <button className="enh-pv-btn enh-pv-btn-primary" onClick={()=>activateEnh(enhPreview.r)}>
+                {enhPreview.r.kind==="clip" ? t("取走粘贴") : t("打开")}
+              </button>
+              {enhPreview.path && <button className="enh-pv-btn" onClick={()=>revealPath(enhPreview.path)}>{t("打开所在目录")}</button>}
+              {enhPreview.path && enhPreview.r.kind!=="clip" && (
+                <button className="enh-pv-btn" onClick={async()=>{
+                  const r=enhPreview.r;
+                  const res = r.kind==="app" ? addAppToLauncher(r.app)
+                    : await addFsToLauncher(r.kind==="fs" ? r : { path:enhPreview.path, name:r.kind==="stage"?r.name:enhPreview.title, ext:r.kind==="stage"?r.item.ext:undefined, isDir:r.kind==="stage"?!!r.item.isDir:false });
+                  toastAddResult(res,"launcher",enhPreview.title);
+                }}>{t("加入启动台")}</button>
+              )}
+              {enhPreview.r.kind==="fs" && (
+                <button className="enh-pv-btn" onClick={async()=>toastAddResult(await addFsToStage(enhPreview.r as Extract<EnhResult,{kind:"fs"}>),"stage",enhPreview.title)}>{t("加入中转区")}</button>
+              )}
+            </div>
+          </aside>
+        )}
         </div>
       </div>
       {/* ── 启动器「添加应用」picker（复用 settings-modal 样式 + enh-result 列表项）── */}
