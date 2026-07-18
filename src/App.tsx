@@ -113,6 +113,12 @@ const SHORTCUTS = [
 // 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
 // 时长可调；放大幅度在 CSS @keyframes launch-pop 里（克制档 scale 1.4）。
 const LAUNCH_ANIM_MS = 200;
+// 全局轻提示（toast）驻留时长，须与 App.css 的 @keyframes toast-flash 总时长一致（进 12% / 停 / 出 18%）。
+// 「一闪而过」定位：只报「做成了什么」，不承载可交互内容、不要求用户确认、绝不拦截点击。
+const TOAST_MS = 1600;
+// 「加入启动台/中转区」的结果：重复与超上限此前都是静默失败（early-return / slice 丢弃），
+// 调用方分辨不出，直接报「已添加」会说谎。三态回报让提示与实际结果一致。
+type AddResult = "added" | "duplicate" | "full";
 // 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 interface LaunchAnim { icon: string | null; name: string; fileGlyph?: FileGlyphArgs; rect: { top: number; left: number; width: number; height: number }; }
@@ -306,6 +312,14 @@ export default function App() {
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
   const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
   const [launcherPicking, setLauncherPicking] = useState(false); // 启动台「浏览…」选择框是否已弹出（同上，防重入叠弹）
+  // ── 全局轻提示（续113）──
+  // 定位：补「无锚点操作」的反馈空白——右键菜单项、模态里点完就关的按钮，动作一完成界面上什么都没变，
+  // 用户不知道成没成。**不替换已有的 7 处按钮原地 ✓ 反馈**（copiedTime/enhAdded/imgCacheCleared…）：
+  // 那些反馈与按钮同位、指向明确，比飘到屏幕另一头的 toast 更好，换成 toast 是倒退。
+  // id 用自增计数器：同一句提示连点两次也能重放动画（靠 key 重挂 DOM 节点重启 CSS animation）。
+  const [toast, setToast] = useState<{id:number;msg:string}|null>(null);
+  const toastTimerRef = useRef<number|null>(null);
+  const toastIdRef = useRef(0);
   const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
   const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 呼出默认搜索模式：page=顶栏界面搜索（默认），enhanced=直接进增强搜索层
@@ -390,7 +404,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留）
+        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -991,14 +1005,33 @@ export default function App() {
     window.addEventListener("pointercancel", onUp);
   }, [search, saveLauncher]);
 
+  // 发一条轻提示；重复调用直接顶掉上一条（不排队——排队会让连续操作的提示滞后于操作本身）。
+  const showToast = useCallback((msg:string) => {
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    setToast({ id: ++toastIdRef.current, msg });
+    toastTimerRef.current = window.setTimeout(() => { setToast(null); toastTimerRef.current = null; }, TOAST_MS);
+  }, []);
+
+  // 把 AddResult 翻成一句提示。集中在此，避免每个调用点各写一遍三分支（也保证措辞一致）。
+  const toastAddResult = useCallback((res:AddResult, target:"launcher"|"stage", name:string) => {
+    const where = target==="launcher" ? t("启动台") : t("中转站"); // 用面板正名（i18n 既有 key）
+    if (res==="duplicate") showToast(t("已在{where}中：{name}", {where, name}));
+    else if (res==="full")  showToast(t("{where}已满（{n}）", {where, n:target==="launcher"?LAUNCHER_MAX:stageMax}));
+    else                    showToast(t("已添加到{where}：{name}", {where, name}));
+  }, [showToast, t, stageMax]);
+
   // 从 app picker 加入应用（按 path 去重）
-  const addAppToLauncher = useCallback((app:AppInfo) => {
-    if (launcher.some(x=>x.kind==="app" && x.path===app.path)) return;
+  const addAppToLauncher = useCallback((app:AppInfo):AddResult => {
+    if (launcher.some(x=>x.kind==="app" && x.path===app.path)) return "duplicate";
+    if (launcher.length >= LAUNCHER_MAX) return "full";
     saveLauncher([...launcher, { id:launcherId(), kind:"app" as const, name:app.name, icon:app.icon, path:app.path }].slice(0,LAUNCHER_MAX));
+    return "added";
   }, [launcher, saveLauncher]);
-  // 增强搜索 fs 结果加入中转区（按 path 去重，置顶）
-  const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}) => {
-    if (stage.some(s => s.items?.[0]?.path === r.path)) return;
+  // 增强搜索 fs 结果加入中转区（按 path 去重，置顶）。
+  // 返回 AddResult 供调用方发**诚实**的提示——重复是静默 early-return、超上限是静默 slice 丢弃，
+  // 调用方无从分辨，不回报状态就会出现「明明没加进去却提示已添加」的假成功。
+  const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}):Promise<AddResult> => {
+    if (stage.some(s => s.items?.[0]?.path === r.path)) return "duplicate";
     const isImage = IMG_EXTS.includes((r.ext||"").toLowerCase());
     let icon: string | null = null;
     try {
@@ -1008,11 +1041,13 @@ export default function App() {
     } catch {}
     const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
     saveStage([item, ...stage].slice(0, stageMax));
+    return "added"; // 中转区是「置顶 + 截尾」，新项恒在，不会像启动台那样被上限挡在门外
   }, [stage, saveStage, stageMax]);
   // 增强搜索 fs 结果加入启动台（按 path 去重）；图标用系统默认图标（与桌面/资源管理器一致）：
   // 优先复用结果自带 icon（搜索索引已附），缺失则回退 get_file_info 取一次。
-  const addFsToLauncher = useCallback(async (r:{path:string;name:string;ext?:string;isDir:boolean;icon?:string|null}) => {
-    if (launcher.some(x => x.path === r.path)) return;
+  const addFsToLauncher = useCallback(async (r:{path:string;name:string;ext?:string;isDir:boolean;icon?:string|null}):Promise<AddResult> => {
+    if (launcher.some(x => x.path === r.path)) return "duplicate";
+    if (launcher.length >= LAUNCHER_MAX) return "full"; // 追加式 + slice 截尾 → 满了新项会被静默丢弃
     let icon: string | null = r.icon ?? null;
     if (!icon) {
       try {
@@ -1022,6 +1057,7 @@ export default function App() {
       } catch {}
     }
     saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
+    return "added";
   }, [launcher, saveLauncher]);
   // 启动台「浏览文件…/浏览文件夹…」：经系统选择框收藏任意路径（续112）。
   // 补的是覆盖盲区——此前非拖入的唯一入口是增强搜索命中，索引外的路径（网络盘 / 被 skip 名单剪掉的
@@ -1034,17 +1070,18 @@ export default function App() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const p = await invoke<string|null>(kind==="folder" ? "pick_folder" : "pick_file");
-      if (!p) return;                               // 用户取消 → Rust 返回 null，静默收场
-      if (launcher.some(x => x.path === p)) return; // 已收藏；addFsToLauncher 也去重，此处早退省一次 IPC
+      if (!p) return; // 用户取消 → Rust 返回 null，静默收场（取消不是失败，不必提示）
       // 名称/扩展名/是否目录/图标一律由 Rust 取，避免前端切路径字符串（UNC、尾斜杠、无扩展名等边角）
       const info = await invoke<FileEntry>("get_file_info", { path: p });
-      await addFsToLauncher({ path:p, name:info.name, ext:info.ext, isDir:info.isDir, icon:info.icon ?? null });
+      // 去重/上限规则只留在 addFsToLauncher 一处，此处不再预判，避免两套规则漂移
+      toastAddResult(await addFsToLauncher({ path:p, name:info.name, ext:info.ext, isDir:info.isDir, icon:info.icon ?? null }), "launcher", info.name);
     } catch (e) {
       console.error("[pick_launcher_path]", e);
+      showToast(t("添加失败"));
     } finally {
       setLauncherPicking(false);
     }
-  }, [launcherPicking, launcher, addFsToLauncher]);
+  }, [launcherPicking, addFsToLauncher, toastAddResult, showToast, t]);
   // 从启动器移除（右键）
   const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
 
@@ -1724,25 +1761,28 @@ export default function App() {
   const revealPath = useCallback(async (path: string) => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
   const openEnhCtxMenu = useCallback((e: React.MouseEvent, r: EnhResult) => {
     const items: CtxMenuItem[] = [{ label: r.kind === "clip" ? t("取走粘贴") : t("打开"), action: () => activateEnh(r) }];
+    // 右键菜单项此前**全部静默**：菜单一收，界面无任何变化（不像那些按钮有原地 ✓ 可看）。
+    // 故凡「不离开本界面」的动作都补 toast；「打开/打开所在目录」不补——它们会隐藏 overlay
+    // 切到外部窗口，提示既看不到也没意义。
     if (r.kind === "fs") {
-      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }) });
+      items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }); showToast(t("已复制到剪贴板")); } });
       items.push({ label: t("打开所在目录"), action: () => revealPath(r.path) });
-      items.push({ label: t("加入启动台"), action: () => addFsToLauncher(r) });
-      items.push({ label: t("加入中转区"), action: () => addFsToStage(r) });
+      items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher(r), "launcher", r.name) });
+      items.push({ label: t("加入中转区"), action: async () => toastAddResult(await addFsToStage(r), "stage", r.name) });
     } else if (r.kind === "app") {
-      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }) });
+      items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }); showToast(t("已复制到剪贴板")); } });
       items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
-      items.push({ label: t("加入启动台"), action: () => addAppToLauncher(r.app) });
+      items.push({ label: t("加入启动台"), action: () => toastAddResult(addAppToLauncher(r.app), "launcher", r.app.name) });
     } else if (r.kind === "stage") { // stage（恒 file 类型）
       const path = r.item.items?.[0]?.path;
-      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(r.item) });
+      items.push({ label: t("复制到剪贴板"), action: async () => { await copyStageToClipboard(r.item); showToast(t("已复制到剪贴板")); } });
       if (path) {
         items.push({ label: t("打开所在目录"), action: () => revealPath(path) });
-        items.push({ label: t("加入启动台"), action: () => addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }) });
+        items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }), "launcher", r.name) });
       }
     } // clip：仅默认「取走粘贴」，无附加项（已在剪贴板中，复制冗余）
     openCtxMenu(e, items);
-  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, t]);
+  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, toastAddResult, showToast, t]);
 
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
@@ -2074,8 +2114,8 @@ export default function App() {
                   <span className="enh-result-badge">{badge}</span>
                   {(r.kind==="fs" || r.kind==="app") && (
                     <div className="enh-result-actions">
-                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();addFsToStage(r);setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
-                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();r.kind==="app"?addAppToLauncher(r.app):addFsToLauncher(r);setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
+                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=await addFsToStage(r);if(res==="added"){setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"stage",r.name);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
+                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=r.kind==="app"?addAppToLauncher(r.app):await addFsToLauncher(r);const nm=r.kind==="app"?r.app.name:r.name;if(res==="added"){setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"launcher",nm);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
                     </div>
                   )}
                 </div>
@@ -2358,6 +2398,10 @@ export default function App() {
         <div className="bot-right"><span>Workbench v{__APP_VERSION__}</span></div>
       </footer>
     </div>
+    {/* 全局轻提示：同样是 #overlay 的兄弟节点——#overlay 的 backdrop-filter 会成为 fixed 的包含块，
+        放进去会相对它定位而非视口。key={toast.id} 让同一句提示连发也能重挂节点、重启 CSS 动画。
+        pointer-events:none（见 CSS）：提示绝不能挡住下面的卡片点击。 */}
+    {toast && <div key={toast.id} className="toast" style={{animationDuration:`${TOAST_MS}ms`}} role="status" aria-live="polite">{toast.msg}</div>}
     {/* 启动放大暂留：顶层克隆，#overlay 的兄弟节点（避开 backdrop-filter 的定位上下文与宫格 overflow 裁剪），按点击瞬间坐标定位、自播 scale+淡出 */}
     {launchAnim && (
       <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
