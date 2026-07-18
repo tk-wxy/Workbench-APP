@@ -41,6 +41,16 @@ export const EN_DICT: Record<string, string> = {
   // ── 启动器 ──
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
+  "换区": "Switch section",
+  // 增强搜索结果分段标题（续114b）。「应用程序」不能复用既有的「应用」——那个 key 是设置里
+  // 「应用」按钮的**动词**（译作 Apply），拿来当段标题会显示成 "Apply"。
+  "应用程序": "Apps",
+  "压缩包": "Archives",
+  "文档": "Documents",
+  "代码": "Code",
+  "媒体": "Media",
+  "可执行文件": "Executables",
+  "其他文件": "Other files",
   // 全局轻提示（续113）：{where} 由 t("启动台")/t("中转站") 代入，故两种语言下都自然
   "已添加到{where}：{name}": "Added to {where}: {name}",
   "已在{where}中：{name}": "Already in {where}: {name}",

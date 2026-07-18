@@ -45,6 +45,26 @@ export function fileCategory(ext: string): FileCat {
   return "generic";
 }
 
+// 増強検索の結果分组键（続114b）。`fileCategory` の 16 分類は**アイコン用に細かすぎる**ため、
+// セクション見出しに使える粗い単位へ畳む。分类の単一真相源は依然 fileCategory —— ここは
+// その写像だけを持つ（拡張子リストを二重管理しない）。
+// 粒度の方針：画像/圧縮包のように「形式が違っても用途が同じ」ものは 1 グループ、
+// mui のような冷門形式に専用グループは作らず "other" へ落とす。
+export type FileGroup = "folder" | "image" | "archive" | "doc" | "code" | "media" | "exe" | "other";
+
+export function fileGroup(ext: string, isDir: boolean): FileGroup {
+  if (isDir) return "folder";
+  switch (fileCategory(ext)) {
+    case "image": return "image";
+    case "archive": return "archive";
+    case "pdf": case "doc": case "sheet": case "ppt": case "text": case "ebook": return "doc";
+    case "code": return "code";
+    case "video": case "audio": return "media";
+    case "exe": return "exe";
+    default: return "other"; // generic / disk / font / box
+  }
+}
+
 // 絶対パスから親ディレクトリを抽出（検索結果のディレクトリ表示用）
 export const dirOf = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
