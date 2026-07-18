@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, dirOf, type FileCat } from "./lib/format";
+import { IMG_EXTS, fmtSize, ago, dirOf, type FileCat, type FileGroup } from "./lib/format";
+import { groupFiles } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
          IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
@@ -21,6 +22,9 @@ type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: Fi
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
 const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
 // 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
+// 分组不足此条数则并入「其他文件」（续114b）。没有这道闸，一个只返回 3 个文件的查询会得到
+// 3 个标题配 3 条内容——标题比内容还多，比不分组更难看。这条阈值对实际观感的影响大于分类表本身。
+const ENH_MIN_SECTION = 3;
 const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
@@ -703,11 +707,59 @@ export default function App() {
   }, [launcherSelIdx]);
   useEffect(() => { setLauncherSelIdx(-1); }, [visible, search]);
 
-  // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件，量由引擎决定）在后；索引连续供 ↑↓/Enter 跨组导航 ──
-  const enhResults = useMemo<EnhResult[]>(() => {
-    const tier2: EnhResult[] = fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon }));
-    return [...enhTier1, ...tier2];
-  }, [enhTier1, fsResults]);
+  // ── 增强搜索结果分段（续114b）──
+  // 结构：先建 sections，再由它**派生**扁平数组与段边界；渲染/导航都读派生值，段的增删不用改它们。
+  //
+  // 段序 = 「段内最靠前条目的排名」（数组下标最小者优先）——含最佳匹配的段排最前，
+  // 故 `enhResults[0]` 与分段前完全一致，**Enter 的行为不变**。用排名而非分数是因为：
+  // Tier1 打分后在 enhTier1 末尾就把 score 剥掉了，Tier2 来自 Rust 压根没有分数字段，
+  // 两个数组本身已是排好序的，用下标等价且无需把分数透出来。
+  //
+  // Tier1 整块恒在 Tier2 之上，**不跨层按名次混排**：Tier1 用 JS fuzzyScore、Tier2 用 Rust
+  // token_score，两套标尺的数值不可比，混排出来的名次没有意义。
+  const enhSections = useMemo<{ key: string; label: string; items: EnhResult[] }[]>(() => {
+    const out: { key: string; label: string; items: EnhResult[] }[] = [];
+
+    // Tier1：应用 / 中转 / 剪贴板 各自成段（此前三者混在一起，只靠徽标区分）
+    const T1_LABEL: Record<string, string> = { app: t("应用程序"), stage: t("中转站"), clip: t("剪贴板") };
+    const t1Items = new Map<string, EnhResult[]>(); // Map 保持插入序 = 首次出现的名次序
+    for (const r of enhTier1) {
+      if (!t1Items.has(r.kind)) t1Items.set(r.kind, []);
+      t1Items.get(r.kind)!.push(r);
+    }
+    for (const [k, items] of t1Items) out.push({ key: `t1-${k}`, label: T1_LABEL[k] ?? k, items });
+
+    // Tier2：文件按大类分段
+    const G_LABEL: Record<FileGroup, string> = {
+      folder: t("文件夹"), image: t("图片"), archive: t("压缩包"), doc: t("文档"),
+      code: t("代码"), media: t("媒体"), exe: t("可执行文件"), other: t("其他文件"),
+    };
+    // 分组 + runt 合并 + 名次排序在 lib/enhSections.ts（纯函数，有回归测试；
+    // 「不可依赖 Map 插入序」这个坑的说明也在那里）
+    for (const { group, items } of groupFiles(fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING), ENH_MIN_SECTION)) {
+      out.push({
+        key: `fs-${group}`, label: G_LABEL[group],
+        items: items.map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon })),
+      });
+    }
+
+    return out;
+  }, [enhTier1, fsResults, t]);
+
+  // 扁平结果：↑↓/Enter/激活全部照旧读它，分段对这些路径完全透明
+  const enhResults = useMemo<EnhResult[]>(() => enhSections.flatMap(s => s.items), [enhSections]);
+  // 每段首项的下标：Ctrl+↑↓ 跨段跳转的边界表（取代续114 硬编码的 enhTier1.length）
+  const enhSectionStarts = useMemo<number[]>(() => {
+    const starts: number[] = []; let acc = 0;
+    for (const s of enhSections) { starts.push(acc); acc += s.items.length; }
+    return starts;
+  }, [enhSections]);
+  // 下标 → 段标题，供渲染在该行之前插入表头
+  const enhHeadAt = useMemo<Map<number, string>>(() => {
+    const m = new Map<number, string>();
+    enhSections.forEach((s, i) => m.set(enhSectionStarts[i], `${s.label} (${s.items.length})`));
+    return m;
+  }, [enhSections, enhSectionStarts]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
@@ -1812,6 +1864,25 @@ export default function App() {
       if(e.key==="Tab"){e.preventDefault();return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
       if(enhOpen){ // 增强搜索接管导航，屏蔽下面 launcher 键（字母键不拦截，正常输入到 enhInput）
+        // Ctrl+↑↓：跨段跳转（续114 起，续114b 改为读通用段边界表 enhSectionStarts）。
+        // **必须排在下面裸 ↑↓ 分支之前**，否则被逐条移动先吃掉。
+        // 不用 Tab：它在上面被无条件 preventDefault 吞掉（防焦点逃逸到模态背后的按钮），
+        // 且那行在本分支之前——为一个跳转去动全局键盘路由的顺序不划算。
+        // 不用裸 ←→：增强搜索有输入框，←→ 是编辑查询词的常用键，抢了会难受。
+        if(e.ctrlKey && (e.key==="ArrowDown"||e.key==="ArrowUp")){
+          e.preventDefault();
+          const st = enhSectionStarts;
+          if(e.key==="ArrowDown"){
+            const nxt = st.find(s => s > enhSelIdx);      // 下一段段首；已在末段则不动
+            if(nxt !== undefined) setEnhSelIdx(nxt);
+          }else{
+            // 先回本段段首，已在段首才跳上一段（编辑器里「上一段」的通行语义，一个键给出两种粒度）
+            const curStart = [...st].reverse().find(s => s <= enhSelIdx) ?? 0;
+            if(enhSelIdx > curStart) setEnhSelIdx(curStart);
+            else { const prv = [...st].reverse().find(s => s < curStart); if(prv !== undefined) setEnhSelIdx(prv); }
+          }
+          return;
+        }
         if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
         else if(e.key==="ArrowUp"){e.preventDefault();setEnhSelIdx(i=>Math.max(i-1,0));}
         else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
@@ -1839,7 +1910,7 @@ export default function App() {
     };
     window.addEventListener("keydown",onKey);
     return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey, filteredLauncher, launcherSelIdx, openLauncherItem]);
+  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSectionStarts, enhSelIdx, activateEnh, enhHotkey, filteredLauncher, launcherSelIdx, openLauncherItem]);
 
   return (
    <>
@@ -2081,7 +2152,8 @@ export default function App() {
           <IconSearch size={18}/>
           <input ref={enhInputRef} className="enh-search-input" placeholder={t("搜索应用、中转、剪贴板…")}
             value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
-          <span className="enh-hint">{searchDefaultMode==="enhanced"&&<><kbd>{comboLabel(enhHotkey)}</kbd> {t("界面搜索")} · </>}<kbd>Esc</kbd> {t("关闭")}</span>
+          {/* Ctrl+↑↓ 提示只在**两段都非空**时出现：单段结果下跳转无处可去，提示它反而是噪音 */}
+          <span className="enh-hint">{enhSections.length>1 && <><kbd>Ctrl+↑↓</kbd> {t("换区")} · </>}{searchDefaultMode==="enhanced"&&<><kbd>{comboLabel(enhHotkey)}</kbd> {t("界面搜索")} · </>}<kbd>Esc</kbd> {t("关闭")}</span>
         </div>
         {/* 索引未就绪提示：不阻塞 Tier 1（应用/中转）结果显示 */}
         {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null)}
@@ -2097,8 +2169,9 @@ export default function App() {
             const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
             const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
             const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
-            // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
-            const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">{t("文件 / 文件夹")}</div> : null;
+            // 段表头：本行是某段首项时插在其前（续114b 起由 enhHeadAt 驱动，段的增删无需改此处）
+            const head = enhHeadAt.get(i);
+            const divider = head ? <div key={`enh-head-${i}`} className="enh-divider">{head}</div> : null;
             return (
               <Fragment key={key}>
                 {divider}
