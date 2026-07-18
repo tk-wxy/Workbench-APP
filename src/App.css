@@ -72,6 +72,39 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 @keyframes launch-pop{from{transform:scale(1);opacity:1;}to{transform:scale(1.4);opacity:0;}}
 .drag-layer{position:fixed;inset:0;z-index:100003;pointer-events:none;overflow:visible;}
 
+/* ── 全局轻提示 toast（续113）──
+   给「无锚点操作」用：右键菜单项、模态里点完就关的按钮——动作完成后界面无变化，用户不知成没成。
+   三条硬约束（改样式时别破坏）：
+   ① pointer-events:none —— 提示浮在中转区上方，绝不能吃掉下面卡片的点击；
+   ② background 用 --ghost-bg 实色而**非 backdrop-filter** —— 它带位移动画，模糊会逐帧重算
+      （续102/续109 同一根因），且背后本就是 0.97 不透明的 --bg，模糊收益≈0；
+   ③ 定位在 #overlay **之外**（JSX 里是其兄弟节点）—— #overlay 的 backdrop-filter 会成为 fixed
+      的包含块，放进去就相对它定位而不是视口了。
+   底部居中，让开 40px 底栏。**动画时长由 App.tsx 内联 style 的 animationDuration 覆盖**
+   （唯一真相=TOAST_MS），下面的 1600ms 只是脱离 React 时的兜底，别在这儿调时长。 */
+.toast{position:fixed;left:50%;bottom:64px;z-index:100004;pointer-events:none;
+  max-width:min(560px,70vw);padding:9px 18px;border-radius:999px;
+  background:var(--ghost-bg);border:1px solid var(--border);
+  box-shadow:0 6px 24px rgba(0,0,0,.28);
+  font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;
+  animation:toast-flash 1600ms ease-out forwards;}
+@keyframes toast-flash{
+  0%{opacity:0;transform:translate(-50%,10px);}
+  10%{opacity:1;transform:translate(-50%,0);}
+  82%{opacity:1;transform:translate(-50%,0);}
+  100%{opacity:0;transform:translate(-50%,-6px);}
+}
+/* 降低动效偏好：保留淡入淡出（提示的出现/消失本身是信息），只去掉位移 */
+@media (prefers-reduced-motion: reduce){
+  @keyframes toast-flash{
+    0%{opacity:0;transform:translate(-50%,0);}
+    10%{opacity:1;transform:translate(-50%,0);}
+    82%{opacity:1;transform:translate(-50%,0);}
+    100%{opacity:0;transform:translate(-50%,0);}
+  }
+}
+
 /* ── 顶栏 ── */
 .top-bar{display:flex;align-items:center;height:64px;padding:0 24px;gap:20px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .top-left{display:flex;align-items:center;gap:10px;min-width:320px;}

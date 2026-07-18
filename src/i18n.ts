@@ -41,6 +41,12 @@ export const EN_DICT: Record<string, string> = {
   // ── 启动器 ──
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
+  // 全局轻提示（续113）：{where} 由 t("启动台")/t("中转站") 代入，故两种语言下都自然
+  "已添加到{where}：{name}": "Added to {where}: {name}",
+  "已在{where}中：{name}": "Already in {where}: {name}",
+  "{where}已满（{n}）": "{where} is full ({n})",
+  "已复制到剪贴板": "Copied to clipboard",
+  "添加失败": "Failed to add",
   "或收藏任意文件 / 文件夹：": "Or add any file / folder:",
   "浏览文件…": "Browse Files…",
   "浏览文件夹…": "Browse Folders…",
