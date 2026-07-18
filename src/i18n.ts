@@ -42,6 +42,17 @@ export const EN_DICT: Record<string, string> = {
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
   "换区": "Switch section",
+  // 增强搜索预览面板（续115）
+  "位置": "Location",
+  "类型": "Type",
+  "大小": "Size",
+  "修改时间": "Modified",
+  "创建时间": "Created",
+  "复制时间": "Copied",
+  "字数": "Characters",
+  "数量": "Count",
+  "状态": "Status",
+  "已固定": "Pinned",
   // 增强搜索结果分段标题（续114b）。「应用程序」不能复用既有的「应用」——那个 key 是设置里
   // 「应用」按钮的**动词**（译作 Apply），拿来当段标题会显示成 "Apply"。
   "应用程序": "Apps",
