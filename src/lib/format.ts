@@ -17,8 +17,19 @@ export function ago(ms: number, t: TFunc) {
   const s = Math.floor((Date.now() - ms) / 1000);
   if (s < 60) return t("刚刚");
   if (s < 3600) return t("{n}分钟前", { n: Math.floor(s / 60) });
-  return t("{n}小时前", { n: Math.floor(s / 3600) });
+  if (s < 86400) return t("{n}小时前", { n: Math.floor(s / 3600) });
+  // 続116：日/月/年まで延長。以前は時間止まりで、3 日前のクリップが「72小时前」になっていた。
+  // ファイル更新時刻（数か月〜数年前が普通）をこの関数で出すには必須。
+  if (s < 2592000) return t("{n}天前", { n: Math.floor(s / 86400) });
+  // 月は 30 日固定・年は 365 日で切るため、両者の食い違いで 330〜365 日が「12个月前」になる
+  // （その直後に「1年前」へ飛ぶ）。11 で頭打ちにして、年境界は本物の 365 日のまま保つ。
+  if (s < 31536000) return t("{n}个月前", { n: Math.min(11, Math.floor(s / 2592000)) });
+  return t("{n}年前", { n: Math.floor(s / 31536000) });
 }
+
+// Unix 秒版の ago()。ファイル系のタイムスタンプは秒、ClipItem.time はミリ秒 —— 単位の取り違えを
+// 呼び出し側で毎回気にしないための薄いラッパ。
+export const agoSec = (unixSec: number, t: TFunc) => ago(unixSec * 1000, t);
 
 // 文件类型分类键（拡張名 → カテゴリ）。単一真相源；実際のアイコン描画は icons.tsx の FileGlyph が担う。
 // 以前は絵文字を直接返していたが、Solar Bold Duotone アイコンに統一するためカテゴリ键のみを返すよう変更。
@@ -29,7 +40,10 @@ export type FileCat =
 export function fileCategory(ext: string): FileCat {
   const e = ext.toLowerCase().replace(/^\./, "");
   if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "heic", "heif", "avif", "psd"].includes(e)) return "image";
-  if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "ts", "3gp"].includes(e)) return "video";
+  // ⚠ "ts" をここに入れてはいけない（続116 で除去）：video 判定が code より先に走るため、
+  // TypeScript ファイルが全部「動画」に分類されていた（アイコン・徽標色・検索セクションすべて）。
+  // MPEG トランスポートストリームの .ts は開発機ではまず存在せず、衝突時は code を採るのが正しい。
+  if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp"].includes(e)) return "video";
   if (["mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "opus", "aiff", "mid"].includes(e)) return "audio";
   if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "tgz"].includes(e)) return "archive";
   if (e === "pdf") return "pdf";
@@ -52,17 +66,25 @@ export function fileCategory(ext: string): FileCat {
 // mui のような冷門形式に専用グループは作らず "other" へ落とす。
 export type FileGroup = "folder" | "image" | "archive" | "doc" | "code" | "media" | "exe" | "other";
 
-export function fileGroup(ext: string, isDir: boolean): FileGroup {
-  if (isDir) return "folder";
-  switch (fileCategory(ext)) {
+// FileCat → FileGroup の写像本体（続116 で fileGroup から抽出）。プレビュー面板の徽標色は
+// 拡張子ではなく **FileCat から直接**引きたい（テキスト/画像クリップのように実体の拡張子が
+// 無い項目があるため）。ここを共用することで「徽標の色 == その項目が属するセクション」が
+// 自動的に一致する —— 色が単なる装飾ではなく分類の再確認になる。
+export function catToGroup(cat: FileCat): FileGroup {
+  switch (cat) {
     case "image": return "image";
     case "archive": return "archive";
     case "pdf": case "doc": case "sheet": case "ppt": case "text": case "ebook": return "doc";
     case "code": return "code";
     case "video": case "audio": return "media";
     case "exe": return "exe";
+    case "folder": return "folder";
     default: return "other"; // generic / disk / font / box
   }
+}
+
+export function fileGroup(ext: string, isDir: boolean): FileGroup {
+  return isDir ? "folder" : catToGroup(fileCategory(ext));
 }
 
 // Unix 秒 → 「YYYY-MM-DD HH:mm」。プレビュー面板の作成/更新時刻用（ago() の相対表記と違い、
