@@ -47,6 +47,10 @@ export const EN_DICT: Record<string, string> = {
   "大小": "Size",
   // stat strip のラベルは 9px の小文字幅 —— 「修改时间」だと折り返すので短縮形を使う
   "修改": "Modified",
+  // 続119：フォルダ項目数 / 画像のピクセル寸法 / .lnk の解決先
+  "项目数": "Items",
+  "尺寸": "Dimensions",
+  "目标": "Target",
   "复制时间": "Copied",
   "字数": "Characters",
   "数量": "Count",

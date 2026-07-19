@@ -12,7 +12,9 @@ import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
 interface AppInfo { name: string; path: string; icon: string | null; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 // modified/created 为 Unix 秒，可能缺失（网络盘等不保证提供创建时间）——预览面板对缺失直接不渲染该行
-interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; modified?: number | null; created?: number | null; }
+// 続119 で entries/entriesCapped/width/height/target を追加（Rust apps.rs FileInfo と対応）。
+// ⚠️ Rust 側は #[serde(rename_all="camelCase")]、こちらもキャメルで読むこと（続112 の錯配の再発防止）。
+interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; modified?: number | null; created?: number | null; entries?: number | null; entriesCapped?: boolean; width?: number | null; height?: number | null; target?: string | null; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
@@ -879,22 +881,63 @@ export default function App() {
     const stats: { label: string; value: string; title?: string; pending?: boolean }[] = [];
     let loc: string | null = null;
     const push = (label: string, value?: string | null, rtl?: boolean, title?: string) => { if (value) rows.push({ label, value, rtl, title }); };
-    const fileFacts = (path: string, isDir?: boolean) => {
+    const fileFacts = (path: string, isDir?: boolean, extHint?: string) => {
       loc = dirOf(path);
-      // ↓ stats の**枠数は同期既知の isDir だけで確定**させる（値の有無で出し分けない）。値は
+      // ↓ stats の**枠数は同期既知の情報だけで確定**させる（値の有無で出し分けない）。値は
       // get_file_info 待ち。「値があれば描く」方式だとメタデータ到着の瞬間に面板が伸びて目に見えて
       // 揺れる（続115 で実測・報告済みの症状）。読込中→「…」／取得できたが欠損→「—」、どちらも高さ同一。
       // pending が見るのは「メタが返ったか」(meta) であって「値が非空か」(info) ではない：取得失敗時は
       // info=null だが meta は到着済みなので「—」を出すべき（失敗と読込中が区別できなくなる）。
+      // ⚠️ 続119 で分岐が 3 つに増えたが、**分岐条件は isDir と拡張子＝どちらも同期既知**なので
+      //    この不変量は保たれている（meta の中身では分岐しないこと）。
       const pending = !meta;
-      if (!isDir) stats.push({ label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending });
-      // 相対表記を主にする：ここは「いつ正確に」ではなく「最近いじったやつか」を走査する場面。
-      // 絶対値は title で hover 参照（続116。以前は絶対時刻 2 行が数字の壁になっていた）。
-      stats.push({
+      const ext = (extHint || "").toLowerCase().replace(/^\./, "");
+      const isImg = !isDir && IMG_EXTS.includes(ext);
+      const modStat = {
+        // 相対表記を主にする：ここは「いつ正確に」ではなく「最近いじったやつか」を走査する場面。
+        // 絶対値は title で hover 参照（続116。以前は絶対時刻 2 行が数字の壁になっていた）。
         label: t("修改"),
         value: pending ? "…" : (info?.modified ? agoSec(info.modified, t) : "—"),
         title: info?.modified ? fmtDateTime(info.modified) : undefined,
         pending,
+      };
+      const sizeStat = { label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending };
+      if (isDir) {
+        // 続119：フォルダを選んでも面板の情報が全部「入れ物の外側」の話だった。項目数を主役級へ。
+        // entriesCapped のときは「10000+」—— 打ち切った値を確定値として出すと嘘になる。
+        stats.push({
+          label: t("项目数"),
+          value: pending ? "…"
+            : (info?.entries != null ? `${info.entries}${info.entriesCapped ? "+" : ""}` : "—"),
+          pending,
+        });
+        stats.push(modStat);
+      } else if (isImg) {
+        // 画像は「340 KB」より「1920 × 1080」。枠は 2 つ固定なので 修改 は下の行送りにする。
+        stats.push({
+          label: t("尺寸"),
+          value: pending ? "…" : (info?.width && info?.height ? `${info.width} × ${info.height}` : "—"),
+          pending,
+        });
+        stats.push(sizeStat);
+        rows.push({ label: modStat.label, value: modStat.value, title: modStat.title, pending });
+      } else {
+        stats.push(sizeStat);
+        stats.push(modStat);
+      }
+      lnkRow(path);
+    };
+    // .lnk の解決先（続119）。**行の有無は path の拡張子＝同期既知**で決めること——
+    // 「target が返ってきたら行を足す」にすると meta 到着で面板が伸びて揺れる（上の不変量）。
+    // 解決できない（MSI アドバタイズ型など）ときは「—」。
+    const lnkRow = (path: string) => {
+      if (!path.toLowerCase().endsWith(".lnk")) return;
+      rows.push({
+        label: t("目标"),
+        value: !meta ? "…" : (info?.target || "—"),
+        rtl: true, // 長いパスは頭を省略して尻（実行ファイル名側）を残す
+        pending: !meta,
+        title: info?.target || undefined,
       });
     };
 
@@ -910,25 +953,26 @@ export default function App() {
       // アプリは位置だけ：サイズは実行ファイルの大きさで意味が薄く、更新時刻は実質インストール日。
       // どちらも「これで合ってる？」の判断に効かないので出さない（続116）。
       loc = dirOf(r.app.path);
+      lnkRow(r.app.path); // 続119：スタートメニューの .lnk は「位置」がメニューのフォルダで実体が分からない
     } else if (r.kind === "fs") {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
       cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
       glyph = r.isDir ? { isDir: true } : { ext: r.ext };
       big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = !!meta?.thumb;
-      fileFacts(r.path, r.isDir);
+      fileFacts(r.path, r.isDir, r.ext);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
       // 徽標に「出所 · 種別」を併記（続116）：種別は独立行として持つほどの情報量が無い一方、
       // 中転/剪貼板では出所だけでは何の項目か分からない。1 個の徽標に畳んで行を 1 本減らす。
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
       else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; }
-      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileFacts(p, it.isDir); }
+      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileFacts(p, it.isDir, it.ext); }
       if (it.pinned) push(t("状态"), t("已固定"));
     } else { // clip
       const it = r.item, p = it.items?.[0]?.path;
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
       else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = !!big; }
-      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileFacts(p); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
+      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
       // 剪貼板項目で唯一効くメタ情報。相対表記＋絶対値は hover（ClipItem.time はミリ秒 → ago 直用）
       push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
     }
