@@ -1,9 +1,9 @@
-// 表示系の純関数（サイズ整形 / 相対時刻 / 拡張子→絵文字アイコン / 親ディレクトリ抽出）。
-// React 非依存・副作用なし。App.tsx から切り出した単一真相源（搜索結果 + 剪贴板 + 中転条目で共用）。
+// 展示层纯函数（尺寸格式化 / 相对时间 / 扩展名→类别 / 父目录提取）。
+// 不依赖 React、无副作用。从 App.tsx 抽出的单一真相源（搜索结果 + 剪贴板 + 中转条目共用）。
 import { makeT } from "../i18n";
 type TFunc = ReturnType<typeof makeT>;
 
-// 画像とみなす拡張子（中転条目/検索結果の isImage 判定に共用）
+// 视为图片的扩展名（中转条目 / 搜索结果的 isImage 判定共用）
 export const IMG_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"];
 
 export function fmtSize(b: number) {
@@ -18,21 +18,21 @@ export function ago(ms: number, t: TFunc) {
   if (s < 60) return t("刚刚");
   if (s < 3600) return t("{n}分钟前", { n: Math.floor(s / 60) });
   if (s < 86400) return t("{n}小时前", { n: Math.floor(s / 3600) });
-  // 続116：日/月/年まで延長。以前は時間止まりで、3 日前のクリップが「72小时前」になっていた。
-  // ファイル更新時刻（数か月〜数年前が普通）をこの関数で出すには必須。
+  // 续116：延伸到日/月/年。此前只到小时，3 天前的剪贴板项会显示成「72小时前」。
+  // 要用这个函数显示文件修改时间（动辄几个月到几年前）就必须补上。
   if (s < 2592000) return t("{n}天前", { n: Math.floor(s / 86400) });
-  // 月は 30 日固定・年は 365 日で切るため、両者の食い違いで 330〜365 日が「12个月前」になる
-  // （その直後に「1年前」へ飛ぶ）。11 で頭打ちにして、年境界は本物の 365 日のまま保つ。
+  // 月按 30 天、年按 365 天切，两者的错位会让 330~365 天显示成「12个月前」
+  // （紧接着又跳到「1年前」）。把月档封顶在 11，同时年的边界仍保持真实的 365 天。
   if (s < 31536000) return t("{n}个月前", { n: Math.min(11, Math.floor(s / 2592000)) });
   return t("{n}年前", { n: Math.floor(s / 31536000) });
 }
 
-// Unix 秒版の ago()。ファイル系のタイムスタンプは秒、ClipItem.time はミリ秒 —— 単位の取り違えを
-// 呼び出し側で毎回気にしないための薄いラッパ。
+// ago() 的 Unix 秒版本。文件类时间戳是秒，而 ClipItem.time 是毫秒——
+// 用这层薄包装免得每个调用点都要操心单位。
 export const agoSec = (unixSec: number, t: TFunc) => ago(unixSec * 1000, t);
 
-// 文件类型分类键（拡張名 → カテゴリ）。単一真相源；実際のアイコン描画は icons.tsx の FileGlyph が担う。
-// 以前は絵文字を直接返していたが、Solar Bold Duotone アイコンに統一するためカテゴリ键のみを返すよう変更。
+// 文件类型分类键（扩展名 → 类别）。单一真相源；实际的图标绘制由 icons.tsx 的 FileGlyph 负责。
+// 早期直接返回 emoji，为统一到 Solar Bold Duotone 图标，改为只返回类别键。
 export type FileCat =
   | "image" | "video" | "audio" | "archive" | "pdf" | "doc" | "sheet" | "ppt"
   | "ebook" | "disk" | "font" | "code" | "exe" | "text" | "folder" | "generic" | "box";
@@ -40,9 +40,9 @@ export type FileCat =
 export function fileCategory(ext: string): FileCat {
   const e = ext.toLowerCase().replace(/^\./, "");
   if (["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico", "tif", "tiff", "heic", "heif", "avif", "psd"].includes(e)) return "image";
-  // ⚠ "ts" をここに入れてはいけない（続116 で除去）：video 判定が code より先に走るため、
-  // TypeScript ファイルが全部「動画」に分類されていた（アイコン・徽標色・検索セクションすべて）。
-  // MPEG トランスポートストリームの .ts は開発機ではまず存在せず、衝突時は code を採るのが正しい。
+  // ⚠ 不能把 "ts" 放进这里（续116 已移除）：video 的判定跑在 code 之前，
+  // 导致 TypeScript 文件全被归类成「视频」（图标、徽标色、搜索分段统统错）。
+  // MPEG 传输流的 .ts 在开发机上基本不存在，冲突时取 code 才是对的。
   if (["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpeg", "mpg", "3gp"].includes(e)) return "video";
   if (["mp3", "wav", "flac", "ogg", "aac", "m4a", "wma", "opus", "aiff", "mid"].includes(e)) return "audio";
   if (["zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst", "tgz"].includes(e)) return "archive";
@@ -59,17 +59,17 @@ export function fileCategory(ext: string): FileCat {
   return "generic";
 }
 
-// 増強検索の結果分组键（続114b）。`fileCategory` の 16 分類は**アイコン用に細かすぎる**ため、
-// セクション見出しに使える粗い単位へ畳む。分类の単一真相源は依然 fileCategory —— ここは
-// その写像だけを持つ（拡張子リストを二重管理しない）。
-// 粒度の方針：画像/圧縮包のように「形式が違っても用途が同じ」ものは 1 グループ、
-// mui のような冷門形式に専用グループは作らず "other" へ落とす。
+// 增强搜索的结果分组键（续114b）。`fileCategory` 的 16 个分类**对图标合适、对分段太细**，
+// 故折叠成能当段落标题用的粗粒度。分类的单一真相源仍是 fileCategory——
+// 这里只持有那个映射（不重复维护扩展名列表）。
+// 粒度原则：图片/压缩包这类「格式不同但用途相同」的归为一组；
+// 冷门格式不单开组，一律落到 "other"。
 export type FileGroup = "folder" | "image" | "archive" | "doc" | "code" | "media" | "exe" | "other";
 
-// FileCat → FileGroup の写像本体（続116 で fileGroup から抽出）。プレビュー面板の徽標色は
-// 拡張子ではなく **FileCat から直接**引きたい（テキスト/画像クリップのように実体の拡張子が
-// 無い項目があるため）。ここを共用することで「徽標の色 == その項目が属するセクション」が
-// 自動的に一致する —— 色が単なる装飾ではなく分類の再確認になる。
+// FileCat → FileGroup 的映射本体（续116 从 fileGroup 抽出）。预览面板的徽标色需要
+// **直接由 FileCat 取**而非扩展名（因为文本/图片剪贴板项这类条目没有真实扩展名）。
+// 共用这里之后，「徽标颜色 == 该项所属的段落」就自动一致——
+// 于是颜色不再只是装饰，而是对分类的再确认。
 export function catToGroup(cat: FileCat): FileGroup {
   switch (cat) {
     case "image": return "image";
@@ -87,15 +87,15 @@ export function fileGroup(ext: string, isDir: boolean): FileGroup {
   return isDir ? "folder" : catToGroup(fileCategory(ext));
 }
 
-// Unix 秒 → 「YYYY-MM-DD HH:mm」。プレビュー面板の作成/更新時刻用（ago() の相対表記と違い、
-// ここは「いつ」を正確に見たい場面なので絶対表記）。
+// Unix 秒 → 「YYYY-MM-DD HH:mm」。用于预览面板的创建/修改时间
+// （与 ago() 的相对表述不同，这里是要精确看「什么时候」的场景，故用绝对表示）。
 export function fmtDateTime(unixSec: number) {
   const d = new Date(unixSec * 1000);
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-// 絶対パスから親ディレクトリを抽出（検索結果のディレクトリ表示用）
+// 从绝对路径提取父目录（用于搜索结果里显示所在目录）
 export const dirOf = (p: string) => {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
   return i > 0 ? p.slice(0, i) : p;

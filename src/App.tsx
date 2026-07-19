@@ -12,8 +12,8 @@ import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
 interface AppInfo { name: string; path: string; icon: string | null; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 // modified/created 为 Unix 秒，可能缺失（网络盘等不保证提供创建时间）——预览面板对缺失直接不渲染该行
-// 続119 で entries/entriesCapped/width/height/target を追加（Rust apps.rs FileInfo と対応）。
-// ⚠️ Rust 側は #[serde(rename_all="camelCase")]、こちらもキャメルで読むこと（続112 の錯配の再発防止）。
+// 续119 新增 entries/entriesCapped/width/height/target（与 Rust apps.rs 的 FileInfo 对应）。
+// ⚠️ Rust 侧带 #[serde(rename_all="camelCase")]，这里也必须按 camelCase 读（防续112 那次错配重演）。
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; modified?: number | null; created?: number | null; entries?: number | null; entriesCapped?: boolean; width?: number | null; height?: number | null; target?: string | null; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
@@ -138,7 +138,7 @@ type AddResult = "added" | "duplicate" | "full";
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 interface LaunchAnim { icon: string | null; name: string; fileGlyph?: FileGlyphArgs; rect: { top: number; left: number; width: number; height: number }; }
 
-// FileGlyph に渡す最小引数（クリップ/ステージ/起動アニメ共用）
+// 传给 FileGlyph 的最小参数（剪贴板 / 中转 / 启动动画共用）
 type FileGlyphArgs = { cat?: FileCat; ext?: string; isDir?: boolean; isImage?: boolean };
 
 // 剪贴板条目 → FileGlyph 引数（多文件=box、图片=image、其余按扩展名）
@@ -871,31 +871,31 @@ export default function App() {
     const info = meta?.info ?? null;
     // rtl：只给「位置」行——用 direction:rtl 让超长路径省略头部、保住尾部（文件名侧）。
     // 绝不能全表铺开：时间/大小含中性字符，RTL 排版会把它们的标点顺序弄错。
-    // 続116 の情報設計：この面板の仕事は「属性ダイアログ」ではなく **消歧（これで合ってる？）**。
-    // 判断材料を 3 層に分ける —— ① 位置 = 最大の消歧材料（同名ファイルが別ディレクトリに散る、
-    // 検索での曖昧さの圧倒的多数）を独立ブロックへ昇格；② stats = 一目で走査する 1〜2 個の事実；
-    // ③ rows = 残りの副次情報。削ったもの：「类型」（徽標＋アイコンで二重に言っている）と
-    // 「创建时间」（Windows ではコピーで作成日時がリセットされ modified より新しくなるのが常態 ——
-    // 消歧に効かないうえ誤解を招く）。
+    // 续116 的信息设计：这个面板的职责是**消歧（这是我要的那个吗）**，不是属性对话框。
+    // 判断材料分三层——① 位置 = 最大的消歧依据（同名文件散在不同目录，是搜索场景里
+    // 压倒性最常见的歧义源），升为独立区块；② stats = 一眼扫的 1~2 个事实；
+    // ③ rows = 其余次要信息。删掉的两项：「类型」（徽标 + 图标已经说了两遍）与
+    // 「创建时间」（Windows 上复制会重置创建时间、常晚于 modified ——
+    // 既不参与消歧又容易误导）。
     const rows: { label: string; value: string; rtl?: boolean; pending?: boolean; title?: string }[] = [];
     const stats: { label: string; value: string; title?: string; pending?: boolean }[] = [];
     let loc: string | null = null;
     const push = (label: string, value?: string | null, rtl?: boolean, title?: string) => { if (value) rows.push({ label, value, rtl, title }); };
     const fileFacts = (path: string, isDir?: boolean, extHint?: string) => {
       loc = dirOf(path);
-      // ↓ stats の**枠数は同期既知の情報だけで確定**させる（値の有無で出し分けない）。値は
-      // get_file_info 待ち。「値があれば描く」方式だとメタデータ到着の瞬間に面板が伸びて目に見えて
-      // 揺れる（続115 で実測・報告済みの症状）。読込中→「…」／取得できたが欠損→「—」、どちらも高さ同一。
-      // pending が見るのは「メタが返ったか」(meta) であって「値が非空か」(info) ではない：取得失敗時は
-      // info=null だが meta は到着済みなので「—」を出すべき（失敗と読込中が区別できなくなる）。
-      // ⚠️ 続119 で分岐が 3 つに増えたが、**分岐条件は isDir と拡張子＝どちらも同期既知**なので
-      //    この不変量は保たれている（meta の中身では分岐しないこと）。
+      // ↓ stats 的**槽位数只由同步已知的信息决定**（不按值的有无出没）。值要等 get_file_info。
+      // 若用「有值才渲染」，元数据到达的瞬间面板就会长高、肉眼可见地抖动
+      // （续115 实测并反馈过的症状）。加载中→「…」／取到但字段缺失→「—」，两者高度一致。
+      // pending 看的是「元数据是否已返回」(meta) 而非「值是否非空」(info)：取失败时
+      // info=null 但 meta 已到，此时该显示「—」（否则失败与加载中无法区分）。
+      // ⚠️ 续119 把分支增加到 3 个，但**分支条件是 isDir 与扩展名，都是同步已知**，
+      //    所以这个不变量仍然成立（切记不要拿 meta 的内容做分支）。
       const pending = !meta;
       const ext = (extHint || "").toLowerCase().replace(/^\./, "");
       const isImg = !isDir && IMG_EXTS.includes(ext);
       const modStat = {
-        // 相対表記を主にする：ここは「いつ正確に」ではなく「最近いじったやつか」を走査する場面。
-        // 絶対値は title で hover 参照（続116。以前は絶対時刻 2 行が数字の壁になっていた）。
+        // 以相对表述为主：这里是扫「是不是最近碰过的」，而不是精确看「什么时候」。
+        // 绝对值放 title 里 hover 查看（续116。此前两行绝对时间是一堵数字墙）。
         label: t("修改"),
         value: pending ? "…" : (info?.modified ? agoSec(info.modified, t) : "—"),
         title: info?.modified ? fmtDateTime(info.modified) : undefined,
@@ -903,8 +903,8 @@ export default function App() {
       };
       const sizeStat = { label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending };
       if (isDir) {
-        // 続119：フォルダを選んでも面板の情報が全部「入れ物の外側」の話だった。項目数を主役級へ。
-        // entriesCapped のときは「10000+」—— 打ち切った値を確定値として出すと嘘になる。
+        // 续119：选中文件夹时面板给的全是「容器外面」的信息。把条目数提到主角级。
+        // entriesCapped 时显示「10000+」——把截断值当确定值输出就是撒谎。
         stats.push({
           label: t("项目数"),
           value: pending ? "…"
@@ -913,7 +913,7 @@ export default function App() {
         });
         stats.push(modStat);
       } else if (isImg) {
-        // 画像は「340 KB」より「1920 × 1080」。枠は 2 つ固定なので 修改 は下の行送りにする。
+        // 图片更在意「1920 × 1080」而非「340 KB」。槽位固定 2 个，故把 修改 降级到下面的 rows。
         stats.push({
           label: t("尺寸"),
           value: pending ? "…" : (info?.width && info?.height ? `${info.width} × ${info.height}` : "—"),
@@ -927,15 +927,15 @@ export default function App() {
       }
       lnkRow(path);
     };
-    // .lnk の解決先（続119）。**行の有無は path の拡張子＝同期既知**で決めること——
-    // 「target が返ってきたら行を足す」にすると meta 到着で面板が伸びて揺れる（上の不変量）。
-    // 解決できない（MSI アドバタイズ型など）ときは「—」。
+    // .lnk 的解析目标（续119）。**行的有无必须由 path 的扩展名（同步已知）决定**——
+    // 若写成「target 返回了才加行」，meta 到达时面板就会长高抖动（见上面的不变量）。
+    // 解析不出来（MSI 广告式快捷方式等）时显示「—」。
     const lnkRow = (path: string) => {
       if (!path.toLowerCase().endsWith(".lnk")) return;
       rows.push({
         label: t("目标"),
         value: !meta ? "…" : (info?.target || "—"),
-        rtl: true, // 長いパスは頭を省略して尻（実行ファイル名側）を残す
+        rtl: true, // 长路径省略头部、保留尾部（可执行文件名那一侧）
         pending: !meta,
         title: info?.target || undefined,
       });
@@ -944,16 +944,16 @@ export default function App() {
     // photo=true 表示 big 是「照片缩略图」（应铺满裁切）；false 表示是图标（应居中留白）。
     // 混为一谈会把应用图标按 cover 裁掉边缘。
     let title = "", badge = "", big: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
-    // cat = 徽標の色分け用の分類キー。中転/剪貼板の項目は実体の拡張子が無いことがある（テキスト等）
-    // ので、拡張子ではなく FileCat を直接決めて catToGroup で色組へ畳む（format.ts の写像を共用）。
+    // cat = 徽标配色用的分类键。中转 / 剪贴板条目可能没有真实扩展名（如纯文本），
+    // 故不走扩展名而直接定 FileCat，再用 catToGroup 折到色组（复用 format.ts 的映射）。
     let cat: FileCat = "generic";
     if (r.kind === "app") {
       title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" }; cat = "exe";
       big = meta?.icon ?? r.app.icon ?? null;
-      // アプリは位置だけ：サイズは実行ファイルの大きさで意味が薄く、更新時刻は実質インストール日。
-      // どちらも「これで合ってる？」の判断に効かないので出さない（続116）。
+      // 应用只给位置：大小是可执行文件的体积、意义不大，修改时间基本等于安装日期。
+      // 两者对「这是我要的那个吗」都不起作用，故不显示（续116）。
       loc = dirOf(r.app.path);
-      lnkRow(r.app.path); // 続119：スタートメニューの .lnk は「位置」がメニューのフォルダで実体が分からない
+      lnkRow(r.app.path); // 续119：开始菜单的 .lnk，「位置」只会显示菜单所在文件夹，看不出实体在哪
     } else if (r.kind === "fs") {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
       cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
@@ -962,8 +962,8 @@ export default function App() {
       fileFacts(r.path, r.isDir, r.ext);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
-      // 徽標に「出所 · 種別」を併記（続116）：種別は独立行として持つほどの情報量が無い一方、
-      // 中転/剪貼板では出所だけでは何の項目か分からない。1 個の徽標に畳んで行を 1 本減らす。
+      // 徽标并列「出处 · 种别」（续116）：种别的信息量不足以独占一行，
+      // 但在中转 / 剪贴板里光有出处又看不出是什么条目。折进一个徽标，省下一行。
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
       else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; }
       else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileFacts(p, it.isDir, it.ext); }
@@ -973,7 +973,7 @@ export default function App() {
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
       else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = !!big; }
       else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
-      // 剪貼板項目で唯一効くメタ情報。相対表記＋絶対値は hover（ClipItem.time はミリ秒 → ago 直用）
+      // 剪贴板条目唯一有用的元信息。相对表述 + 绝对值 hover 查看（ClipItem.time 是毫秒 → 直接用 ago）
       push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
     }
     return { r, key, title, badge, cat, group: catToGroup(cat), big, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
@@ -2432,12 +2432,12 @@ export default function App() {
                   : <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
               </div>
               <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
-              {/* data-group で色を引く（続116）：色は装飾ではなく分類 —— 検索結果のセクション分けと
-                  同じ写像を使うので「徽標の色 == 属するセクション」が常に一致する */}
+              {/* 用 data-group 取色（续116）：颜色是分类而非装饰——
+                  与搜索结果分段用同一份映射，故「徽标颜色 == 所属段落」恒定一致 */}
               <div className="enh-pv-badge" data-group={enhPreview.group}>{enhPreview.badge}</div>
             </div>
-            {/* 位置＝この面板の主役（続116）。同名ファイルの取り違えは検索での曖昧さの最多ケースで、
-                それを解くのはほぼ常にパス。だから dt/dd の一行ではなく独立ブロックに昇格させた。 */}
+            {/* 位置＝这个面板的主角（续116）。同名文件认错是搜索里最常见的歧义，
+                而解开它的几乎总是路径。所以从 dt/dd 的一行升格为独立区块。 */}
             {enhPreview.loc && (
               <div className="enh-pv-loc" title={enhPreview.loc}>
                 <IconExplorer size={13} className="enh-pv-loc-ic"/>

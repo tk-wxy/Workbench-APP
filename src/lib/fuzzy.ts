@@ -1,5 +1,5 @@
-// 模糊搜索：子序列打分器（統一で模糊 + 缩写を解決）+ 类型词生成 + 命中判定。
-// React 非依存・副作用なし。App.tsx から切り出した単一真相源。
+// 模糊搜索：子序列打分器（统一处理模糊 + 缩写）+ 类型词生成 + 命中判定。
+// 不依赖 React、无副作用。从 App.tsx 抽出的单一真相源。
 export interface MatchResult { score: number; ranges: [number, number][]; } // ranges 基于 target 原始字符串
 
 export function fuzzyScore(query: string, target: string): MatchResult {

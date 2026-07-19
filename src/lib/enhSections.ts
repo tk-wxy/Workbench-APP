@@ -1,23 +1,23 @@
-// 増強検索 Tier2（ファイル結果）のグルーピング（続114b）。純関数・React 非依存 —— App.tsx から
-// 切り出した理由は二つ：① ここが分段ロジックで唯一「壊れ方が自明でない」部分（runt 併合 + 名次順）、
-// ② 純関数なら GUI なしで実際に走らせて検証できる（合成入力で GUI を駆動しない鉄則の下では貴重）。
+// 增强搜索 Tier2（文件结果）的分组（续114b）。纯函数、不依赖 React —— 从 App.tsx 抽出的两个理由：
+// ① 这里是分段逻辑里唯一「坏法不自明」的部分（runt 合并 + 名次序）；
+// ② 纯函数才能脱离 GUI 真跑验证（在「不用合成输入驱动 GUI」的铁律下，这点很宝贵）。
 import { fileGroup, type FileGroup } from "./format";
 
 export type FileLike = { path: string; ext: string; isDir: boolean };
 
 /**
- * ファイル結果を大分類ごとのセクションへ畳む。
+ * 把文件结果折叠成按大类划分的段落。
  *
- * 不変条件（テストで固定済み・崩すと Enter が壊れる）：
- * - **順序は入力の名次で決まる**。`files` は Rust 側が既にスコア順に並べたもので、下標＝名次。
- *   セクション順＝「そのセクション内の最小名次」。よって最良マッチを含むセクションが常に先頭 →
- *   派生する平坦配列の [0] は分段前と一致し、Enter の挙動が変わらない。
- * - `minSection` 未満のグループは "other"（保底バケツ）へ併合する。併合後も名次順を保つ。
- *   "other" 自身はこの閾値の対象外。
- * - 入出力で要素の増減なし（取りこぼし・重複なし）。
+ * 不变量（已被测试钉死，破坏它 Enter 就会坏）：
+ * - **顺序由输入的名次决定**。`files` 是 Rust 侧已按分数排好的，下标即名次。
+ *   段序 =「该段内的最小名次」。因此含最优匹配的段恒在最前 →
+ *   派生出的扁平数组 [0] 与分段前一致，Enter 的行为不变。
+ * - 数量不足 `minSection` 的组并入 "other"（兜底桶），并入后仍保持名次序。
+ *   "other" 自身不受该阈值约束。
+ * - 输入输出元素数量不变（不丢不重）。
  *
- * ⚠ Map の挿入順に依存してはいけない：併合で "other" を後から set すると末尾に付くため、
- *   最良マッチが "other" にあると順序が狂う。必ず名次で明示ソートすること。
+ * ⚠ 不得依赖 Map 的插入序：合并时后 set 的 "other" 会落到末尾，
+ *   若最优匹配正好在 "other" 里，顺序就乱了。必须按名次显式排序。
  */
 export function groupFiles<F extends FileLike>(
   files: F[],
@@ -32,7 +32,7 @@ export function groupFiles<F extends FileLike>(
     groups.get(g)!.push(f);
   });
 
-  // 閾値未満のグループを "other" へ回収
+  // 把数量不足阈值的组回收进 "other"
   const runt: F[] = [];
   for (const [g, items] of [...groups]) {
     if (g !== "other" && items.length < minSection) { runt.push(...items); groups.delete(g); }

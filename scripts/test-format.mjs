@@ -1,15 +1,15 @@
-// lib/format.ts の回帰テスト（続116）。test-enh-sections.mjs と同じ手口：
-// vite 同梱の esbuild で TS を一時 ESM に固めて node で走らせる（テストランナー無依存）。
+// lib/format.ts 的回归测试（续116）。手法与 test-enh-sections.mjs 相同：
+// 用 vite 自带的 esbuild 把 TS 打成临时 ESM 再交给 node 跑（不依赖测试框架）。
 //
 //   node scripts/test-format.mjs
 //
-// 対象は 2 つとも「壊れても画面上すぐには気づかない」種類のロジック：
-//   ① ago() の分档境界 —— 続116 で日/月/年を足した。除数を 1 桁間違えても
-//      「1个月前」のように*もっともらしい*値が出るだけで、目視では発見できない。
-//   ② catToGroup() —— fileGroup() から抽出した写像本体（続116）。プレビュー面板の徽標色と
-//      検索結果のセクション分けが**同じ写像を共有する**ための要。ここがズレると
-//      「徽標の色とその項目が入っているセクションが食い違う」という分かりにくいバグになる。
-//      抽出が挙動保存であることも fileGroup 側から併せて確認する。
+// 两个测试对象都属于「坏了也不会立刻在界面上看出来」的那类逻辑：
+//   ① ago() 的分档边界——续116 加了日/月/年。除数写错一个数量级，
+//      也只是输出「1个月前」这种*看着挺合理*的值，肉眼根本发现不了。
+//   ② catToGroup()——从 fileGroup() 抽出的映射本体（续116）。它是预览面板徽标色
+//      与搜索结果分段**共享同一份映射**的关键。这里一偏，就会出现
+//      「徽标颜色和该项所在段落对不上」这种很难查的 bug。
+//      顺带从 fileGroup 一侧确认抽取是行为保持的。
 import { build } from "esbuild";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,7 +24,7 @@ await build({
 });
 const { ago, agoSec, catToGroup, fileGroup } = await import(pathToFileURL(outfile).href);
 
-// makeT の代わりの最小 t()：中文キーをそのまま返し {n} だけ展開する（辞書は本テストの対象外）
+// 代替 makeT 的最小 t()：原样返回中文 key，只展开 {n}（词典不在本测试范围内）
 const t = (zh, vars) => zh.replace(/\{(\w+)\}/g, (_, k) => vars[k]);
 
 let failed = 0;
@@ -36,56 +36,56 @@ const eq = (name, actual, expected) => {
 
 const now = Date.now(), S = 1000, D = 86400 * S;
 
-console.log("\nago() —— 分档境界（続116 で日/月/年を追加）");
+console.log("\nago() —— 分档边界（续116 增加了日/月/年）");
 eq("0 秒",              ago(now,            t), "刚刚");
 eq("59 秒",             ago(now - 59 * S,   t), "刚刚");
-eq("60 秒（档切替）",    ago(now - 60 * S,   t), "1分钟前");
+eq("60 秒（换档）",      ago(now - 60 * S,   t), "1分钟前");
 eq("3599 秒",           ago(now - 3599 * S, t), "59分钟前");
-eq("3600 秒（档切替）",  ago(now - 3600 * S, t), "1小时前");
+eq("3600 秒（换档）",    ago(now - 3600 * S, t), "1小时前");
 eq("23h59m",            ago(now - 86399 * S, t), "23小时前");
-eq("24h（新档・旧版は 24小时前）", ago(now - D,      t), "1天前");
-eq("3 日（旧版は 72小时前）",      ago(now - 3 * D,  t), "3天前");
-eq("29 日",             ago(now - 29 * D,  t), "29天前");
-eq("30 日（档切替）",    ago(now - 30 * D,  t), "1个月前");
-// 月は 30 日固定・年は 365 日 —— 素直に割ると 330 日以降が「12个月前」になり「1年前」の直前で
-// 妙な表示になる。11 で頭打ちにしてある（format.ts のコメント参照）。
-eq("330 日（頭打ち下端）", ago(now - 330 * D, t), "11个月前");
-eq("364 日（12个月前 にならないこと）", ago(now - 364 * D, t), "11个月前");
-eq("365 日（档切替）",   ago(now - 365 * D, t), "1年前");
-// 未来のタイムスタンプ：時計ずれやネットワークドライブで実際に起こる。負値で
-// 「-3分钟前」のような表示にならないこと（s<60 に落ちて「刚刚」）を担保する。
-eq("未来時刻（時計ずれ）", ago(now + 9999 * S, t), "刚刚");
+eq("24h（新档，旧版会显示 24小时前）", ago(now - D,      t), "1天前");
+eq("3 天（旧版会显示 72小时前）",   ago(now - 3 * D,  t), "3天前");
+eq("29 天",             ago(now - 29 * D,  t), "29天前");
+eq("30 天（换档）",      ago(now - 30 * D,  t), "1个月前");
+// 月按 30 天、年按 365 天——直接相除的话 330 天以后会显示「12个月前」，
+// 紧挨着「1年前」显得别扭。故把月档封顶在 11（见 format.ts 的注释）。
+eq("330 天（封顶下沿）", ago(now - 330 * D, t), "11个月前");
+eq("364 天（不得变成 12个月前）", ago(now - 364 * D, t), "11个月前");
+eq("365 天（换档）",     ago(now - 365 * D, t), "1年前");
+// 未来时间戳：时钟偏差或网络盘上真实会发生。要保证不会因负值显示成
+// 「-3分钟前」（应落进 s<60 显示「刚刚」）。
+eq("未来时间（时钟偏差）", ago(now + 9999 * S, t), "刚刚");
 
-console.log("\nagoSec() —— 単位換算（ファイル時刻は Unix 秒、ClipItem.time はミリ秒）");
-eq("秒版 3 日前", agoSec(Math.floor(now / 1000) - 3 * 86400, t), "3天前");
+console.log("\nagoSec() —— 单位换算（文件时间是 Unix 秒，ClipItem.time 是毫秒）");
+eq("秒版 3 天前", agoSec(Math.floor(now / 1000) - 3 * 86400, t), "3天前");
 eq("秒版 1 年前", agoSec(Math.floor(now / 1000) - 365 * 86400, t), "1年前");
 
-console.log("\ncatToGroup() —— FileCat 全 17 種が合法な FileGroup に落ちる");
+console.log("\ncatToGroup() —— 全部 17 种 FileCat 都落到合法的 FileGroup");
 const ALL_CATS = ["image","video","audio","archive","pdf","doc","sheet","ppt",
                   "ebook","disk","font","code","exe","text","folder","generic","box"];
 const VALID = ["folder","image","archive","doc","code","media","exe","other"];
 const strays = ALL_CATS.filter(c => !VALID.includes(catToGroup(c)));
-if (strays.length) { console.error(`  ✗ 不正な組へ落ちた: ${strays.join(", ")}`); failed++; }
-else console.log(`  ✓ 17 種すべて合法（徽標色 CSS が必ず存在する = 無色落ちしない）`);
-// 抽出時に新設した分岐。fileGroup 経由では isDir が先に効くので単体で確認する必要がある。
-eq("folder（抽出時の新設分岐）", catToGroup("folder"), "folder");
+if (strays.length) { console.error(`  ✗ 落到了非法的组: ${strays.join(", ")}`); failed++; }
+else console.log(`  ✓ 17 种全部合法（徽标色 CSS 必然存在 = 不会掉成无色）`);
+// 抽取时新增的分支。经由 fileGroup 时 isDir 会先起作用，故需单独确认。
+eq("folder（抽取时新增的分支）", catToGroup("folder"), "folder");
 eq("generic → other",            catToGroup("generic"), "other");
-eq("text → doc（テキスト項目の徽標色）", catToGroup("text"), "doc");
+eq("text → doc（文本条目的徽标色）", catToGroup("text"), "doc");
 
-console.log("\nfileGroup() —— 抽出リファクタが挙動保存であること");
-eq("isDir 優先",  fileGroup("txt", true),  "folder");
+console.log("\nfileGroup() —— 抽取重构必须行为保持");
+eq("isDir 优先",  fileGroup("txt", true),  "folder");
 eq(".png",        fileGroup("png", false), "image");
 eq(".zip",        fileGroup("zip", false), "archive");
 eq(".pdf",        fileGroup("pdf", false), "doc");
-// 続116：以前は video リストにも "ts" があり、video 判定が先に走るせいで TypeScript ファイルが
-// 全部「媒体」セクションへ落ちていた。回帰しないよう釘を打つ。
-eq(".ts → code（動画ではない）", fileGroup("ts", false), "code");
+// 续116：此前 video 列表里也有 "ts"，而 video 判定跑在前面，
+// 导致 TypeScript 文件全落进「媒体」段。钉死防止回归。
+eq(".ts → code（不是视频）", fileGroup("ts", false), "code");
 eq(".tsx",        fileGroup("tsx", false), "code");
 eq(".mp4",        fileGroup("mp4", false), "media");
 eq(".exe",        fileGroup("exe", false), "exe");
 eq(".ttf → other", fileGroup("ttf", false), "other");
-eq("未知拡張子",   fileGroup("qqq", false), "other");
+eq("未知扩展名",   fileGroup("qqq", false), "other");
 
 rmSync(dir, { recursive: true, force: true });
-if (failed) { console.error(`\n${failed} 件失敗\n`); process.exit(1); }
+if (failed) { console.error(`\n${failed} 处失败\n`); process.exit(1); }
 console.log("\n全部通过\n");

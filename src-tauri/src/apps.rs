@@ -634,10 +634,10 @@ pub fn launch_app(path: String) -> Result<(), String> {
 // camelCase：前端 FileEntry 接口读 `isDir`（Tauri 不会自动转换 serde 字段名，同 filesearch.rs
 // SearchResult 的既有约定）。此前缺这行属潜伏错配——历史调用点只读 .icon 故未暴露，
 // 续112 的「浏览文件…」要靠 isDir 区分 file/folder，补齐。
-// Default は下のシリアライズ回帰テスト用（続119）。このテストは
-// **フィールドを足すたびに 2 回もビルド不能になった**（続115・続119）——しかも cargo check は
-// #[cfg(test)] を通さないので、その場では気づけない。`..Default::default()` で書けるように
-// しておけば、以後フィールドが増えてもテストは壊れない。
+// Default 是给下面那个序列化回归测试用的（续119）。那个测试
+// **每加一次字段就编译不过，已经发生两次**（续115、续119）——而 cargo check 不编译
+// #[cfg(test)]，当场根本发现不了。改成能用 `..Default::default()` 书写后，
+// 以后再加字段测试也不会坏。
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
@@ -652,35 +652,35 @@ pub struct FileInfo {
     /// 故前端必须容忍缺失（预览面板对 None 直接不渲染该行，而不是显示 1970）。
     pub modified: Option<u64>,
     pub created: Option<u64>,
-    // ── 続119：プレビュー面板の「消歧」を強めるための 3 項目 ────────────────
-    /// フォルダ内の項目数。ファイルなら常に None。
-    /// 動機：フォルダを選んでも面板の情報が全部「入れ物の外側」の話（位置/更新）で、
-    /// **そのフォルダ自身について何も言っていなかった**。
+    // ── 续119：为增强预览面板的「消歧」能力而加的 3 项 ────────────────────
+    /// 文件夹内的条目数。文件恒为 None。
+    /// 动机：选中文件夹时，面板给的信息全是「容器外面」的事（位置/修改），
+    /// **对这个文件夹本身什么也没说**。
     pub entries: Option<u32>,
-    /// 項目数の計上を DIR_COUNT_CAP で打ち切ったか。true なら前端は「N+」と表示する。
+    /// 条目数是否因 DIR_COUNT_CAP 被截断。为 true 时前端显示「N+」。
     pub entries_capped: bool,
-    /// 画像のピクセル寸法。画像以外・読めない場合は None。
-    /// 「340 KB」より「1920 × 1080」の方が画像選択では圧倒的に有用。
+    /// 图片的像素尺寸。非图片或读不出时为 None。
+    /// 选图时「1920 × 1080」比「340 KB」有用得多。
     pub width: Option<u32>,
     pub height: Option<u32>,
-    /// .lnk の解決先フルパス。ショートカット以外は None。
-    /// 動機：スタートメニューの .lnk を選ぶと「位置」がスタートメニューのフォルダになり、
-    /// 実体がどこにあるのか分からない。
+    /// .lnk 解析后的目标完整路径。非快捷方式为 None。
+    /// 动机：选中开始菜单里的 .lnk 时，「位置」显示的是开始菜单那个文件夹，
+    /// 根本看不出实体在哪。
     pub target: Option<String>,
 }
 
-/// フォルダ項目数の計上上限（続119）。数十万件のフォルダで read_dir を最後まで回すと
-/// プレビューが固まるので打ち切る。打ち切ったら entries_capped=true で前端に伝える。
+/// 文件夹条目数的计数上限（续119）。几十万条目的文件夹若把 read_dir 跑到底，
+/// 预览会卡住，所以要截断。截断后用 entries_capped=true 告知前端。
 const DIR_COUNT_CAP: u32 = 10_000;
 
-/// フォルダ直下の項目数を数える（再帰しない —— 「このフォルダに何個あるか」が知りたいのであって
-/// 総ファイル数ではない。再帰すると巨大ツリーで固まる上、意味も変わる）。
+/// 数文件夹直下的条目数（不递归——想知道的是「这个文件夹里有几个」，
+/// 而不是总文件数。递归不仅会在大树上卡住，语义也变了）。
 fn count_dir_entries(p: &std::path::Path) -> Option<(u32, bool)> {
-    let rd = std::fs::read_dir(p).ok()?; // 権限なし等は None（前端は「—」表示）
+    let rd = std::fs::read_dir(p).ok()?; // 无权限等情况返回 None（前端显示「—」）
     let mut n = 0u32;
     for e in rd {
         if e.is_err() {
-            continue; // 個々の列挙エラーは飛ばす（全体を諦めない）
+            continue; // 单条枚举出错就跳过（不因此放弃整体）
         }
         n += 1;
         if n >= DIR_COUNT_CAP {
@@ -690,22 +690,22 @@ fn count_dir_entries(p: &std::path::Path) -> Option<(u32, bool)> {
     Some((n, false))
 }
 
-/// 画像のピクセル寸法。**ヘッダのみ読む**（into_dimensions）—— 全復号すると
-/// 数千万画素の画像でプレビューが固まる。拡張子で足切りしてから開く。
+/// 图片的像素尺寸。**只读文件头**（into_dimensions）——全解码的话，
+/// 几千万像素的图会把预览卡住。先按扩展名足切再打开。
 fn image_dims(path: &str, ext: &str) -> Option<(u32, u32)> {
     if !matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "avif") {
         return None;
     }
-    // with_guessed_format：拡張子が実体と食い違っていても中身から判定させる
+    // with_guessed_format：即使扩展名与实际格式不符，也按内容判定
     image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
 }
 
-/// .lnk を解決して実体のフルパスを返す（続119）。
+/// 解析 .lnk，返回实体的完整路径（续119）。
 ///
-/// ⚠️ 呼び出し側で COM が初期化済みであること（get_file_info の CoInitializeEx 区間内で呼ぶ）。
-/// 既存の `resolve_lnk` は名前とアイコンを取るだけで**リンク先は解決していない**ので別物。
+/// ⚠️ 要求调用方已初始化 COM（在 get_file_info 的 CoInitializeEx 区间内调用）。
+/// 既有的 `resolve_lnk` 只取名字和图标、**根本没解析链接目标**，是另一回事。
 fn resolve_lnk_target(path: &str) -> Option<String> {
-    use windows::core::{Interface, PCWSTR}; // Interface = .cast() を生やすトレイト
+    use windows::core::{Interface, PCWSTR}; // Interface 提供 .cast()
     use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
     if !path.to_lowercase().ends_with(".lnk") {
@@ -716,12 +716,12 @@ fn resolve_lnk_target(path: &str) -> Option<String> {
         let pf: IPersistFile = link.cast().ok()?;
         let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
         pf.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
-        let mut buf = [0u16; 260]; // MAX_PATH。超える先は諦める（None → 前端は行を出さない）
+        let mut buf = [0u16; 260]; // MAX_PATH。超长的目标放弃（None → 前端不渲染该行）
         link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
         let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
         let s = String::from_utf16_lossy(&buf[..end]);
         if s.is_empty() {
-            None // MSI アドバタイズ型ショートカット等は GetPath が空を返す
+            None // MSI 广告式快捷方式等情况下 GetPath 会返回空
         } else {
             Some(s)
         }
@@ -758,9 +758,9 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let icon = extract_icon_base64(&path);
     let target = resolve_lnk_target(&path);
     if com_hr == 0 { unsafe { CoUninitialize(); } } // 仅 S_OK 时配对反初始化
-    // ↓ ディスク I/O を伴うのでフォルダ / 画像それぞれ**該当する場合だけ**走らせる。
-    //   本コマンドはプレビュー面板から呼ばれる非同期経路であり、
-    //   「查询命令（search_files 等）はメモリのみ」という鉄則の対象外。
+    // ↓ 涉及磁盘 I/O，故文件夹 / 图片各自**只在对应情况下**才跑。
+    //   本命令是预览面板调用的异步路径，
+    //   不在「查询命令（search_files 等）只读内存」那条铁律的约束范围内。
     let (entries, entries_capped) = if is_dir {
         match count_dir_entries(&p) {
             Some((n, capped)) => (Some(n), capped),
@@ -827,9 +827,9 @@ pub fn resolve_lnk(path: String) -> LnkInfo {
 mod tests {
     use super::*;
 
-    /// 続119 で追加した 3 フィールドも camelCase で出ること。
-    /// 前端は `entriesCapped` を読む —— snake_case のままだと undefined（静默 falsy）になり、
-    /// 打ち切った巨大フォルダが「10000 個」と**嘘の確定値**で表示される。
+    /// 续119 新增的 3 个字段也必须以 camelCase 输出。
+    /// 前端读的是 `entriesCapped`——若留成 snake_case 就会拿到 undefined（静默 falsy），
+    /// 于是被截断的巨大文件夹会显示成「10000 个」这个**撒谎的确定值**。
     #[test]
     fn file_info_new_fields_serialize_as_camel_case() {
         let json = serde_json::to_string(&FileInfo {
@@ -848,7 +848,7 @@ mod tests {
         }
     }
 
-    /// フォルダ項目数（続119）：直下のみ数える・再帰しない・打ち切りが効く。
+    /// 文件夹条目数（续119）：只数直下、不递归、截断生效。
     #[test]
     fn count_dir_entries_counts_shallow_and_caps() {
         let base = std::env::temp_dir().join("wb_dircount_test");
@@ -857,44 +857,44 @@ mod tests {
         for i in 0..5 {
             std::fs::write(base.join(format!("f{i}.txt")), b"x").unwrap();
         }
-        // 入れ子の中身は数に入ってはいけない（「このフォルダに何個あるか」が知りたい）
+        // 嵌套子目录里的内容不能计入（想知道的是「这个文件夹里有几个」）
         std::fs::write(base.join("sub").join("deep.txt"), b"x").unwrap();
-        let (n, capped) = count_dir_entries(&base).expect("読めるはず");
-        assert_eq!(n, 6, "直下 = ファイル 5 + フォルダ sub 1（入れ子の deep.txt は数えない）");
-        assert!(!capped, "6 件で打ち切られてはいけない");
+        let (n, capped) = count_dir_entries(&base).expect("应当能读到");
+        assert_eq!(n, 6, "直下 = 5 个文件 + 1 个 sub 目录（嵌套的 deep.txt 不算）");
+        assert!(!capped, "才 6 条不该被截断");
 
-        // 存在しないパスは None（前端は「—」表示に退化）
+        // 不存在的路径返回 None（前端退化为显示「—」）
         assert!(count_dir_entries(&base.join("nope")).is_none());
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// .lnk 以外に対して resolve_lnk_target が COM を触らず即 None を返すこと（続119）。
-    /// ここが早期 return しないと、全ファイルのプレビューで無駄に ShellLink を生成することになる。
+    /// 对非 .lnk 输入，resolve_lnk_target 应不碰 COM 直接返回 None（续119）。
+    /// 这里若不提前 return，每个文件的预览都会白白创建一次 ShellLink。
     #[test]
     fn resolve_lnk_target_ignores_non_lnk() {
         assert!(resolve_lnk_target("C:\\x\\a.txt").is_none());
         assert!(resolve_lnk_target("C:\\x\\a.exe").is_none());
-        // 大文字小文字は問わない（.LNK も存在する）—— 実体が無いので解決自体は失敗するが、
-        // 少なくとも拡張子判定で弾かれてはいけない。パニックしないことを見る。
+        // 大小写不敏感（.LNK 也存在）——文件不存在所以解析本身会失败，
+        // 但至少不该被扩展名判断挡掉。这里看的是不 panic。
         let _ = resolve_lnk_target("C:\\x\\nonexistent.LNK");
     }
 
-    /// 画像寸法（続119）：非画像拡張子は開かずに None。
-    /// 拡張子で足切りしないと、巨大な zip 等をデコーダに渡すことになる。
+    /// 图片尺寸（续119）：非图片扩展名不打开文件、直接 None。
+    /// 不按扩展名足切的话，就会把巨大的 zip 之类丢给解码器。
     #[test]
     fn image_dims_skips_non_images() {
         assert!(image_dims("C:\\x\\a.zip", "zip").is_none());
         assert!(image_dims("C:\\x\\a.txt", "txt").is_none());
-        assert!(image_dims("C:\\x\\nonexistent.png", "png").is_none(), "存在しないファイルは None");
+        assert!(image_dims("C:\\x\\nonexistent.png", "png").is_none(), "文件不存在应返回 None");
     }
 
-    /// 診断用（既定 #[ignore]、手動実行：
+    /// 诊断用（默认 #[ignore]，手动执行：
     ///   cargo test --lib probe_real_lnk -- --ignored --nocapture）
     ///
-    /// 実機のスタートメニューにある本物の .lnk を get_file_info 経由で解決してみる。
-    /// COM 生成に失敗しても resolve_lnk_target は静かに None を返すだけなので、
-    /// **本当に効いているかは実データを通さないと分からない**。ここはその確認用。
-    /// 併せて画像寸法・フォルダ項目数も実物で見る。
+    /// 拿实机开始菜单里真实的 .lnk 走一遍 get_file_info 做解析。
+    /// COM 创建失败时 resolve_lnk_target 只会静默返回 None，
+    /// **所以不过真实数据就无法确认它到底有没有生效**。这里就是做这个确认的。
+    /// 顺带用实物看一眼图片尺寸与文件夹条目数。
     #[test]
     #[ignore]
     fn probe_real_lnk() {
@@ -914,19 +914,19 @@ mod tests {
                 println!(
                     "  {:<34} → {}",
                     info.name,
-                    info.target.as_deref().unwrap_or("(解決できず / アドバタイズ型)")
+                    info.target.as_deref().unwrap_or("(解析不出 / 广告式快捷方式)")
                 );
                 shown += 1;
                 if shown >= 6 { break; }
             }
         }
         if shown == 0 {
-            println!("  スタートメニューに .lnk が見つからず（判定不能）: {}", menu.display());
+            println!("  开始菜单里没找到 .lnk（无法判定）: {}", menu.display());
         }
 
-        // ついでにフォルダ項目数を実物で（このリポジトリの src ディレクトリ）
+        // 顺带用实物看文件夹条目数（本仓库的 src 目录）
         if let Ok(info) = get_file_info("D:\\dev\\workbench-app\\src".into()) {
-            println!("  src/ の項目数: {:?} (capped={})", info.entries, info.entries_capped);
+            println!("  src/ 的条目数: {:?} (capped={})", info.entries, info.entries_capped);
         }
     }
 
@@ -936,9 +936,9 @@ mod tests {
     /// 这个错配曾潜伏很久（历史调用点只读 .icon 故没暴露），故用测试钉死。
     #[test]
     fn file_info_serializes_is_dir_as_camel_case() {
-        // `..Default::default()` で書く（続119）：ここは serde の rename を見るのが目的で、
-        // 個々のフィールド値はどうでもいい。全列挙するとフィールドを足すたびにビルドが壊れ、
-        // 実際に続115・続119 の 2 回それをやっている。
+        // 用 `..Default::default()` 书写（续119）：这里的目的是看 serde 的 rename，
+        // 各字段具体取值无关紧要。全列出来的话每加一个字段都会编译不过，
+        // 实际上续115、续119 已经这样坏过两次。
         let json = serde_json::to_string(&FileInfo {
             name: "tmp".into(),
             is_dir: true,

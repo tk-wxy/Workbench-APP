@@ -42,12 +42,12 @@ export const EN_DICT: Record<string, string> = {
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
   "换区": "Switch section",
-  // 增强搜索预览面板（续115、続116 で情報項目を整理）
+  // 增强搜索预览面板（续115；续116 整理了信息项）
   "位置": "Location",
   "大小": "Size",
-  // stat strip のラベルは 9px の小文字幅 —— 「修改时间」だと折り返すので短縮形を使う
+  // stat strip 的标签是 9px 小字宽——「修改时间」会折行，故用短形式
   "修改": "Modified",
-  // 続119：フォルダ項目数 / 画像のピクセル寸法 / .lnk の解決先
+  // 续119：文件夹条目数 / 图片像素尺寸 / .lnk 解析目标
   "项目数": "Items",
   "尺寸": "Dimensions",
   "目标": "Target",

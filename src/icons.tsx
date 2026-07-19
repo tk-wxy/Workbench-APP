@@ -99,7 +99,7 @@ export const IconPin = ({ size = 12, className }: IconProps) => (
   </svg>
 );
 
-// 検索アイコン：原实现固定 className="search-icon-svg"（搜索框内定位依赖此类），保留
+// 搜索图标：原实现固定 className="search-icon-svg"（搜索框内定位依赖此类），保留
 export const IconSearch = ({ size = 16, className }: IconProps) => (
   <Glyph size={size} body={B.search} className={className ?? "search-icon-svg"} />
 );
