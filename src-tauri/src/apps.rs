@@ -744,6 +744,10 @@ mod tests {
             size: 0,
             ext: String::new(),
             icon: None,
+            // 続115 で追加された 2 フィールド。当時ここを直し忘れて cargo test が
+            // ビルドできなくなっていた（cargo check は #[cfg(test)] を compile しないため素通り）。
+            modified: None,
+            created: None,
         })
         .expect("FileInfo 应可序列化");
         assert!(json.contains("\"isDir\":true"), "前端读 isDir，实际序列化为: {json}");
