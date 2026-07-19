@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
@@ -30,6 +30,11 @@ pub struct IndexEntry {
     pub is_dir: bool,
     /// 是否来自用户手动添加的额外扫描目录（EXTRA_DIRS）。查询时据此加分，见 EXTRA_DIR_BONUS。
     pub extra: bool,
+    /// 最終更新時刻（Unix 秒、0 = 取得不可）。続117 で追加 —— 新鮮度加点の入力。
+    /// **索引に持たせる**のが要点：查询命令は「メモリのみ・ディスクに触れない」が鉄則なので、
+    /// 検索のたびに stat する案は取れない。Windows のディレクトリ列挙（FindFirstFile）は
+    /// ftLastWriteTime を元から返すため、索引構築時の取得はほぼ無料。
+    pub mtime: u64,
 }
 
 /// 返回给前端的查询结果（不含 name_lower 内部字段）。内置与 Everything 共用此结构。
@@ -43,6 +48,11 @@ pub struct FileSearchResult {
     pub is_dir: bool,
     /// Shell 图标 base64 PNG data URL；随查询结果同步返回，省去前端二次 IPC。
     pub icon: Option<String>,
+    /// 最終更新時刻（Unix 秒、0 = 不明）。ランキング用の**内部フィールド**なので前端へは送らない
+    /// （前端はプレビュー面板で get_file_info を使う。ここを serialize すると同じ事実の出所が
+    /// 二つになる）。内置は索引から、Everything は SDK の DATE_MODIFIED から埋める。
+    #[serde(skip)]
+    pub mtime: u64,
 }
 
 static FILE_INDEX: OnceLock<Mutex<Vec<IndexEntry>>> = OnceLock::new();
@@ -77,6 +87,70 @@ const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全
 /// token_score 那条「直接含永远排在拆字母前」的分层不变量，只翻转同层内的并列。
 /// 按条目加一次（非按 token），故与 `60 - name.len()` 短名加分同处一行之后。
 const EXTRA_DIR_BONUS: i32 = 300;
+
+// ── 分層加点の予算（続117 で明文化）──────────────────────────────────────────
+//
+// token_score には破ってはいけない**分層不変量**がある：「名前に直接含む(子串)」は
+// 「文字をばらして拾う(子序列)」より**常に上**。単一トークン時の数値は：
+//     子串命中の最小 = 2000 - 500(位置ペナルティ上限) = 1500
+//     子序列の最大   = 1000（subseq_score が .min(1000) で頭打ち）
+//   → 層間ギャップ = 500
+// エントリ単位の加点（額外目录 / 短名 / 新鮮度）は**この 500 を食い潰してはいけない**。
+// 合計が 500 を超えると「額外目录にある・短い・昨日更新した*ぼんやり一致*」が
+// 「ど真ん中で名前に含む正確な一致」を追い抜く —— 検索が壊れたとしか見えない挙動になる。
+//
+// 複数トークン時は両層とも token 数に比例して伸びる（2 語なら子串 ≥3000 / 子序列 ≤2000、
+// ギャップ 1000）一方、下の 3 つはエントリに 1 回だけ加算 —— よって**単一トークンが最も厳しい**。
+// 予算はそこで満たせばよい。実際の検算は tests::layer_invariant_budget_holds が行う。
+//
+//   EXTRA_DIR_BONUS(300) + SHORT_NAME_BONUS_MAX(60) + RECENCY_BONUS_MAX(120) = 480 < 500 ✓
+//
+// ⚠️ この 3 定数のどれかを上げるときは必ず合計を再確認すること（テストが落ちる）。
+const SHORT_NAME_BONUS_MAX: i32 = 60;
+/// 新鮮度加点の上限（続117）。実値は recency_bonus() の階段を参照。
+const RECENCY_BONUS_MAX: i32 = 120;
+/// 層間ギャップ（単一トークン時）。上記 3 定数の合計はこれ未満でなければならない。
+/// 参照するのはテストのみ（予算の検算に使う）だが、**予算の宣言そのもの**なので
+/// #[cfg(test)] には落とさない —— 定数を触る人がここを読める場所に置いておきたい。
+#[allow(dead_code)]
+const LAYER_GAP: i32 = 500;
+
+/// 更新時刻 → 新鮮度加点（続117）。
+///
+/// 動機：アプリには使用頻度スコア（usageScore：頻度 × 30日半減期）があるのに、**ファイルには
+/// 時間軸が一切無かった**。5 分前に編集したファイルと 2015 年の同名ファイルが完全に同点で、
+/// 名前の長さと走査順だけで勝負が決まっていた。「探しているのは大抵さっき触ったやつ」という
+/// 極めて強い事前分布を、ランキングが全く使えていなかった。
+///
+/// 連続関数ではなく**階段**にした理由：連続だと僅かな時刻差で並びが揺れ、同じクエリを打ち直す
+/// たびに順番が変わって見える。段にしておけば「今週のもの」の中では従来どおり関連度で決まる。
+///
+/// 値は上の予算内（≤ RECENCY_BONUS_MAX）。未来時刻（時計ずれ / ネットワークドライブ）は
+/// age を 0 に飽和させて最上段扱い —— 負値で下駄を履かせない。
+fn recency_bonus(mtime: u64, now: u64) -> i32 {
+    if mtime == 0 {
+        return 0; // 取得不可
+    }
+    let age = now.saturating_sub(mtime);
+    const DAY: u64 = 86_400;
+    if age <= 7 * DAY {
+        RECENCY_BONUS_MAX // 120：今週触った
+    } else if age <= 30 * DAY {
+        70
+    } else if age <= 365 * DAY {
+        25
+    } else {
+        0
+    }
+}
+
+/// 現在時刻（Unix 秒）。索引には触れないので查询パスで呼んでも鉄則違反にならない。
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// 扫描根目录清单。返回 (目录, 是否为用户手动添加的额外目录)——第二项一路带进 IndexEntry.extra
 /// 供查询加分用（见 EXTRA_DIR_BONUS）。默认根 = 整个用户目录；额外根由前端经 set_search_dirs 注入。
@@ -153,6 +227,16 @@ fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
                 .and_then(|e| e.to_str())
                 .unwrap_or("")
                 .to_lowercase();
+            // mtime：walkdir の DirEntry::metadata() は Windows ではディレクトリ列挙時の
+            // WIN32_FIND_DATA を再利用するため追加の syscall はほぼ発生しない（実測は
+            // measure_real_rebuild で確認できる）。取得できなければ 0 = 加点なしに退化。
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
             out.push(IndexEntry {
                 path: path.to_string_lossy().to_string(),
                 name_lower: name.to_lowercase(),
@@ -160,6 +244,7 @@ fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
                 ext,
                 is_dir,
                 extra: *is_extra,
+                mtime,
             });
         }
     }
@@ -262,7 +347,27 @@ fn token_score(t: &str, name_lower: &str) -> Option<i32> {
     subseq_score(t, name_lower)
 }
 
-// 内置引擎查询：纯内存读，<5ms。多词 AND + 分层打分 + 短名优先。
+/// エントリ 1 件の総合スコア（続117 で builtin_search から抽出）。全トークンが命中しなければ None。
+///
+/// 抽出理由：**グローバル（FILE_INDEX / EXTRA_DIRS / USERPROFILE）に触れずにランキングを
+/// テストするため**。既存の端到端テストはそれらを書き換えるので「これ 1 本だけ・並行に増やすな」
+/// という制約付きで、ランキングの回帰をそこに相乗りさせられない。ここが純関数なら
+/// IndexEntry を手で組んで自由に検証できる。
+fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
+    let mut total = 0i32;
+    for t in tokens {
+        total += token_score(t, &e.name_lower)?; // 1 つでも外れたら不一致（多词 AND）
+    }
+    // ↓ エントリ単位の加点 3 種。合計は必ず LAYER_GAP 未満（分層予算の注釈を参照）
+    total += SHORT_NAME_BONUS_MAX - (e.name.len() as i32).min(SHORT_NAME_BONUS_MAX); // 短名优先（轻微）
+    if e.extra {
+        total += EXTRA_DIR_BONUS; // 用户手动添加的目录 = 明确意图信号，翻转同名并列（见常量注释）
+    }
+    total += recency_bonus(e.mtime, now); // 続117：最近触ったものを同層内で優先
+    Some(total)
+}
+
+// 内置引擎查询：纯内存读，<5ms。多词 AND + 分层打分 + 短名优先 + 新鮮度。
 fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -280,24 +385,11 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
         Ok(g) => g,
         Err(_) => return Vec::new(),
     };
+    // 新鮮度加点用に一度だけ現在時刻を取る（ループ内で毎回 SystemTime::now は無駄）
+    let now = now_unix();
     let mut scored: Vec<(i32, &IndexEntry)> = Vec::new();
     for e in guard.iter() {
-        let mut total = 0i32;
-        let mut all = true;
-        for t in &tokens {
-            match token_score(t, &e.name_lower) {
-                Some(s) => total += s,
-                None => {
-                    all = false;
-                    break;
-                }
-            }
-        }
-        if all {
-            total += 60 - (e.name.len() as i32).min(60); // 短名优先（轻微）
-            if e.extra {
-                total += EXTRA_DIR_BONUS; // 用户手动添加的目录 = 明确意图信号，翻转同名并列（见常量注释）
-            }
+        if let Some(total) = entry_score(&tokens, e, now) {
             scored.push((total, e));
         }
     }
@@ -311,8 +403,50 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
             ext: e.ext.clone(),
             is_dir: e.is_dir,
             icon: None, // 由 enrich_with_icons 统一填充
+            mtime: e.mtime,
         })
         .collect()
+}
+
+/// Everything の結果を**内置と同じ物差しで並べ直す**（続117）。
+///
+/// なぜ必要か：`search_files` は Everything 分岐で `token_score` を一切通しておらず、
+/// Everything 自身の既定順序をそのまま返していた。つまり**引擎を切り替えると並び順の
+/// 意味が黙って変わり**、短名優先も新鮮度も効かない。UI 上その説明はどこにも無い。
+///
+/// 限界（正直に）：候補集合そのものは Everything が `set_max` で切った後のものなので、
+/// 「関連度上位 N」ではなく「Everything の既定順で上位 N を関連度で並べ直したもの」。
+/// 完全に揃えるには全件取得が要るが、全盘検索でそれは非現実的。可視部分の順序は揃う。
+///
+/// 額外目录加点は付けない —— Everything は全盘を見るので EXTRA_DIRS という概念が対応しない。
+fn rerank_everything(mut results: Vec<FileSearchResult>, query: &str) -> Vec<FileSearchResult> {
+    let q = query.trim().to_lowercase();
+    let tokens: Vec<&str> = q.split_whitespace().collect();
+    if tokens.is_empty() {
+        return results;
+    }
+    let now = now_unix();
+    let score_of = |r: &FileSearchResult| -> i32 {
+        let name_lower = r.name.to_lowercase();
+        let mut total = 0i32;
+        for t in &tokens {
+            match token_score(t, &name_lower) {
+                Some(s) => total += s,
+                // Everything の構文（`ext:` やワイルドカード等）ではファイル名に
+                // クエリ語が現れないことがある。落とさずに最下位へ置く。
+                None => return i32::MIN,
+            }
+        }
+        total += SHORT_NAME_BONUS_MAX - (r.name.len() as i32).min(SHORT_NAME_BONUS_MAX);
+        total += recency_bonus(r.mtime, now);
+        total
+    };
+    // sort_by_cached_key：score_of は都度 to_lowercase する（比較のたびに再計算させない）。
+    // 降順は Reverse で表す —— ⚠️ **符号反転(-score)は使えない**：非命中の番兵が i32::MIN で、
+    // -i32::MIN は i32 に収まらず overflow パニックになる（`ext:txt` のような Everything 構文で
+    // 実際に踏む。テストで検出済み）。同点は名前の短い順（内置の tie-break と揃える）。
+    results.sort_by_cached_key(|r| (std::cmp::Reverse(score_of(r)), r.name.len()));
+    results
 }
 
 /// 文件夹图标的哨兵 key——文件夹无扩展名（ext=""），用独立 key 避免与「无扩展名文件」碰撞。
@@ -380,7 +514,8 @@ fn fill_icons_from_cache(mut results: Vec<FileSearchResult>) -> Vec<FileSearchRe
 pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
     let results = if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
         match crate::everything::query(&query, limit.min(QUERY_LIMIT_CAP)) {
-            Ok(r) => r,
+            // 続117：内置と同じ物差しで並べ直してから返す（rerank_everything の説明を参照）
+            Ok(r) => rerank_everything(r, &query),
             Err(e) => {
                 eprintln!("[everything] 查询失败，降级内置: {e}");
                 builtin_search(&query, limit)
@@ -431,6 +566,221 @@ pub fn set_search_engine(engine: String) {
 mod tests {
     use super::*;
     use std::fs;
+
+    /// 分層予算の検算（続117）。エントリ単位の加点 3 種の合計が層間ギャップを超えないこと。
+    /// **定数をいじると真っ先に落ちるのがこれ** —— 超えた瞬間「ぼんやり一致が正確な一致を
+    /// 追い抜く」という、症状だけ見ても原因に辿り着けない壊れ方をする。
+    #[test]
+    fn layer_invariant_budget_holds() {
+        let sum = EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX;
+        assert!(
+            sum < LAYER_GAP,
+            "エントリ単位加点の合計 {sum} が層間ギャップ {LAYER_GAP} 以上。\
+             額外目录にある短い最近のファイルが、名前に直接含む一致を追い抜く。\
+             どれかの定数を下げること。"
+        );
+        // ギャップの由来自体も固定しておく（token_score / subseq_score をいじったとき気づけるように）
+        let substring_worst = 2000 - 500; // 位置ペナルティ最大の子串命中
+        let subseq_best = 1000; // subseq_score の .min(1000)
+        assert_eq!(substring_worst - subseq_best, LAYER_GAP, "層間ギャップの前提が変わっている");
+    }
+
+    // テスト用の IndexEntry 組み立て（グローバルに触れないので並行に増やしてよい）
+    fn ent(name: &str, mtime: u64, extra: bool) -> IndexEntry {
+        IndexEntry {
+            path: format!("C:\\x\\{name}"),
+            name: name.to_string(),
+            name_lower: name.to_lowercase(),
+            ext: String::new(),
+            is_dir: false,
+            extra,
+            mtime,
+        }
+    }
+
+    /// LAYER_GAP=500 という前提そのものを**実際の文字列で**裏取りする（続117）。
+    /// layer_invariant_budget_holds は数値の突き合わせなので、token_score / subseq_score の
+    /// 中身をいじって層の境界がずれた場合は素通りしてしまう。こちらがその穴を塞ぐ。
+    #[test]
+    fn token_score_layer_bounds_hold() {
+        // 子串命中の**最悪**ケース：クエリが 500 文字目以降に現れ、位置ペナルティが飽和する。
+        // 非現実的な長さだが、式が許す下限はここ。
+        let far = format!("{}rpt.md", "x".repeat(600));
+        let lo = token_score("rpt", &far).expect("子串なので必ず命中");
+        assert!(lo >= 1500, "子串命中の下限が 1500 を割った（LAYER_GAP の前提が崩れる）: {lo}");
+
+        // 子序列の**最良**ケース：全文字が word-start に当たり続けて頭打ちに達する。
+        // "a_a_a_..." に対して "aaa...a" —— 下線のせいで子串にはならず子序列へ落ちる。
+        let q = "a".repeat(60);
+        let name = "a_".repeat(60);
+        let hi = token_score(&q, &name).expect("子序列として命中するはず");
+        assert!(hi <= 1000, "子序列の上限 1000 を超えた（LAYER_GAP の前提が崩れる）: {hi}");
+        assert_eq!(hi, 1000, "この入力は頭打ちに達するはず（達していないとテストが緩い）: {hi}");
+
+        assert_eq!(lo - hi, LAYER_GAP, "実測した層間ギャップが LAYER_GAP と食い違う");
+    }
+
+    /// 続117 の本丸：新鮮度は**同層内の並びしか動かしてはいけない**。
+    /// 「昨日更新した*ぼんやり一致*」が「1 年前の*名前に直接含む一致*」を追い抜いたら、
+    /// ユーザーから見て検索が壊れている。予算計算（layer_invariant_budget_holds）が
+    /// 数値の上で保証している性質を、実際のスコア関数で確かめる。
+    ///
+    /// ⚠️ **境界ギリギリで組むこと**。素朴な例（短いクエリ）だと子串 ~2200 対 子序列 ~500 と
+    /// 差が開きすぎて、予算を壊しても素通りしてしまう（実際 RECENCY_BONUS_MAX=200 に
+    /// 上げる逆検証でこのテストだけ通ってしまい、緩さが露呈した）。
+    /// そこで**両側とも最悪／最良ケース**で組む：
+    ///   子串側 = 位置ペナルティ飽和・長名で短名加点ゼロ・古い・通常目录 → ちょうど 1500
+    ///   子序列側 = 頭打ち 1000 ＋ 額外目录 300 ＋ 今日更新 120 → 1420
+    /// 余裕はわずか 80。予算を少しでも超えれば即座に落ちる。
+    #[test]
+    fn recency_never_crosses_match_layers() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let q = "a".repeat(60);
+        let tokens = [q.as_str()];
+
+        // 子序列側：頭打ちに達する長名（＝短名加点は 0）＋ 額外目录 ＋ 今日更新
+        let mut fuzzy_fresh = ent("", now, true);
+        let fname = "a_".repeat(60);
+        fuzzy_fresh.name = fname.clone();
+        fuzzy_fresh.name_lower = fname;
+
+        // 子串側：クエリが 600 文字目に現れる（位置ペナルティ飽和）＋ 10 年前 ＋ 通常目录
+        let mut exact_old = ent("", now - 3650 * DAY, false);
+        let xname = format!("{}{}.md", "x".repeat(600), q);
+        exact_old.name = xname.clone();
+        exact_old.name_lower = xname;
+
+        let f = entry_score(&tokens, &fuzzy_fresh, now).expect("子序列は命中するはず");
+        let x = entry_score(&tokens, &exact_old, now).expect("子串は命中するはず");
+        assert_eq!(f, 1000 + EXTRA_DIR_BONUS + RECENCY_BONUS_MAX, "子序列側が想定の最良ケースになっていない");
+        assert_eq!(x, 1500, "子串側が想定の最悪ケースになっていない");
+        assert!(
+            x > f,
+            "分層不変量が破れた：古い子串一致({x}) が 新しい子序列一致({f}) に負けている。\
+             エントリ単位加点の合計が LAYER_GAP を食い潰していないか確認すること。"
+        );
+    }
+
+    /// 効くべきところでは効くこと：**同名・同層**なら新しい方が上（続117 の狙いそのもの）。
+    /// これが無いと「安全側に倒して実質何も起きていない」変更と区別できない。
+    #[test]
+    fn recency_breaks_ties_among_same_name() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let fresh = ent("report.md", now - 2 * DAY, false); // 今週
+        let stale = ent("report.md", now - 800 * DAY, false); // 2 年以上前
+        let a = entry_score(&["report"], &fresh, now).unwrap();
+        let b = entry_score(&["report"], &stale, now).unwrap();
+        assert!(a > b, "同名同層では新しい方が上のはず（{a} vs {b}）");
+        assert_eq!(a - b, RECENCY_BONUS_MAX, "差は新鮮度加点ちょうどのはず（他の要素は同一）");
+    }
+
+    /// mtime 取得不可（0）でも順位が壊れないこと。ネットワークドライブ等で実際に起こる。
+    /// 「時刻が取れない = 最古扱い」で、他の加点は従来どおり効く。
+    #[test]
+    fn missing_mtime_degrades_gracefully() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let unknown = ent("report.md", 0, false);
+        let ancient = ent("report.md", now - 3650 * DAY, false);
+        assert_eq!(
+            entry_score(&["report"], &unknown, now).unwrap(),
+            entry_score(&["report"], &ancient, now).unwrap(),
+            "mtime 不明は最古と同点（加点なし）であるべき"
+        );
+        // 額外目录の加点は mtime とは独立に効き続ける（続111b の修正を壊さない）
+        let unknown_extra = ent("report.md", 0, true);
+        assert!(
+            entry_score(&["report"], &unknown_extra, now).unwrap()
+                > entry_score(&["report"], &unknown, now).unwrap(),
+            "mtime 不明でも EXTRA_DIR_BONUS は効くべき"
+        );
+    }
+
+    fn res(name: &str, mtime: u64) -> FileSearchResult {
+        FileSearchResult {
+            path: format!("C:\\x\\{name}"),
+            name: name.to_string(),
+            ext: String::new(),
+            is_dir: false,
+            icon: None,
+            mtime,
+        }
+    }
+
+    /// Everything 結果の並べ直し（続117）。引擎を切り替えても順序の**意味**が変わらないこと。
+    #[test]
+    fn rerank_everything_matches_builtin_semantics() {
+        const DAY: u64 = 86_400;
+        let now = now_unix();
+        // Everything の既定順（名前順など）を模して、わざと「良い候補が後ろ」の並びで渡す
+        let input = vec![
+            res("zzz_unrelated_but_contains_report_deep_in_name.md", now - 900 * DAY),
+            res("r_e_p_o_r_t.md", now),           // 子序列でしか当たらない（新しくても下位のはず）
+            res("report.md", now - 900 * DAY),    // 子串・短名・古い
+            res("report_draft.md", now - 1 * DAY),// 子串・やや長い・今週
+        ];
+        let out = rerank_everything(input, "report");
+        let names: Vec<&str> = out.iter().map(|r| r.name.as_str()).collect();
+        // ① 子序列一致は必ず最下位（分層不変量。Everything 経由でも崩れてはいけない）
+        assert_eq!(
+            names.last(),
+            Some(&"r_e_p_o_r_t.md"),
+            "子序列一致が最下位に来ていない: {names:?}"
+        );
+        // ② 前缀一致の 2 件が、名前の途中でしか当たらない zzz_... より上
+        let i_zzz = names.iter().position(|n| n.starts_with("zzz")).unwrap();
+        let i_rep = names.iter().position(|n| *n == "report.md").unwrap();
+        let i_draft = names.iter().position(|n| *n == "report_draft.md").unwrap();
+        assert!(i_rep < i_zzz && i_draft < i_zzz, "前缀一致が位置ペナルティ組より下: {names:?}");
+        // ③ **同層内では新鮮度が決める**（続117 の狙いそのもの）。
+        //    ここでは report_draft.md（今週）が report.md（900日前）より上に来る。
+        //    ⚠️ 設計上の取捨：短名加点は「轻微」(差 6) なのに対し新鮮度は 120 なので、
+        //    完全一致の短い名前でも 1 年以上放置されていれば、新しい長い名前に抜かれる。
+        //    「探しているのは大抵さっき触ったやつ」という前提を採る以上これは意図どおり。
+        //    もし「完全一致は常に最上位」にしたくなったら、専用の加点を足すのではなく
+        //    **層を分ける**こと（加点で殴ると LAYER_GAP の予算を食い潰す）。
+        assert!(
+            i_draft < i_rep,
+            "同層内で新鮮度が効いていない（続117 の主目的）: {names:?}"
+        );
+    }
+
+    /// Everything の構文（`ext:` 等）でファイル名にクエリ語が出ない結果を**落とさない**こと。
+    /// 落とすと「Everything では検索できるのに本アプリでは消える」という最悪の挙動になる。
+    #[test]
+    fn rerank_everything_keeps_non_name_matches() {
+        let input = vec![res("alpha.txt", 0), res("beta.txt", 0)];
+        let out = rerank_everything(input, "ext:txt");
+        assert_eq!(out.len(), 2, "名前に当たらない結果が捨てられている");
+    }
+
+    /// 空クエリでは並べ替えない（Everything 側の順序をそのまま尊重）。
+    #[test]
+    fn rerank_everything_noop_on_empty_query() {
+        let input = vec![res("b.txt", 0), res("a.txt", 0)];
+        let out = rerank_everything(input, "   ");
+        assert_eq!(out[0].name, "b.txt", "空クエリで並びを触ってはいけない");
+    }
+
+    /// 新鮮度の階段そのもの（続117）。境界と、未来時刻で下駄を履かせないことを見る。
+    #[test]
+    fn recency_bonus_steps() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY; // 十分大きい基準時刻（10年前を引いても負にならない）
+        assert_eq!(recency_bonus(0, now), 0, "mtime 取得不可は加点なし");
+        assert_eq!(recency_bonus(now, now), RECENCY_BONUS_MAX, "今 = 最上段");
+        assert_eq!(recency_bonus(now - 7 * DAY, now), RECENCY_BONUS_MAX, "7日ちょうどは最上段に含む");
+        assert_eq!(recency_bonus(now - 7 * DAY - 1, now), 70, "7日超で次段へ");
+        assert_eq!(recency_bonus(now - 30 * DAY, now), 70);
+        assert_eq!(recency_bonus(now - 30 * DAY - 1, now), 25);
+        assert_eq!(recency_bonus(now - 365 * DAY, now), 25);
+        assert_eq!(recency_bonus(now - 365 * DAY - 1, now), 0, "1年超は加点なし");
+        // 時計ずれ / ネットワークドライブで未来時刻になることは実際にある。
+        // saturating_sub で age=0 に飽和 → 最上段。パニックも負値加点も起こさない。
+        assert_eq!(recency_bonus(now + 9999 * DAY, now), RECENCY_BONUS_MAX, "未来時刻は最上段に飽和");
+    }
 
     /// 额外目录端到端契约（跑真实的 set_search_dirs 命令，含其后台重建与图标预热）：
     /// 调用后，EXTRA_DIRS 里的文件必须在有限时间内出现在 FILE_INDEX，且能被 builtin_search 查到。
