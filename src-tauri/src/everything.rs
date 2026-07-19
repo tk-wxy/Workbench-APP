@@ -19,12 +19,12 @@ use std::sync::{Mutex, OnceLock};
 
 // Everything SDK 请求标志：要完整路径 + 文件名。
 const EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME: u32 = 0x0000_0004;
-/// 更新時刻も要求する（続117）。ランキングの新鮮度加点に使う。
-/// **Everything 自身の索引から返る**ので、こちらがディスクを stat する必要はない
-/// ——「查询命令はメモリのみ・ディスクに触れない」という鉄則を守れる唯一の入手経路。
+/// 一并请求修改时间（续117），用于排序的新鲜度加分。
+/// **它来自 Everything 自己的索引**，我们不需要去 stat 磁盘
+/// ——这是能守住「查询命令只读内存、不碰磁盘」这条铁律的唯一取值途径。
 const EVERYTHING_REQUEST_DATE_MODIFIED: u32 = 0x0000_0040;
 
-/// FILETIME(1601-01-01 起算・100ns 単位) → Unix 秒。範囲外／未設定は 0（= 加点なし）へ落とす。
+/// FILETIME(自 1601-01-01 起、100ns 为单位) → Unix 秒。越界／未设置一律落到 0（= 不加分）。
 const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
 fn filetime_to_unix(ft: u64) -> u64 {
     let secs = ft / 10_000_000;
@@ -52,9 +52,9 @@ struct EverythingApi {
     is_folder: FnIsFolder,
     get_major_version: FnU32,
     get_last_error: FnU32,
-    /// 続117。**必須にしない**（Option）——古い SDK DLL にこの関数が無い場合、
-    /// try_load を丸ごと失敗させると Everything 連携そのものが死ぬ。
-    /// 解決できなければ mtime=0 → 新鮮度加点なしに退化するだけで、他は従来どおり動く。
+    /// 续117。**不设为必需**（Option）——旧版 SDK DLL 里若没有这个函数，
+    /// 让 try_load 整体失败会把 Everything 集成本身搞死。
+    /// 解析不到就退化成 mtime=0 → 没有新鲜度加分而已，其余照常工作。
     get_date_modified: Option<FnGetDateModified>,
 }
 
@@ -90,7 +90,7 @@ unsafe fn try_load(path: &std::ffi::OsStr) -> Option<EverythingApi> {
     let is_folder = *lib.get::<FnIsFolder>(b"Everything_IsFolderResult\0").ok()?;
     let get_major_version = *lib.get::<FnU32>(b"Everything_GetMajorVersion\0").ok()?;
     let get_last_error = *lib.get::<FnU32>(b"Everything_GetLastError\0").ok()?;
-    // ↓ ここだけ ? を付けない（任意シンボル、上の struct 定義のコメント参照）
+    // ↓ 只有这里不加 ?（可选符号，见上面 struct 定义处的注释）
     let get_date_modified = lib
         .get::<FnGetDateModified>(b"Everything_GetResultDateModified\0")
         .ok()
@@ -179,8 +179,8 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
         }
         let wide: Vec<u16> = q.encode_utf16().chain(std::iter::once(0)).collect();
         (api.set_search)(wide.as_ptr());
-        // 更新時刻はシンボルが取れたときだけ要求する（不要なフラグを立てても Everything 側の
-        // 仕事が増えるだけなので、使えないときは従来どおりのフラグに留める）
+        // 只在符号可用时才请求修改时间（白立标志只会给 Everything 增加无谓的工作，
+        // 用不了时就维持原来的标志）
         let want_mtime = api.get_date_modified.is_some();
         (api.set_request_flags)(if want_mtime {
             EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME | EVERYTHING_REQUEST_DATE_MODIFIED
@@ -215,17 +215,17 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
-            // 更新時刻（続117）。取れなければ 0 = 新鮮度加点なしへ退化。
+            // 修改时间（续117）。取不到就退化为 0 = 不加新鲜度分。
             let mtime = match api.get_date_modified {
                 Some(f) => {
                     let mut ft: u64 = 0;
                     if f(i, &mut ft) != 0 {
                         filetime_to_unix(ft)
                     } else {
-                        0 // この 1 件だけ取れなかった（フォルダ等）
+                        0 // 只有这一条取不到（文件夹等情况）
                     }
                 }
-                None => 0, // 古い SDK DLL
+                None => 0, // 旧版 SDK DLL
             };
             out.push(FileSearchResult {
                 path,
@@ -244,49 +244,49 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
 mod tests {
     use super::*;
 
-    /// FILETIME → Unix 秒（続117）。境界と異常値で破綻しないこと。
+    /// FILETIME → Unix 秒（续117）。边界与异常值下不得出错。
     #[test]
     fn filetime_conversion() {
-        // Unix epoch ちょうど = 1601 から 11644473600 秒
+        // 恰好 Unix epoch = 自 1601 起 11644473600 秒
         assert_eq!(filetime_to_unix(FILETIME_UNIX_EPOCH_DIFF_SECS * 10_000_000), 0);
-        // その 1 日後
+        // 再往后 1 天
         assert_eq!(
             filetime_to_unix((FILETIME_UNIX_EPOCH_DIFF_SECS + 86_400) * 10_000_000),
             86_400
         );
-        // 0（未設定 / 取得失敗）は 0 へ。saturating_sub なので負に回り込まない
-        assert_eq!(filetime_to_unix(0), 0, "未設定の FILETIME は 0 = 加点なしへ落ちるべき");
-        // 1601〜1970 の間の値も 0 へ飽和（recency_bonus 側で「不明」と同じ扱いになる）
+        // 0（未设置 / 取值失败）落到 0。用的是 saturating_sub，不会回绕成负数
+        assert_eq!(filetime_to_unix(0), 0, "未设置的 FILETIME 应落到 0 = 不加分");
+        // 1601~1970 之间的值也饱和到 0（在 recency_bonus 侧与「未知」同等对待）
         assert_eq!(filetime_to_unix(1_000 * 10_000_000), 0);
     }
 
-    /// 診断用（既定 #[ignore]、手動実行：
+    /// 诊断用（默认 #[ignore]，手动执行：
     ///   cargo test --lib everything::tests::probe_sdk_symbols -- --ignored --nocapture）
     ///
-    /// 実機の Everything64.dll が続117 で追加した任意シンボル
-    /// `Everything_GetResultDateModified` を実際に export しているかを見る。
-    /// Everything 本体（サービス）が動いていなくても DLL のロードとシンボル解決は確認できる
-    /// ——クエリ経路そのものは無頭環境では driveできないので、ここまでが機械的に検証できる限界。
+    /// 看实机的 Everything64.dll 是否真的导出了续117 用到的可选符号
+    /// `Everything_GetResultDateModified`。
+    /// 即使 Everything 本体（服务）没运行，DLL 加载与符号解析仍可确认
+    /// ——查询路径本身在无头环境下驱动不了，所以这里就是机械验证能到达的边界。
     #[test]
     #[ignore]
     fn probe_sdk_symbols() {
         let api = load_api();
         match api {
-            None => println!("Everything64.dll をロードできず（候補パスに無い）。判定不能。"),
+            None => println!("加载不到 Everything64.dll（候选路径里没有）。无法判定。"),
             Some(a) => {
-                println!("DLL ロード成功");
+                println!("DLL 加载成功");
                 println!(
                     "  Everything_GetResultDateModified: {}",
                     if a.get_date_modified.is_some() {
-                        "あり → 新鮮度加点が効く"
+                        "存在 → 新鲜度加分可生效"
                     } else {
-                        "無し → mtime=0 に退化（関連度のみで並ぶ。他機能は従来どおり）"
+                        "不存在 → 退化为 mtime=0（只按相关度排序，其余功能不受影响）"
                     }
                 );
                 let ver = unsafe { (a.get_major_version)() };
                 println!(
                     "  Everything_GetMajorVersion: {ver}{}",
-                    if ver == 0 { "（= サービス未起動。クエリ経路は検証不可）" } else { "" }
+                    if ver == 0 { "（= 服务未启动，查询路径无法验证）" } else { "" }
                 );
             }
         }
