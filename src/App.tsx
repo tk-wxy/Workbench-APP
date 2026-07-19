@@ -30,6 +30,10 @@ const ENH_MIN_SECTION = 3;
 // 命中缓存则**立即出**（不等防抖），来回移动时面板不闪。
 const PREVIEW_DEBOUNCE_MS = 130;
 const PREVIEW_CACHE_MAX = 300; // 超出直接整表清空：预览是纯展示，重取代价低，不值得上 LRU
+// 增强搜索列表的 hover 选中驻留门槛（续118）。指针在某行连续停留超过这个时长才提交选中变更。
+// 70ms 的依据：擦过一行通常 <30ms，有意停留远超 70ms，两者区分得干净；而预览面板本就有
+// 130ms 元数据防抖，再叠 70ms 仍在既有延迟特征内，手感不会变钝。
+const HOVER_DWELL_MS = 70;
 const ENH_FILE_LIMIT_BUILTIN = 50;
 const ENH_FILE_LIMIT_EVERYTHING = 200;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
@@ -710,6 +714,46 @@ export default function App() {
     (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number; everythingAvailable: boolean }>("get_index_status"); setIndexReady(s.ready); setEverythingAvailable(!!s.everythingAvailable); } catch {} })();
   }, [enhOpen, settingsOpen, searchEngine]);
 
+  // ── 增强搜索 hover 选中的门控（续118）────────────────────────────────────────
+  //
+  // 裸 `onMouseEnter={()=>setEnhSelIdx(i)}` 有两个失效，症状都是「信息栏莫名其妙跳、
+  // 跟着点错东西」，但根因不同，故两道门各治一个：
+  //
+  // ① **位移门**（治「键盘导航被静止的鼠标劫持」）：下面那个 scrollIntoView 会在 ↑↓ 时滚动列表，
+  //    于是**鼠标没动、它底下的行却换了**，浏览器照样派发 mouseenter → 选中被拽回鼠标位置，
+  //    可能再次触发滚动。故要求「指针坐标相对上一次真实 mousemove 确有变化」才放行。
+  //    真实移动时 mouseenter 先于该位置的 mousemove 派发，故此时 enter 的坐标必然 ≠ 已记录值；
+  //    滚动导致的 enter 坐标则与已记录值完全相同 —— 靠这个差异区分，无需监听 scroll。
+  //
+  // ② **驻留门**（治「去预览面板路上蹭到邻行」）：预览面板在列表**左外侧**，去点它的按钮必须
+  //    横向穿越，轨迹稍斜就会扫过上下邻行，每扫一行都换一次预览 → 走到面板时对象已经变了
+  //    （经典的菜单对角线问题）。故 hover 不立即提交，先等 HOVER_DWELL_MS；中途离开即取消。
+  //
+  // 为什么不拆 enhSelIdx 成「键盘光标」和「hover 预览」两个状态：它同时是 Enter 的目标，
+  // 而 enhResults[0] / Enter 行为的稳定性是续114b 明确维护的不变量，拆开风险远大于收益。
+  const hoverPosRef = useRef({ x: -1, y: -1 });   // 最近一次**真实** mousemove 的视口坐标
+  const hoverTimerRef = useRef<number | null>(null);
+  const cancelHoverSelect = useCallback(() => {
+    if (hoverTimerRef.current !== null) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
+  }, []);
+  // 键盘导航时清掉待定的 hover 提交，否则 70ms 窗口内的按键会被随后落地的 hover 覆盖回去
+  const selectByKeyboard = useCallback((next: number | ((i: number) => number)) => {
+    cancelHoverSelect();
+    setEnhSelIdx(next as never);
+  }, [cancelHoverSelect]);
+  const onEnhRowEnter = useCallback((idx: number, e: React.MouseEvent) => {
+    const p = hoverPosRef.current;
+    if (e.clientX === p.x && e.clientY === p.y) return; // ① 指针没动 = 滚动造成的，不是用户意图
+    cancelHoverSelect();
+    hoverTimerRef.current = window.setTimeout(() => {   // ② 驻留够久才算数
+      hoverTimerRef.current = null;
+      setEnhSelIdx(idx);
+    }, HOVER_DWELL_MS);
+  }, [cancelHoverSelect]);
+  // 关闭增强搜索时清掉待定提交（否则关掉后定时器落地会改已失效的下标）。
+  // 结果集变化时的清理放在 enhResults 声明之后（见那里）——此处引用不到它。
+  useEffect(() => { if (!enhOpen) cancelHoverSelect(); }, [enhOpen, cancelHoverSelect]);
+
   // 长结果列表下让键盘选中项滚入视野（否则 ↑↓ 导航会移出可视区）
   useEffect(() => {
     if (!enhOpen) return;
@@ -763,6 +807,9 @@ export default function App() {
 
   // 扁平结果：↑↓/Enter/激活全部照旧读它，分段对这些路径完全透明
   const enhResults = useMemo<EnhResult[]>(() => enhSections.flatMap(s => s.items), [enhSections]);
+  // 结果集变化时清掉待定的 hover 提交（续118）：边打字边把鼠标停在某行时，结果会在
+  // 驻留窗口内被换掉，此时旧下标已指向另一个条目——让定时器落地就是选中了不相干的东西。
+  useEffect(() => cancelHoverSelect, [enhResults, cancelHoverSelect]);
   // 每段首项的下标：Ctrl+↑↓ 跨段跳转的边界表（取代续114 硬编码的 enhTier1.length）
   const enhSectionStarts = useMemo<number[]>(() => {
     const starts: number[] = []; let acc = 0;
@@ -2001,17 +2048,19 @@ export default function App() {
           const st = enhSectionStarts;
           if(e.key==="ArrowDown"){
             const nxt = st.find(s => s > enhSelIdx);      // 下一段段首；已在末段则不动
-            if(nxt !== undefined) setEnhSelIdx(nxt);
+            if(nxt !== undefined) selectByKeyboard(nxt);
           }else{
             // 先回本段段首，已在段首才跳上一段（编辑器里「上一段」的通行语义，一个键给出两种粒度）
             const curStart = [...st].reverse().find(s => s <= enhSelIdx) ?? 0;
-            if(enhSelIdx > curStart) setEnhSelIdx(curStart);
-            else { const prv = [...st].reverse().find(s => s < curStart); if(prv !== undefined) setEnhSelIdx(prv); }
+            if(enhSelIdx > curStart) selectByKeyboard(curStart);
+            else { const prv = [...st].reverse().find(s => s < curStart); if(prv !== undefined) selectByKeyboard(prv); }
           }
           return;
         }
-        if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
-        else if(e.key==="ArrowUp"){e.preventDefault();setEnhSelIdx(i=>Math.max(i-1,0));}
+        // ↓ selectByKeyboard = setEnhSelIdx + 清掉待定的 hover 提交（续118）。
+        //   直接用 setEnhSelIdx 会让 70ms 窗口内落地的 hover 把刚按的键覆盖回去。
+        if(e.key==="ArrowDown"){e.preventDefault();selectByKeyboard((i:number)=>Math.min(i+1,enhResults.length-1));}
+        else if(e.key==="ArrowUp"){e.preventDefault();selectByKeyboard((i:number)=>Math.max(i-1,0));}
         else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
         return;
       }
@@ -2286,7 +2335,10 @@ export default function App() {
         {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null)}
         {/* 结果区：列表恒居中；预览由 CSS 绝对定位挂在本容器左外侧，不参与布局流 */}
         <div className="enh-body">
-        <div className="enh-results">
+        {/* onMouseMove 只记坐标（写 ref、零渲染），供行的 mouseenter 判定「指针是否真的动过」——
+            见上方 onEnhRowEnter 的位移门说明。挂容器而非每行，避免 N 个监听器。 */}
+        <div className="enh-results"
+          onMouseMove={e=>{ hoverPosRef.current = { x: e.clientX, y: e.clientY }; }}>
           {enhResults.length ? enhResults.map((r,i)=>{
             const key = enhKey(r);
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
@@ -2305,7 +2357,8 @@ export default function App() {
               <Fragment key={key}>
                 {divider}
                 <div className={`enh-result${i===enhSelIdx?" selected":""}`}
-                  onMouseEnter={()=>setEnhSelIdx(i)}
+                  onMouseEnter={e=>onEnhRowEnter(i,e)}
+                  onMouseLeave={cancelHoverSelect}
                   onContextMenu={e=>openEnhCtxMenu(e,r)}
                   onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
                   <div className="enh-result-icon">{icon}</div>
