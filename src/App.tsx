@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, dirOf, fmtDateTime, type FileCat, type FileGroup } from "./lib/format";
+import { IMG_EXTS, fmtSize, ago, agoSec, dirOf, fmtDateTime, fileCategory, catToGroup, type FileCat, type FileGroup } from "./lib/format";
 import { groupFiles } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
@@ -822,52 +822,70 @@ export default function App() {
     const info = meta?.info ?? null;
     // rtl：只给「位置」行——用 direction:rtl 让超长路径省略头部、保住尾部（文件名侧）。
     // 绝不能全表铺开：时间/大小含中性字符，RTL 排版会把它们的标点顺序弄错。
-    const rows: { label: string; value: string; rtl?: boolean; pending?: boolean }[] = [];
-    const push = (label: string, value?: string | null, rtl?: boolean) => { if (value) rows.push({ label, value, rtl }); };
-    const fileRows = (path: string, extHint?: string, isDir?: boolean) => {
-      push(t("位置"), dirOf(path), true);
-      push(t("类型"), isDir ? t("文件夹") : ((extHint || info?.ext || "").replace(/^\./, "").toUpperCase() || t("文件")));
-      // ↓ 三行**恒占位**：它们的值要等 get_file_info 回来。若按「有值才渲染」，面板会在元数据
-      // 到达的瞬间长高——肉眼可见的抖动（用户实测反馈的正是这个）。故行数由同步已知的 isDir 定死：
-      //   加载中 →「…」；加载完但该字段确实缺失（网络盘常无创建时间）→「—」。两种结局高度都不变。
-      // 不给整个面板写死高度：文本预览与文件信息的内容量差很多，写死会让短内容拖一片空白。
-      // pending 看的是「元数据是否已返回」(meta) 而非「值是否非空」(info)：取失败时 info 为 null
-      // 但 meta 已到，此时该显示「—」而不是永远停在「…」（否则失败与加载中无法区分）。
+    // 続116 の情報設計：この面板の仕事は「属性ダイアログ」ではなく **消歧（これで合ってる？）**。
+    // 判断材料を 3 層に分ける —— ① 位置 = 最大の消歧材料（同名ファイルが別ディレクトリに散る、
+    // 検索での曖昧さの圧倒的多数）を独立ブロックへ昇格；② stats = 一目で走査する 1〜2 個の事実；
+    // ③ rows = 残りの副次情報。削ったもの：「类型」（徽標＋アイコンで二重に言っている）と
+    // 「创建时间」（Windows ではコピーで作成日時がリセットされ modified より新しくなるのが常態 ——
+    // 消歧に効かないうえ誤解を招く）。
+    const rows: { label: string; value: string; rtl?: boolean; pending?: boolean; title?: string }[] = [];
+    const stats: { label: string; value: string; title?: string; pending?: boolean }[] = [];
+    let loc: string | null = null;
+    const push = (label: string, value?: string | null, rtl?: boolean, title?: string) => { if (value) rows.push({ label, value, rtl, title }); };
+    const fileFacts = (path: string, isDir?: boolean) => {
+      loc = dirOf(path);
+      // ↓ stats の**枠数は同期既知の isDir だけで確定**させる（値の有無で出し分けない）。値は
+      // get_file_info 待ち。「値があれば描く」方式だとメタデータ到着の瞬間に面板が伸びて目に見えて
+      // 揺れる（続115 で実測・報告済みの症状）。読込中→「…」／取得できたが欠損→「—」、どちらも高さ同一。
+      // pending が見るのは「メタが返ったか」(meta) であって「値が非空か」(info) ではない：取得失敗時は
+      // info=null だが meta は到着済みなので「—」を出すべき（失敗と読込中が区別できなくなる）。
       const pending = !meta;
-      const slot = (v?: number | null) => pending ? "…" : (v ? fmtDateTime(v) : "—");
-      if (!isDir) rows.push({ label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending });
-      rows.push({ label: t("修改时间"), value: slot(info?.modified), pending });
-      rows.push({ label: t("创建时间"), value: slot(info?.created), pending });
+      if (!isDir) stats.push({ label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending });
+      // 相対表記を主にする：ここは「いつ正確に」ではなく「最近いじったやつか」を走査する場面。
+      // 絶対値は title で hover 参照（続116。以前は絶対時刻 2 行が数字の壁になっていた）。
+      stats.push({
+        label: t("修改"),
+        value: pending ? "…" : (info?.modified ? agoSec(info.modified, t) : "—"),
+        title: info?.modified ? fmtDateTime(info.modified) : undefined,
+        pending,
+      });
     };
 
     // photo=true 表示 big 是「照片缩略图」（应铺满裁切）；false 表示是图标（应居中留白）。
     // 混为一谈会把应用图标按 cover 裁掉边缘。
     let title = "", badge = "", big: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
+    // cat = 徽標の色分け用の分類キー。中転/剪貼板の項目は実体の拡張子が無いことがある（テキスト等）
+    // ので、拡張子ではなく FileCat を直接決めて catToGroup で色組へ畳む（format.ts の写像を共用）。
+    let cat: FileCat = "generic";
     if (r.kind === "app") {
-      title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" };
+      title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" }; cat = "exe";
       big = meta?.icon ?? r.app.icon ?? null;
-      fileRows(r.app.path);
+      // アプリは位置だけ：サイズは実行ファイルの大きさで意味が薄く、更新時刻は実質インストール日。
+      // どちらも「これで合ってる？」の判断に効かないので出さない（続116）。
+      loc = dirOf(r.app.path);
     } else if (r.kind === "fs") {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
+      cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
       glyph = r.isDir ? { isDir: true } : { ext: r.ext };
       big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = !!meta?.thumb;
-      fileRows(r.path, r.ext, r.isDir);
+      fileFacts(r.path, r.isDir);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
-      badge = t("中转站");
-      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); glyph = { cat: "doc" }; text = it.content ?? null; push(t("类型"), t("文本")); push(t("字数"), String((it.content || "").length)); }
-      else if (it.type === "image") { title = t("图片"); glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; push(t("类型"), t("图片")); }
-      else { title = r.name; glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileRows(p, it.ext, it.isDir); }
+      // 徽標に「出所 · 種別」を併記（続116）：種別は独立行として持つほどの情報量が無い一方、
+      // 中転/剪貼板では出所だけでは何の項目か分からない。1 個の徽標に畳んで行を 1 本減らす。
+      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; }
+      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileFacts(p, it.isDir); }
       if (it.pinned) push(t("状态"), t("已固定"));
     } else { // clip
       const it = r.item, p = it.items?.[0]?.path;
-      badge = t("剪贴板");
-      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); glyph = { cat: "doc" }; text = it.content ?? null; push(t("类型"), t("文本")); push(t("字数"), String((it.content || "").length)); }
-      else if (it.type === "image") { title = t("图片"); glyph = { isImage: true }; big = it.content ?? null; photo = !!big; push(t("类型"), t("图片")); }
-      else { title = r.name; glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileRows(p, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
-      push(t("复制时间"), fmtDateTime(Math.floor(it.time / 1000))); // ClipItem.time 是毫秒（ago() 按毫秒用）
+      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = !!big; }
+      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileFacts(p); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
+      // 剪貼板項目で唯一効くメタ情報。相対表記＋絶対値は hover（ClipItem.time はミリ秒 → ago 直用）
+      push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
     }
-    return { r, key, title, badge, big, photo, glyph, text, rows, path: enhPath(r) };
+    return { r, key, title, badge, cat, group: catToGroup(cat), big, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
   }, [enhResults, enhSelIdx, previewMeta, stageThumbs, t]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
@@ -2317,16 +2335,36 @@ export default function App() {
                   : <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
               </div>
               <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
-              <div className="enh-pv-badge">{enhPreview.badge}</div>
+              {/* data-group で色を引く（続116）：色は装飾ではなく分類 —— 検索結果のセクション分けと
+                  同じ写像を使うので「徽標の色 == 属するセクション」が常に一致する */}
+              <div className="enh-pv-badge" data-group={enhPreview.group}>{enhPreview.badge}</div>
             </div>
+            {/* 位置＝この面板の主役（続116）。同名ファイルの取り違えは検索での曖昧さの最多ケースで、
+                それを解くのはほぼ常にパス。だから dt/dd の一行ではなく独立ブロックに昇格させた。 */}
+            {enhPreview.loc && (
+              <div className="enh-pv-loc" title={enhPreview.loc}>
+                <IconExplorer size={13} className="enh-pv-loc-ic"/>
+                <span className="enh-pv-loc-t">{enhPreview.loc}</span>
+              </div>
+            )}
             {/* 文本类条目：给一段真正的内容预览，比任何元信息都有用 */}
             {enhPreview.text && <div className="enh-pv-text">{enhPreview.text.slice(0, 600)}</div>}
+            {enhPreview.stats.length > 0 && (
+              <div className="enh-pv-stats">
+                {enhPreview.stats.map((s,i)=>(
+                  <div className="enh-pv-stat" key={i} title={s.title}>
+                    <div className={`enh-pv-stat-v${s.pending?" enh-pv-pending":""}`}>{s.value}</div>
+                    <div className="enh-pv-stat-l">{s.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
             {enhPreview.rows.length > 0 && (
               <dl className="enh-pv-rows">
                 {enhPreview.rows.map((row,i)=>(
                   <Fragment key={i}>
                     <dt>{row.label}</dt>
-                    <dd className={`${row.rtl?"enh-pv-rtl":""}${row.pending?" enh-pv-pending":""}`.trim()||undefined} title={row.value}>{row.value}</dd>
+                    <dd className={`${row.rtl?"enh-pv-rtl":""}${row.pending?" enh-pv-pending":""}`.trim()||undefined} title={row.title ?? row.value}>{row.value}</dd>
                   </Fragment>
                 ))}
               </dl>

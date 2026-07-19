@@ -42,12 +42,11 @@ export const EN_DICT: Record<string, string> = {
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
   "换区": "Switch section",
-  // 增强搜索预览面板（续115）
+  // 增强搜索预览面板（续115、続116 で情報項目を整理）
   "位置": "Location",
-  "类型": "Type",
   "大小": "Size",
-  "修改时间": "Modified",
-  "创建时间": "Created",
+  // stat strip のラベルは 9px の小文字幅 —— 「修改时间」だと折り返すので短縮形を使う
+  "修改": "Modified",
   "复制时间": "Copied",
   "字数": "Characters",
   "数量": "Count",
@@ -233,6 +232,9 @@ export const EN_DICT: Record<string, string> = {
   "刚刚": "Just now",
   "{n}分钟前": "{n}m ago",
   "{n}小时前": "{n}h ago",
+  "{n}天前": "{n}d ago",
+  "{n}个月前": "{n}mo ago",
+  "{n}年前": "{n}y ago",
 };
 
 export function makeT(lang: Lang) {

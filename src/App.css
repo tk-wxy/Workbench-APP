@@ -23,6 +23,17 @@
   --card-thumb-bg: rgba(255,255,255,0.035);
   --card-border-c: rgba(255,255,255,0.10);
   --card-border-hover-c: rgba(255,255,255,0.22);
+  /* 分类色（续116）：预览面板徽标用。色相与「增强搜索结果分段」同一套写像（format.ts catToGroup），
+     故徽标颜色 == 该项所属段落 —— 色是分类的再确认，不是装饰。8 组封顶，再细就成彩虹、
+     反而丢掉「同类=同色」的节奏感。暗色主题下取中高明度以便在 --card-bg 上浮起来。 */
+  --c-folder: #FFC94A;
+  --c-image:  #C77DFF;
+  --c-media:  #FF7AA2;
+  --c-archive:#F08A5D;
+  --c-doc:    #58A6FF;
+  --c-code:   #4FD1C5;
+  --c-exe:    #7EE787;
+  --c-other:  rgba(255,255,255,0.45);
 }
 /* 浅色主题：覆盖配色变量（由 data-theme="light" 触发，置于 :root 之后取胜） */
 [data-theme="light"] {
@@ -40,6 +51,16 @@
   --card-thumb-bg: #f3f3f4;
   --card-border-c: rgba(0,0,0,0.09);
   --card-border-hover-c: rgba(0,0,0,0.20);
+  /* 分类色·浅色主题：同色相を暗く寄せる（白い --card-bg 上での可読性確保。暗色版のままだと
+     淡すぎて文字が読めない）。色相の並び順は暗色版と一致させ、テーマ切替で分類感が崩れないようにする。 */
+  --c-folder: #9A6B00;
+  --c-image:  #8B2FC9;
+  --c-media:  #C2255C;
+  --c-archive:#B85C1E;
+  --c-doc:    #0B65C2;
+  --c-code:   #0E7C73;
+  --c-exe:    #1F7A34;
+  --c-other:  rgba(0,0,0,0.45);
 }
 html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:transparent;font-family:var(--font);color:var(--text);}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
@@ -446,7 +467,44 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-pv-icon-img img{width:100%;height:100%;object-fit:cover;}
 .enh-pv-title{font-size:15px;font-weight:600;color:var(--text);line-height:1.35;
   word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
-.enh-pv-badge{font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 8px;}
+/* 徽标（続116 で色分け）：改修前はこの面板で**最もコントラストの低い**要素（--text3 ＋薄枠）
+   だったのに、「これは何なのか」という最も価値の高い信号を担っていた。分类色を与えて、
+   ①面板唯一の彩度源にする ②↑↓ で送っていくとき同類が同色でリズムが出る、の二役を持たせる。
+   既定は other（無彩）—— data-group が無い/未知でも壊れない。 */
+.enh-pv-badge{font-size:10px;font-weight:600;letter-spacing:0.02em;border-radius:4px;padding:2px 9px;
+  color:var(--c-other);border:1px solid color-mix(in srgb,var(--c-other) 26%,transparent);
+  background:color-mix(in srgb,var(--c-other) 12%,transparent);}
+.enh-pv-badge[data-group="folder"] {color:var(--c-folder); border-color:color-mix(in srgb,var(--c-folder) 30%,transparent); background:color-mix(in srgb,var(--c-folder) 13%,transparent);}
+.enh-pv-badge[data-group="image"]  {color:var(--c-image);  border-color:color-mix(in srgb,var(--c-image) 30%,transparent);  background:color-mix(in srgb,var(--c-image) 13%,transparent);}
+.enh-pv-badge[data-group="media"]  {color:var(--c-media);  border-color:color-mix(in srgb,var(--c-media) 30%,transparent);  background:color-mix(in srgb,var(--c-media) 13%,transparent);}
+.enh-pv-badge[data-group="archive"]{color:var(--c-archive);border-color:color-mix(in srgb,var(--c-archive) 30%,transparent);background:color-mix(in srgb,var(--c-archive) 13%,transparent);}
+.enh-pv-badge[data-group="doc"]    {color:var(--c-doc);    border-color:color-mix(in srgb,var(--c-doc) 30%,transparent);    background:color-mix(in srgb,var(--c-doc) 13%,transparent);}
+.enh-pv-badge[data-group="code"]   {color:var(--c-code);   border-color:color-mix(in srgb,var(--c-code) 30%,transparent);   background:color-mix(in srgb,var(--c-code) 13%,transparent);}
+.enh-pv-badge[data-group="exe"]    {color:var(--c-exe);    border-color:color-mix(in srgb,var(--c-exe) 30%,transparent);    background:color-mix(in srgb,var(--c-exe) 13%,transparent);}
+
+/* 位置ブロック（続116）：この面板の主役。dt/dd の一行から独立ブロックへ昇格させ、
+   フォント/余白/背景で「まず目に入る」位置に置く。パスは direction:rtl で**頭を省略して尻を残す**
+   （ファイル名に近い側のほうが識別に効く）—— dd の .enh-pv-rtl と同じ手。
+   ⚠ rtl はこのブロック限定：時刻/サイズは中性文字を含み、RTL 整形で句読点の順序が壊れる。 */
+.enh-pv-loc{display:flex;align-items:center;gap:7px;min-width:0;
+  background:var(--fill-1);border-radius:7px;padding:7px 9px;}
+.enh-pv-loc-ic{color:var(--text3);flex-shrink:0;}
+.enh-pv-loc-t{direction:rtl;text-align:left;font-size:11.5px;line-height:1.4;color:var(--text2);
+  min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* stat strip（続116）：一目で走査する 1〜2 個の事実だけをここへ。値を大きく・ラベルを小さく置いて
+   「値が主・ラベルが従」の階層を作る（改修前は dt も dd も 11px で、不透明度 0.30/0.55 の差しか
+   なかったため全体が均質な灰色の塊に見えていた＝「平淡」の主因のひとつ）。
+   枠数は同期既知の情報だけで決まる（App.tsx fileFacts のコメント参照）ので、
+   メタ到着で高さが動かない。 */
+.enh-pv-stats{display:flex;gap:10px;}
+.enh-pv-stat{flex:1 1 0;min-width:0;background:var(--fill-1);border-radius:7px;padding:8px 10px;}
+.enh-pv-stat-v{font-size:13px;font-weight:600;color:var(--text);line-height:1.25;
+  /* 数字を等幅に：↑↓ で送るとき桁が揃わないと値がガタガタ動いて見える */
+  font-variant-numeric:tabular-nums;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.enh-pv-stat-l{margin-top:3px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;
+  color:var(--text3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
 /* 文本条目的内容预览：等宽字体 + 保留换行，比任何元信息都有用 */
 .enh-pv-text{font-size:11px;line-height:1.6;color:var(--text2);background:var(--fill-1);
