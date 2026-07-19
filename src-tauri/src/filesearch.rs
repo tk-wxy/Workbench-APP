@@ -842,6 +842,68 @@ mod tests {
         );
     }
 
+    /// Everything クエリ経路の端到端診断（続117b）。**Everything 本体が起動している必要がある**
+    /// ため既定 #[ignore]：
+    ///   cargo test --lib everything_query_e2e -- --ignored --nocapture
+    ///
+    /// 続117 の時点では本機で Everything サービスが止まっており、FFI シンボルの存在までしか
+    /// 確認できていなかった。ここで検証したいのは 3 点：
+    ///   ① DATE_MODIFIED が実際に返ってきているか（mtime が 0 だらけなら新鮮度加点は死んでいる）
+    ///   ② rerank が分層不変量を保っているか（子串一致が子序列一致より上）
+    ///   ③ `ext:` 等の Everything 構文で**パニックしない**か —— 続117 で修した -i32::MIN
+    ///      overflow がまさにこの経路。回帰したら即座にここで落ちる。
+    #[test]
+    #[ignore]
+    fn everything_query_e2e() {
+        if !crate::everything::is_available() {
+            println!("Everything が利用不可（未起動 / DLL 無し）。この診断はスキップ。");
+            return;
+        }
+        let prev = SEARCH_ENGINE.load(Ordering::Relaxed);
+        SEARCH_ENGINE.store(ENGINE_EVERYTHING, Ordering::Relaxed);
+
+        // ── ① 通常クエリ：mtime が返っているか & 並び ──
+        let q = "readme";
+        let raw = crate::everything::query(q, 30).expect("Everything クエリが失敗");
+        let with_mtime = raw.iter().filter(|r| r.mtime > 0).count();
+        println!("\n[{q}] Everything 生結果 {} 件 / うち mtime あり {}", raw.len(), with_mtime);
+        assert!(
+            raw.is_empty() || with_mtime > 0,
+            "結果があるのに mtime が全件 0 —— DATE_MODIFIED 要求が効いていない（新鮮度加点が丸ごと死ぬ）"
+        );
+
+        let now = now_unix();
+        println!("  ── rerank 後の上位 10（[層] 名前 / 更新） ──");
+        let ranked = rerank_everything(raw, q);
+        for r in ranked.iter().take(10) {
+            let layer = if r.name.to_lowercase().contains(q) { "子串  " } else { "子序列" };
+            let age = if r.mtime > 0 {
+                format!("{}日前", now.saturating_sub(r.mtime) / 86_400)
+            } else {
+                "不明".to_string()
+            };
+            println!("    [{layer}] {:<44} {age}", r.name);
+        }
+        // ② 分層不変量：子串一致は必ず子序列一致より上
+        let first_subseq = ranked.iter().position(|r| !r.name.to_lowercase().contains(q));
+        let last_substr = ranked.iter().rposition(|r| r.name.to_lowercase().contains(q));
+        if let (Some(fs), Some(ls)) = (first_subseq, last_substr) {
+            assert!(ls < fs, "分層不変量が破れた：子序列一致({fs}) が子串一致({ls}) より上にいる");
+            println!("  ✓ 分層不変量 OK（子串は {ls} 番目まで / 子序列は {fs} 番目から）");
+        }
+
+        // ── ③ Everything 構文：続117 で修した overflow パニックの経路 ──
+        // 名前にクエリ語が現れないので score_of が番兵 i32::MIN を返す。
+        // 修正前はここで `-i32::MIN` により attempt to negate with overflow で落ちた。
+        for syntax in ["ext:txt", "*.md", "size:>1mb"] {
+            let r = search_files(syntax.to_string(), 20);
+            println!("  [{syntax}] {} 件（パニックせず完走）", r.len());
+        }
+        println!("  ✓ Everything 構文でパニックなし（続117 の -i32::MIN overflow 回帰なし）\n");
+
+        SEARCH_ENGINE.store(prev, Ordering::Relaxed);
+    }
+
     /// 诊断用（默认 #[ignore]，手动跑：cargo test measure_real_rebuild -- --ignored --nocapture）：
     /// 量真实用户目录的「遍历」与「图标预热」各自耗时——set_search_dirs 的后台重建要把这两步全跑完
     /// 才会原子替换 FILE_INDEX，这段时间内新加的目录搜不到。
