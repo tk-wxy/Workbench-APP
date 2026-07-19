@@ -36,8 +36,8 @@ const PREVIEW_CACHE_MAX = 300; // 超出直接整表清空：预览是纯展示�
 // 70ms 的依据：擦过一行通常 <30ms，有意停留远超 70ms，两者区分得干净；而预览面板本就有
 // 130ms 元数据防抖，再叠 70ms 仍在既有延迟特征内，手感不会变钝。
 const HOVER_DWELL_MS = 70;
-const ENH_FILE_LIMIT_BUILTIN = 50;
-const ENH_FILE_LIMIT_EVERYTHING = 200;
+const ENH_FILE_LIMIT_BUILTIN = 150;
+const ENH_FILE_LIMIT_EVERYTHING = 500;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）

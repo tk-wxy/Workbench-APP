@@ -30,6 +30,9 @@ pub struct IndexEntry {
     pub is_dir: bool,
     /// 是否来自用户手动添加的额外扫描目录（EXTRA_DIRS）。查询时据此加分，见 EXTRA_DIR_BONUS。
     pub extra: bool,
+    /// パス深さ（区切り数、続122）。索引時に一度だけ算出 —— 查询ごとに 8 万件分の
+    /// パス文字列を走査し直すのは無駄なので、ここに畳んでおく。
+    pub depth: u8,
     /// 最終更新時刻（Unix 秒、0 = 取得不可）。続117 で追加 —— 新鮮度加点の入力。
     /// **索引に持たせる**のが要点：查询命令は「メモリのみ・ディスクに触れない」が鉄則なので、
     /// 検索のたびに stat する案は取れない。Windows のディレクトリ列挙（FindFirstFile）は
@@ -82,38 +85,86 @@ const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全
 /// 却搜不到里面的东西"（实测：vue-app/index.html 排第 71/79、README.md 排第 345/436）。
 /// home 排在前面纯属遍历顺序的副产品、并无道理；而"用户手动添加了这个目录"本身是明确的意图信号。
 ///
-/// 取值 300 的依据：必须**小于**「子串命中(≥1500)」与「子序列模糊(≤1000)」两层的间距，
-/// 使额外目录的模糊命中(≤1300)仍排在用户目录的子串命中(≥1500)之后——即不破坏
-/// token_score 那条「直接含永远排在拆字母前」的分层不变量，只翻转同层内的并列。
-/// 按条目加一次（非按 token），故与 `60 - name.len()` 短名加分同处一行之后。
+/// 取值 300 的依据：与短名/新鲜度加分合计必须**小于相邻层带的最小间距**（见下方分层定义），
+/// 使额外目录的模糊命中仍排在普通目录的子串命中之后——即不破坏 token_score 那条
+/// 「直接含永远排在拆字母前」的分层不变量，只翻转同层内的并列。
+/// 按条目加一次（非按 token）。⚠️ 具体数值随续121 的分层重设计而变，检算见 ENTRY_BONUS_BUDGET。
 const EXTRA_DIR_BONUS: i32 = 300;
 
-// ── 分層加点の予算（続117 で明文化）──────────────────────────────────────────
+// ── マッチ品質の階層（続121 で再設計）────────────────────────────────────────
 //
-// token_score には破ってはいけない**分層不変量**がある：「名前に直接含む(子串)」は
-// 「文字をばらして拾う(子序列)」より**常に上**。単一トークン時の数値は：
-//     子串命中の最小 = 2000 - 500(位置ペナルティ上限) = 1500
-//     子序列の最大   = 1000（subseq_score が .min(1000) で頭打ち）
-//   → 層間ギャップ = 500
-// エントリ単位の加点（額外目录 / 短名 / 新鮮度）は**この 500 を食い潰してはいけない**。
-// 合計が 500 を超えると「額外目录にある・短い・昨日更新した*ぼんやり一致*」が
-// 「ど真ん中で名前に含む正確な一致」を追い抜く —— 検索が壊れたとしか見えない挙動になる。
+// 続120 までは「子串(2000 基準) / 子序列(≤1000)」の 2 層しか無く、層内の差は
+// `+400 前缀` `+200 词首` という**加点**で表していた。その結果ギャップが 500 しか無く、
+// エントリ加点（額外目录 300 + 短名 60 + 新鮮度 120 = 480）でほぼ使い切っていて
+// **これ以上何も足せない**状態だった。加えて「名前がクエリと完全に一致」という
+// 最強のシグナルに専用の席が無く、`Windows` と `amd64_microsoft-windows-cng_…` が
+// 同じ層で短名加点のわずかな差だけを頼りに競っていた（続120 の実測で露呈）。
 //
-// 複数トークン時は両層とも token 数に比例して伸びる（2 語なら子串 ≥3000 / 子序列 ≤2000、
-// ギャップ 1000）一方、下の 3 つはエントリに 1 回だけ加算 —— よって**単一トークンが最も厳しい**。
-// 予算はそこで満たせばよい。実際の検算は tests::layer_invariant_budget_holds が行う。
+// そこで**層を明示的な定数バンドに開く**。層内の微調整（位置ペナルティ）と
+// エントリ加点は、必ず 1 バンド分の隙間の中に収まる：
 //
-//   EXTRA_DIR_BONUS(300) + SHORT_NAME_BONUS_MAX(60) + RECENCY_BONUS_MAX(120) = 480 < 500 ✓
+//   L_EXACT  10000   名前（または拡張子を除いた語幹）がクエリと完全一致
+//   L_PREFIX  7000   名前がクエリで始まる
+//   L_WORD    5000   単語境界（空白/_/-/. 等）の直後にクエリが現れる
+//   L_SUBSTR  3000   名前のどこかにクエリを含む
+//   (子序列)  0..1000  文字をばらして拾えた（SUBSEQ_CAP で頭打ち）
 //
-// ⚠️ この 3 定数のどれかを上げるときは必ず合計を再確認すること（テストが落ちる）。
-const SHORT_NAME_BONUS_MAX: i32 = 60;
+// 層内の差は位置ペナルティのみ（0..-POS_PENALTY_MAX）。したがって各層の実効幅は
+// [base-500, base] で、最も狭い隣接ギャップは 子序列上限(1000) と L_SUBSTR 下端(2500) の
+// 1500。エントリ加点の合計 720 はこれを下回る（余裕 780）。検算は
+// tests::layer_invariant_budget_holds が行う —— **定数を触ると真っ先に落ちるのがそれ**。
+//
+// 複数トークン時は層の値が token 数に比例して伸びる一方、エントリ加点はエントリに
+// 1 回だけなので、**単一トークンが常に最も厳しい**。予算はそこで満たせばよい。
+const L_EXACT: i32 = 10_000;
+const L_PREFIX: i32 = 7_000;
+const L_WORD: i32 = 5_000;
+const L_SUBSTR: i32 = 3_000;
+const SUBSEQ_CAP: i32 = 1_000;
+/// 層内の位置ペナルティ上限（クエリが名前の後ろに現れるほど減点）。層の実効幅 = これ。
+const POS_PENALTY_MAX: i32 = 500;
+
+/// 短名加点の最大値（続121 で 60 → 300、かつ形を線形から反比例へ）。
+///
+/// なぜ形を変えたか：旧 `MAX - min(len, MAX)` は 1 文字につき 1 点の線形減衰で、
+/// MAX=60 では 7 文字と 60 文字の差が高々 53 点しか付かなかった。WinSxS の
+/// `amd64_microsoft-windows-…_none_88b3efd7d6c90eb9`（60 文字超）を押し下げるには
+/// まったく足りない。反比例なら短い側で急激に効き、長い側では平坦になる。
+const SHORT_NAME_BONUS_MAX: i32 = 300;
+/// 名前長 → 短名加点。len=7→208 / 20→133 / 60→63 / 100→41（単調減少、[0, MAX]）。
+fn short_name_bonus(len: usize) -> i32 {
+    SHORT_NAME_BONUS_MAX * 16 / (16 + len as i32)
+}
+
 /// 新鮮度加点の上限（続117）。実値は recency_bonus() の階段を参照。
 const RECENCY_BONUS_MAX: i32 = 120;
-/// 層間ギャップ（単一トークン時）。上記 3 定数の合計はこれ未満でなければならない。
-/// 参照するのはテストのみ（予算の検算に使う）だが、**予算の宣言そのもの**なので
-/// #[cfg(test)] には落とさない —— 定数を触る人がここを読める場所に置いておきたい。
+
+/// パスの浅さ加点の上限（続122）。
+///
+/// 動機：システム根を索引に入れた直後、"windows" の結果で `C:\Windows` が 6 位に沈んだ。
+/// 上位 5 件はホーム配下の Go モジュールキャッシュにある `…/golang.org/x/sys@v0.30.0/windows`
+/// 等で、**名前が同じ以上どれも完全一致（L_EXACT）・名前長も同じ**なので、
+/// 決め手が索引順（ホームが先）しか無かった。
+///
+/// 「同じ一致品質なら、浅いパスにあるものの方が重要な実体である」は一般に成り立つ信号で、
+/// Windows 専用の細工ではない —— `C:\Program Files\App` が
+/// `C:\Users\me\Downloads\backup\old\App` より上に来るのも同じ理屈。
+const PATH_DEPTH_BONUS_MAX: i32 = 200;
+/// パス深さ → 加点。depth=1→160 / 3→114 / 6→80 / 10→57（単調減少）。
+/// 深さ 1 と 10 の差は約 100 で、上記の完全一致どうしの膠着を割るには十分。
+fn path_depth_bonus(depth: u8) -> i32 {
+    PATH_DEPTH_BONUS_MAX * 4 / (4 + depth as i32)
+}
+/// パスの区切り数 = 深さ。`C:\Windows` → 1、`C:\a\b\c` → 3。u8 で飽和（255 段より深いパスは無い）。
+fn path_depth(path: &str) -> u8 {
+    path.bytes().filter(|b| *b == b'\\' || *b == b'/').count().min(255) as u8
+}
+
+/// エントリ単位加点の合計上限。**隣接バンドの最小ギャップ未満**でなければならない。
+/// 参照するのはテストのみだが、予算の宣言そのものなので #[cfg(test)] には落とさない。
 #[allow(dead_code)]
-const LAYER_GAP: i32 = 500;
+const ENTRY_BONUS_BUDGET: i32 =
+    EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX + PATH_DEPTH_BONUS_MAX;
 
 /// 更新時刻 → 新鮮度加点（続117）。
 ///
@@ -152,23 +203,73 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// 扫描根目录清单。返回 (目录, 是否为用户手动添加的额外目录)——第二项一路带进 IndexEntry.extra
-/// 供查询加分用（见 EXTRA_DIR_BONUS）。默认根 = 整个用户目录；额外根由前端经 set_search_dirs 注入。
+
+/// ドライブ根の索引深さ（続123）。
+///
+/// 続122 ではシステム根（C:\Windows 等）を名指しで足したが、ユーザーのプロジェクトが
+/// `D:\dev\workbench-app` にあり **D: が丸ごと未カバー**で「自分のプロジェクトが出ない」
+/// という報告になった。名指しでは足りない —— 存在するドライブは全部見る必要がある。
+///
+/// ドライブ根単体の実測（本機、剪定ルール適用後の件数 / 走査時間）：
+///   C:\  深さ3=12,623(122ms)  深さ4=44,209(597ms)  深さ5=76,448(1.9s)  深さ6=119,785(2.1s)
+///   D:\  深さ3= 4,526(232ms)  深さ4=10,173(433ms)  深さ5=24,148(890ms) 深さ6=45,426(1.2s)
+///
+/// ホームと合わせた索引全体の実測（ホーム深さ 10 ＋ 全ドライブ根）：
+///   深さ3 → 66,215 件 / 591ms / 14.6MB   ← これを採用
+///   深さ4 → 103,191 件 / 1.09s / 23.7MB
+///   （比較：続122 の「システム根を名指し＋深さ3」は 82,886 件 / 19.1MB で、しかも D: 未カバー）
+///
+/// **深さ 3 は覆盖・メモリの両方で上位互換**だったので採用。全ドライブを見るようになった分
+/// 1 段浅くしても、`D:\dev\workbench-app`（深さ 2）も `C:\Windows` も `C:\Windows\System32`
+/// も届く。深さ 4 以降で増える分は「プロジェクト内の孫ディレクトリ」が主で、
+/// launcher の用途では価値が低いわりに件数＝メモリを一気に押し上げる。
+///
+/// ⚠️ ホーム配下はこれとは別に深さ 10 で走るので、build_index が**部分木ごと剪定**して
+/// 二重登録を防いでいる（scan_dirs はホームを先に返す）。
+const DRIVE_ROOT_DEPTH: usize = 3;
+
+/// 索引対象のドライブ根を列挙する（続123）。
+///
+/// テスト時は `WORKBENCH_SCAN_DRIVES=0` を立てて無効化できる —— 有効なままだと
+/// `set_search_dirs_indexes_extra_dir` が実機の C:/D: を丸ごと走ってしまい、
+/// 遅く・環境依存になる（USERPROFILE を差し替える既存のやり方と揃えた）。
+fn drive_roots() -> Vec<PathBuf> {
+    if std::env::var("WORKBENCH_SCAN_DRIVES").map(|v| v == "0").unwrap_or(false) {
+        return Vec::new();
+    }
+    ('A'..='Z')
+        .map(|c| PathBuf::from(format!("{c}:\\")))
+        .filter(|p| p.exists())
+        .collect()
+}
+
+/// 扫描根目录清单。返回 (目录, 是否为用户手动添加的额外目录, 走査深さ)。
+/// 第二项一路带进 IndexEntry.extra 供查询加分用（见 EXTRA_DIR_BONUS）。
+/// 根 = 用户目录（深く） + システム根（浅く、続122） + 用户额外目录（深く）。
 /// 不存在的目录跳过（故手输打错的路径会被静默忽略——续111 改用文件夹选择器后不再可能）。
-fn scan_dirs() -> Vec<(PathBuf, bool)> {
-    let mut dirs: Vec<(PathBuf, bool)> = Vec::new();
+fn scan_dirs() -> Vec<(PathBuf, bool, usize)> {
+    let mut dirs: Vec<(PathBuf, bool, usize)> = Vec::new();
     let home = std::env::var("USERPROFILE").unwrap_or_default();
     if !home.is_empty() {
         let p = PathBuf::from(&home);
         if p.exists() {
-            dirs.push((p, false));
+            dirs.push((p, false, MAX_WALK_DEPTH));
+        }
+    }
+    // ドライブ根は浅く。ホームより**後ろ**に置く理由は 2 つ：
+    //  ① build_index が「先に走った根」の部分木を剪定するので、深いホームが先でないと
+    //     ホームがドライブ根の浅い走査に食われて浅くしか索引されない
+    //  ② 同点時は稳定ソートで先に索引されたもの＝自分のファイルが上に来る
+    for p in drive_roots() {
+        if !dirs.iter().any(|(d, _, _)| d == &p) {
+            dirs.push((p, false, DRIVE_ROOT_DEPTH));
         }
     }
     if let Some(lock) = EXTRA_DIRS.get() {
         if let Ok(guard) = lock.lock() {
             for p in guard.iter() {
-                if p.exists() && !dirs.iter().any(|(d, _)| d == p) {
-                    dirs.push((p.clone(), true));
+                if p.exists() && !dirs.iter().any(|(d, _, _)| d == p) {
+                    dirs.push((p.clone(), true, MAX_WALK_DEPTH));
                 }
             }
         }
@@ -179,34 +280,87 @@ fn scan_dirs() -> Vec<(PathBuf, bool)> {
 // 跳过的目录名（隐藏 / 系统 / 噪音），命中则整个子树不进入。扫整个用户目录时 appdata 剪枝尤其关键。
 fn should_skip_dir(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.starts_with('.')
-        || matches!(
-            n.as_str(),
-            "node_modules"
-                | "$recycle.bin"
-                | "appdata"
-                | "target"
-                | ".git"
-                | "__pycache__"
-                | "system volume information"
-        )
+    n.starts_with('.') || NOISE_DIRS.contains(&n.as_str())
+}
+
+/// ノイズ判定のディレクトリ名（**両エンジンの単一真相源**、続121）。
+///
+/// 内置は索引構築時に `should_skip_dir` で部分木ごと刈るので元から効いていたが、
+/// **Everything 経路には等価物が無かった** —— 全盘索引なので `C:\Windows\WinSxS` 配下の
+/// `amd64_microsoft-windows-*` が数万件そのまま流れ込み、"windows" の検索結果を占領していた
+/// （続120 の実測で判明）。同じ名前リストを Everything 側では結果のフィルタとして適用し、
+/// 「どちらのエンジンでも同じものが検索対象」という状態に揃える。
+///
+/// ⚠️ winsxs は内置の走査範囲（%USERPROFILE%）には出てこないが、リストを 2 つに割らないため
+/// ここに置く。ここを増やすと**両エンジンの検索対象から消える**ので、追加は慎重に。
+const NOISE_DIRS: &[&str] = &[
+    "node_modules",
+    "$recycle.bin",
+    "appdata",
+    "target",
+    ".git",
+    "__pycache__",
+    "system volume information",
+    "winsxs", // 続121：Everything 全盘検索でのノイズ最大の発生源
+];
+
+/// パスのいずれかの構成要素がノイズディレクトリなら true（続121、Everything 結果の篩い分け用）。
+/// 内置は索引時点で除外済みなので呼ぶ必要が無い。
+fn is_noise_path(path: &str) -> bool {
+    path.split(['\\', '/'])
+        .any(|seg| NOISE_DIRS.contains(&seg.to_lowercase().as_str()))
+}
+
+/// Everything クエリにノイズ除外句を付ける（続121）。
+///
+/// **なぜこちら側のフィルタだけでは駄目か**：Everything は既定順（ほぼパス順）で set_max 件を
+/// 切って返すため、"windows" では先頭 5000 件がまるごと WinSxS で埋まる。受け取ってから
+/// 捨てると、5000 件のプールから残るのが 2 件という事態になり（実測）、`C:\Windows` 本体は
+/// そもそもプールに入ってこない。**除外は Everything 自身にやらせないと候補が確保できない。**
+///
+/// 構文（実機で検証済み、probe_everything_exclude 参照）：
+/// - `path:` 修飾が必須。裸の `!winsxs` はファイル名しか見ないので効かない。
+/// - `\name\` と**区切り文字で括る**こと。`!path:target` だと "my-target-app" まで巻き添えになる。
+/// - 空白を含む名前（system volume information）があるので全体を引用符で囲む。
+///
+/// ⚠️ 限界：ユーザーのクエリが `|`（OR）を含む場合、Everything の優先順位の都合で除外が
+/// 右辺にしか掛からないことがある。後段の `is_noise_path` フィルタがその取りこぼしを拾う
+/// （二重防御。あちらは構成要素単位で見るので過剰一致しない）。
+fn everything_query_with_exclusions(query: &str) -> String {
+    let mut q = String::from(query.trim());
+    for d in NOISE_DIRS {
+        q.push_str(&format!(" !path:\"\\{d}\\\""));
+    }
+    q
 }
 
 // 耗时部分：纯遍历构建，绝不持 FILE_INDEX 锁。
 // dirs 的第二项 = 该根是否为用户手动添加的额外目录，逐条记进 IndexEntry.extra（查询时加分用）。
-fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
+fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
     let mut out = Vec::new();
-    for (dir, is_extra) in dirs {
+    // すでに走査した根。後続の根（ドライブ根など）がこれらを含む場合、部分木ごと剪定して
+    // **二重登録を防ぐ**（続123）。ホームを深く、ドライブ根を浅く走るので、
+    // 順序は「深い根が先」でなければならない —— scan_dirs がその順で返す。
+    let mut covered: Vec<PathBuf> = Vec::new();
+    for (dir, is_extra, depth) in dirs {
         if out.len() >= MAX_INDEX_ENTRIES {
             break;
         }
+        let already = covered.clone();
         for entry in WalkDir::new(dir)
-            .max_depth(MAX_WALK_DEPTH)
+            // 深さは根ごと（続122）：ホームは深く、システム/ドライブ根は浅く
+            .max_depth(*depth)
             .into_iter()
             .filter_entry(|e| {
+                if !e.file_type().is_dir() {
+                    return true;
+                }
                 // 目录命中跳过名单则剪枝整个子树
-                !(e.file_type().is_dir()
-                    && e.file_name().to_str().map(should_skip_dir).unwrap_or(false))
+                if e.file_name().to_str().map(should_skip_dir).unwrap_or(false) {
+                    return false;
+                }
+                // 先に走査済みの根そのものなら、その部分木は丸ごと飛ばす（続123）
+                !already.iter().any(|c| c == e.path())
             })
             .filter_map(|e| e.ok())
         {
@@ -237,8 +391,10 @@ fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
+            let path_s = path.to_string_lossy().to_string();
             out.push(IndexEntry {
-                path: path.to_string_lossy().to_string(),
+                depth: path_depth(&path_s),
+                path: path_s,
                 name_lower: name.to_lowercase(),
                 name,
                 ext,
@@ -247,6 +403,7 @@ fn build_index(dirs: &[(PathBuf, bool)]) -> Vec<IndexEntry> {
                 mtime,
             });
         }
+        covered.push(dir.clone());
     }
     out
 }
@@ -295,7 +452,7 @@ fn is_boundary(c: char) -> bool {
     matches!(c, ' ' | '_' | '-' | '.' | '/' | '\\' | '(' | '[' | ']' | ')')
 }
 
-// 子序列模糊打分：t 的字符按序出现在 name 中即算命中；连续命中、词首命中额外加分。上限 1000。
+// 子序列模糊打分：t 的字符按序出现在 name 中即算命中；连续命中、词首命中额外加分。上限 SUBSEQ_CAP。
 fn subseq_score(t: &str, name: &str) -> Option<i32> {
     let mut chars = t.chars();
     let mut cur = chars.next()?;
@@ -318,7 +475,7 @@ fn subseq_score(t: &str, name: &str) -> Option<i32> {
             prev_match = true;
             match chars.next() {
                 Some(n) => cur = n,
-                None => return Some(score.min(1000)), // t 全部匹配完
+                None => return Some(score.min(SUBSEQ_CAP)), // t 全部匹配完
             }
         } else {
             prev_match = false;
@@ -330,19 +487,29 @@ fn subseq_score(t: &str, name: &str) -> Option<i32> {
 
 // 单词打分：优先子串（前缀 / 词首加权），退而求其次走子序列。
 fn token_score(t: &str, name_lower: &str) -> Option<i32> {
+    // 完全一致は**拡張子を除いた語幹**でも見る（続121）。"report" で探したとき
+    // `report.md` は探し物そのものであって、`report_draft.md` と同じ層で
+    // 短名加点のわずかな差を競うべきではない。
+    let stem = name_lower.rsplit_once('.').map(|(a, _)| a).unwrap_or(name_lower);
+    if name_lower == t || stem == t {
+        return Some(L_EXACT);
+    }
     if let Some(pos) = name_lower.find(t) {
-        let mut s = 2000 - (pos as i32).min(500); // 越靠前越高
-        if pos == 0 {
-            s += 400; // 前缀
+        // 層内の唯一の調整軸＝出現位置（後ろほど減点）。幅は POS_PENALTY_MAX に収める。
+        let refine = -(pos as i32).min(POS_PENALTY_MAX);
+        let base = if pos == 0 {
+            L_PREFIX
         } else if name_lower[..pos]
             .chars()
             .next_back()
             .map(is_boundary)
             .unwrap_or(false)
         {
-            s += 200; // 词首
-        }
-        return Some(s);
+            L_WORD
+        } else {
+            L_SUBSTR
+        };
+        return Some(base + refine);
     }
     subseq_score(t, name_lower)
 }
@@ -359,11 +526,12 @@ fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
         total += token_score(t, &e.name_lower)?; // 1 つでも外れたら不一致（多词 AND）
     }
     // ↓ エントリ単位の加点 3 種。合計は必ず LAYER_GAP 未満（分層予算の注釈を参照）
-    total += SHORT_NAME_BONUS_MAX - (e.name.len() as i32).min(SHORT_NAME_BONUS_MAX); // 短名优先（轻微）
+    total += short_name_bonus(e.name.len()); // 短名优先（続121 で反比例形へ強化）
     if e.extra {
         total += EXTRA_DIR_BONUS; // 用户手动添加的目录 = 明确意图信号，翻转同名并列（见常量注释）
     }
     total += recency_bonus(e.mtime, now); // 続117：最近触ったものを同層内で優先
+    total += path_depth_bonus(e.depth); // 続122：同じ一致品質なら浅いパスを優先
     Some(total)
 }
 
@@ -425,6 +593,10 @@ fn rerank_everything(mut results: Vec<FileSearchResult>, query: &str) -> Vec<Fil
     if tokens.is_empty() {
         return results;
     }
+    // ノイズパスを落とす（続121）。**候補プールを絞る前に**行うので、5000 件のプールが
+    // WinSxS で埋まっていても実質的な候補数が保たれる。降格ではなく除外にしたのは、
+    // 内置エンジンが索引時点で同じものを除外しており、**両エンジンで検索対象を揃える**ため。
+    results.retain(|r| !is_noise_path(&r.path));
     let now = now_unix();
     let score_of = |r: &FileSearchResult| -> i32 {
         let name_lower = r.name.to_lowercase();
@@ -437,8 +609,9 @@ fn rerank_everything(mut results: Vec<FileSearchResult>, query: &str) -> Vec<Fil
                 None => return i32::MIN,
             }
         }
-        total += SHORT_NAME_BONUS_MAX - (r.name.len() as i32).min(SHORT_NAME_BONUS_MAX);
+        total += short_name_bonus(r.name.len());
         total += recency_bonus(r.mtime, now);
+        total += path_depth_bonus(path_depth(&r.path)); // 続122（Everything 側はパスから都度算出）
         total
     };
     // sort_by_cached_key：score_of は都度 to_lowercase する（比較のたびに再計算させない）。
@@ -534,7 +707,12 @@ pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
         // 続120：**広く取って → 評価して → 狭めて返す**。
         // 内置エンジンは元から索引全体を評価してから take(limit) しているので同じ形になった
         // ——「切ってから評価する」形になっていたのは Everything 経路だけ。
-        match crate::everything::query(&query, EVERYTHING_CANDIDATE_POOL) {
+        // 続121：ノイズ除外は **Everything 側のクエリ**で行う（受け取ってから捨てると
+        // プールがノイズで埋まって実質の候補数が消える。everything_query_with_exclusions 参照）
+        match crate::everything::query(
+            &everything_query_with_exclusions(&query),
+            EVERYTHING_CANDIDATE_POOL,
+        ) {
             // 続117：内置と同じ物差しで並べ直してから返す（rerank_everything の説明を参照）
             Ok(r) => {
                 let mut ranked = rerank_everything(r, &query);
@@ -597,22 +775,134 @@ mod tests {
     /// 追い抜く」という、症状だけ見ても原因に辿り着けない壊れ方をする。
     #[test]
     fn layer_invariant_budget_holds() {
-        let sum = EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX;
+        // 各バンドの実効範囲は [base - POS_PENALTY_MAX, base]。隣接バンドの最小ギャップが
+        // エントリ加点の合計を上回っていること —— 下回ると「額外目录にある・短い・最近の
+        // *弱い一致*」が「一段上の強い一致」を追い抜き、検索が壊れたとしか見えなくなる。
+        let bands = [SUBSEQ_CAP, L_SUBSTR, L_WORD, L_PREFIX, L_EXACT];
+        let mut min_gap = i32::MAX;
+        for w in bands.windows(2) {
+            // 下のバンドの上端 = w[0]（子序列は頭打ち値そのもの）、上のバンドの下端 = w[1] - 位置ペナルティ
+            let gap = (w[1] - POS_PENALTY_MAX) - w[0];
+            assert!(gap > 0, "バンド {} と {} が重なっている", w[0], w[1]);
+            min_gap = min_gap.min(gap);
+        }
         assert!(
-            sum < LAYER_GAP,
-            "エントリ単位加点の合計 {sum} が層間ギャップ {LAYER_GAP} 以上。\
-             額外目录にある短い最近のファイルが、名前に直接含む一致を追い抜く。\
-             どれかの定数を下げること。"
+            ENTRY_BONUS_BUDGET < min_gap,
+            "エントリ加点の合計 {ENTRY_BONUS_BUDGET} が最小バンド間ギャップ {min_gap} 以上。\
+             EXTRA_DIR_BONUS / SHORT_NAME_BONUS_MAX / RECENCY_BONUS_MAX のどれかを下げるか、\
+             バンド定数を離すこと。"
         );
-        // ギャップの由来自体も固定しておく（token_score / subseq_score をいじったとき気づけるように）
-        let substring_worst = 2000 - 500; // 位置ペナルティ最大の子串命中
-        let subseq_best = 1000; // subseq_score の .min(1000)
-        assert_eq!(substring_worst - subseq_best, LAYER_GAP, "層間ギャップの前提が変わっている");
     }
 
-    // テスト用の IndexEntry 組み立て（グローバルに触れないので並行に増やしてよい）
+    /// 短名加点の形（続121 で線形 → 反比例）。**単調減少**であることと、
+    /// 旧・線形形では付かなかった差が実際に付くことを見る。
+    #[test]
+    fn short_name_bonus_shape() {
+        assert_eq!(short_name_bonus(0), SHORT_NAME_BONUS_MAX, "len=0 で最大");
+        let lens = [0usize, 4, 7, 20, 60, 100, 300];
+        for w in lens.windows(2) {
+            assert!(
+                short_name_bonus(w[0]) >= short_name_bonus(w[1]),
+                "単調減少でない: len={} → {} vs len={} → {}",
+                w[0], short_name_bonus(w[0]), w[1], short_name_bonus(w[1])
+            );
+        }
+        // 続120 の実測で問題になった対比：`Windows`(7) と WinSxS の長大名(60)。
+        // 旧形（MAX=60 の線形）では差が高々 53 点しか付かず、押し下げに効かなかった。
+        let d = short_name_bonus(7) - short_name_bonus(60);
+        assert!(d > 100, "短名の効きが弱すぎる（7 文字 vs 60 文字 の差が {d}）");
+        assert!(short_name_bonus(1000) >= 0, "長大名でも負にならない");
+    }
+
+    /// パスの浅さ加点（続122）。実際に膠着を割った状況を再現する。
+    #[test]
+    fn path_depth_breaks_exact_match_ties() {
+        assert_eq!(path_depth("C:\\Windows"), 1);
+        assert_eq!(path_depth("C:/a/b/c"), 3, "スラッシュ区切りも数える");
+        // 単調減少 & 非負
+        let d: Vec<i32> = [1u8, 3, 6, 10, 20, 200].iter().map(|x| path_depth_bonus(*x)).collect();
+        for w in d.windows(2) {
+            assert!(w[0] >= w[1], "単調減少でない: {d:?}");
+        }
+        assert!(*d.last().unwrap() >= 0);
+
+        // 続122 で実際に起きた膠着：システム根を索引に入れた直後、"windows" の結果で
+        // `C:\Windows` がホーム配下の Go モジュールキャッシュ配下の同名ディレクトリ 5 件に
+        // 負けて 6 位に沈んだ。どちらも完全一致・名前長も同じで、決め手が索引順しか無かった。
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let mut shallow = ent("windows", now - 900 * DAY, false);
+        shallow.path = "C:\\Windows".into();
+        shallow.depth = path_depth(&shallow.path);
+        let mut deep = ent("windows", now - 900 * DAY, false);
+        deep.path = "C:\\Users\\me\\go\\pkg\\mod\\golang.org\\x\\sys@v0.30.0\\windows".into();
+        deep.depth = path_depth(&deep.path);
+
+        let a = entry_score(&["windows"], &shallow, now).unwrap();
+        let b = entry_score(&["windows"], &deep, now).unwrap();
+        assert!(a > b, "浅いパスが勝てていない（C:\\Windows {a} vs go モジュール {b}）");
+    }
+
+    /// 索引範囲の構成（続123）。ここが崩れると「あるはずのものが出ない」に直結するので、
+    /// 順序と深さの前提を釘で打っておく。
+    #[test]
+    fn scan_dirs_covers_drives_with_home_first() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // ドライブ走査が有効な状態で見る（他テストが無効化していても影響を受けないよう明示）
+        std::env::set_var("WORKBENCH_SCAN_DRIVES", "1");
+        let dirs = scan_dirs();
+        assert!(!dirs.is_empty(), "根が 1 つも無い");
+
+        // ① ホームが**先頭**。build_index は「先に走った根の部分木」を剪定するので、
+        //    ホームが後ろに回るとドライブ根の浅い走査に食われ、ホームが浅くしか索引されない。
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        if !home.is_empty() && PathBuf::from(&home).exists() {
+            assert_eq!(dirs[0].0, PathBuf::from(&home), "ホームが先頭でない: {:?}", dirs[0].0);
+            assert_eq!(dirs[0].2, MAX_WALK_DEPTH, "ホームは深く走るべき");
+        }
+
+        // ② ドライブ根が入っており、浅い深さが割り当たっている
+        let drives: Vec<_> = dirs.iter().filter(|(_, _, d)| *d == DRIVE_ROOT_DEPTH).collect();
+        assert!(!drives.is_empty(), "ドライブ根が 1 つも入っていない: {dirs:?}");
+        assert!(
+            DRIVE_ROOT_DEPTH < MAX_WALK_DEPTH,
+            "ドライブ根はホームより浅くなければ意味が無い"
+        );
+
+        // ③ 無効化スイッチが効く（テスト隔離の生命線）
+        std::env::set_var("WORKBENCH_SCAN_DRIVES", "0");
+        assert!(drive_roots().is_empty(), "WORKBENCH_SCAN_DRIVES=0 でドライブ走査が止まっていない");
+        std::env::remove_var("WORKBENCH_SCAN_DRIVES");
+    }
+
+    /// ノイズパス判定（続121）。Everything の全盘結果から WinSxS 等を落とす。
+    #[test]
+    fn noise_path_detection() {
+        assert!(is_noise_path("C:\\Windows\\WinSxS\\amd64_microsoft-windows-cng_31bf.txt"));
+        assert!(is_noise_path("C:/Windows/winsxs/x"), "スラッシュ区切りも見る");
+        assert!(is_noise_path("D:\\proj\\node_modules\\react\\index.js"));
+        assert!(is_noise_path("C:\\Users\\me\\AppData\\Local\\x.log"));
+        // 通常のパスは落とさない —— ここが誤爆すると「あるはずのファイルが出ない」になる
+        assert!(!is_noise_path("C:\\Windows\\System32\\cmd.exe"));
+        assert!(!is_noise_path("D:\\dev\\workbench-app\\src\\App.tsx"));
+        // 部分一致で誤爆しないこと（"target" を含むだけの名前は別物）
+        assert!(!is_noise_path("D:\\dev\\my-target-app\\main.rs"));
+        assert!(is_noise_path("D:\\dev\\rustproj\\target\\debug\\x.exe"), "構成要素そのものなら落とす");
+    }
+
+    /// **プロセス全体の状態（環境変数 / FILE_INDEX / EXTRA_DIRS）を触るテストの直列化用。**
+    ///
+    /// Rust のテストは既定で並列に走る。USERPROFILE や WORKBENCH_SCAN_DRIVES はプロセス
+    /// グローバルなので、片方が「ドライブ走査を無効化して隔離」している最中にもう片方が
+    /// 有効化すると、隔離側が実機の C:/D: を丸ごと走ってしまい、遅くなる上に件数アサートが
+    /// 環境依存で壊れる。**この種のテストを足すときは必ずこのロックを取ること。**
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // テスト用の IndexEntry 組み立て（グローバルに触れないので並行に増やしてよい）。
+    // depth はパスから算出 —— 定数を置くと path_depth_bonus の効きを見るテストが書けない。
     fn ent(name: &str, mtime: u64, extra: bool) -> IndexEntry {
         IndexEntry {
+            depth: path_depth(&format!("C:\\x\\{name}")),
             path: format!("C:\\x\\{name}"),
             name: name.to_string(),
             name_lower: name.to_lowercase(),
@@ -628,21 +918,38 @@ mod tests {
     /// 中身をいじって層の境界がずれた場合は素通りしてしまう。こちらがその穴を塞ぐ。
     #[test]
     fn token_score_layer_bounds_hold() {
-        // 子串命中の**最悪**ケース：クエリが 500 文字目以降に現れ、位置ペナルティが飽和する。
-        // 非現実的な長さだが、式が許す下限はここ。
+        // 各層が**実際の文字列で**想定のバンドに入ること。定数だけの検算（上のテスト）は
+        // token_score の中身をいじって層の割り当てが変わった場合に素通りしてしまう。
+        assert_eq!(token_score("report", "report"), Some(L_EXACT), "名前がそのまま一致");
+        assert_eq!(token_score("report", "report.md"), Some(L_EXACT), "拡張子を除いた語幹で一致");
+        assert_eq!(token_score("report", "report_draft.md"), Some(L_PREFIX), "前缀");
+        // 単語境界（_ の直後）。位置ペナルティの分だけ L_WORD を下回る
+        let word = token_score("report", "my_report.md").expect("命中するはず");
+        assert!(word <= L_WORD && word > L_WORD - POS_PENALTY_MAX, "词首バンド外: {word}");
+        // 境界でない位置（英字の直後）
+        let sub = token_score("report", "xreport.md").expect("命中するはず");
+        assert!(sub <= L_SUBSTR && sub > L_SUBSTR - POS_PENALTY_MAX, "子串バンド外: {sub}");
+
+        // 位置ペナルティの飽和：クエリが 500 文字目以降でも下端を割らない
         let far = format!("{}rpt.md", "x".repeat(600));
         let lo = token_score("rpt", &far).expect("子串なので必ず命中");
-        assert!(lo >= 1500, "子串命中の下限が 1500 を割った（LAYER_GAP の前提が崩れる）: {lo}");
+        assert_eq!(lo, L_SUBSTR - POS_PENALTY_MAX, "位置ペナルティが飽和していない: {lo}");
 
         // 子序列の**最良**ケース：全文字が word-start に当たり続けて頭打ちに達する。
         // "a_a_a_..." に対して "aaa...a" —— 下線のせいで子串にはならず子序列へ落ちる。
         let q = "a".repeat(60);
         let name = "a_".repeat(60);
         let hi = token_score(&q, &name).expect("子序列として命中するはず");
-        assert!(hi <= 1000, "子序列の上限 1000 を超えた（LAYER_GAP の前提が崩れる）: {hi}");
-        assert_eq!(hi, 1000, "この入力は頭打ちに達するはず（達していないとテストが緩い）: {hi}");
+        assert_eq!(hi, SUBSEQ_CAP, "この入力は頭打ちに達するはず（達していないとテストが緩い）: {hi}");
 
-        assert_eq!(lo - hi, LAYER_GAP, "実測した層間ギャップが LAYER_GAP と食い違う");
+        // 続120 で露呈した実例：`Windows` が `amd64_microsoft-windows-cng_…` に埋もれていた。
+        // 完全一致バンドができたので、エントリ加点を総動員しても逆転しないこと。
+        let win = token_score("windows", "windows").unwrap();
+        let sxs = token_score("windows", "amd64_microsoft-windows-cng_31bf3856ad364e35_10.0.22621.4746").unwrap();
+        assert!(
+            win > sxs + ENTRY_BONUS_BUDGET,
+            "完全一致 {win} が長大な词首一致 {sxs} + 加点上限 {ENTRY_BONUS_BUDGET} を超えていない"
+        );
     }
 
     /// 続117 の本丸：新鮮度は**同層内の並びしか動かしてはいけない**。
@@ -678,8 +985,23 @@ mod tests {
 
         let f = entry_score(&tokens, &fuzzy_fresh, now).expect("子序列は命中するはず");
         let x = entry_score(&tokens, &exact_old, now).expect("子串は命中するはず");
-        assert_eq!(f, 1000 + EXTRA_DIR_BONUS + RECENCY_BONUS_MAX, "子序列側が想定の最良ケースになっていない");
-        assert_eq!(x, 1500, "子串側が想定の最悪ケースになっていない");
+        // 期待値は定数から組み立てる（数値をベタ書きするとバンドを動かすたびに直す羽目になる）
+        assert_eq!(
+            f,
+            SUBSEQ_CAP
+                + short_name_bonus(fuzzy_fresh.name.len())
+                + EXTRA_DIR_BONUS
+                + RECENCY_BONUS_MAX
+                + path_depth_bonus(fuzzy_fresh.depth),
+            "子序列側が想定の最良ケースになっていない"
+        );
+        assert_eq!(
+            x,
+            L_SUBSTR - POS_PENALTY_MAX
+                + short_name_bonus(exact_old.name.len())
+                + path_depth_bonus(exact_old.depth),
+            "子串側が想定の最悪ケースになっていない"
+        );
         assert!(
             x > f,
             "分層不変量が破れた：古い子串一致({x}) が 新しい子序列一致({f}) に負けている。\
@@ -742,9 +1064,10 @@ mod tests {
         // Everything の既定順（名前順など）を模して、わざと「良い候補が後ろ」の並びで渡す
         let input = vec![
             res("zzz_unrelated_but_contains_report_deep_in_name.md", now - 900 * DAY),
-            res("r_e_p_o_r_t.md", now),           // 子序列でしか当たらない（新しくても下位のはず）
-            res("report.md", now - 900 * DAY),    // 子串・短名・古い
-            res("report_draft.md", now - 1 * DAY),// 子串・やや長い・今週
+            res("r_e_p_o_r_t.md", now),            // 子序列でしか当たらない（新しくても最下位のはず）
+            res("report.md", now - 900 * DAY),     // **完全一致**・古い（続121 で最上位に上がった）
+            res("report_final.md", now - 900 * DAY), // 前缀・古い
+            res("report_draft.md", now - DAY),     // 前缀・今週（前缀どうしなら新しい方が上）
         ];
         let out = rerank_everything(input, "report");
         let names: Vec<&str> = out.iter().map(|r| r.name.as_str()).collect();
@@ -758,17 +1081,18 @@ mod tests {
         let i_zzz = names.iter().position(|n| n.starts_with("zzz")).unwrap();
         let i_rep = names.iter().position(|n| *n == "report.md").unwrap();
         let i_draft = names.iter().position(|n| *n == "report_draft.md").unwrap();
-        assert!(i_rep < i_zzz && i_draft < i_zzz, "前缀一致が位置ペナルティ組より下: {names:?}");
-        // ③ **同層内では新鮮度が決める**（続117 の狙いそのもの）。
-        //    ここでは report_draft.md（今週）が report.md（900日前）より上に来る。
-        //    ⚠️ 設計上の取捨：短名加点は「轻微」(差 6) なのに対し新鮮度は 120 なので、
-        //    完全一致の短い名前でも 1 年以上放置されていれば、新しい長い名前に抜かれる。
-        //    「探しているのは大抵さっき触ったやつ」という前提を採る以上これは意図どおり。
-        //    もし「完全一致は常に最上位」にしたくなったら、専用の加点を足すのではなく
-        //    **層を分ける**こと（加点で殴ると LAYER_GAP の予算を食い潰す）。
+        let i_final = names.iter().position(|n| *n == "report_final.md").unwrap();
+        assert!(i_draft < i_zzz && i_final < i_zzz, "前缀一致が位置ペナルティ組より下: {names:?}");
+        // ③ **完全一致は最上位**（続121）。古くても、新しい前缀一致に抜かれてはいけない。
+        //    続117〜120 では両者が同じ層におり、短名加点の差(わずか)より新鮮度(120)が大きいため
+        //    `report_draft.md`(今週) が `report.md`(900日前) を追い抜いていた。「探し物そのものが
+        //    2 番目に出る」のは明確に間違いなので、続121 で L_EXACT のバンドを新設して解消した。
+        assert_eq!(i_rep, 0, "完全一致が最上位に来ていない: {names:?}");
+        // ④ **同層内では新鮮度が決める**（続117 の狙いは維持されている）。
+        //    前缀どうしの 2 件は名前長がほぼ同じで、差は更新時刻のみ。
         assert!(
-            i_draft < i_rep,
-            "同層内で新鮮度が効いていない（続117 の主目的）: {names:?}"
+            i_draft < i_final,
+            "同層（前缀）内で新鮮度が効いていない: {names:?}"
         );
     }
 
@@ -841,6 +1165,7 @@ mod tests {
     /// ⚠️ 用了全局 OnceLock（FILE_INDEX/EXTRA_DIRS）与 USERPROFILE 环境变量，故只此一个测试、勿并行加测。
     #[test]
     fn set_search_dirs_indexes_extra_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let base = std::env::temp_dir().join("wb_idx_test");
         let home = base.join("home");
         let extra = base.join("extra");
@@ -858,6 +1183,9 @@ mod tests {
         }
         fs::write(extra.join("dupname.md"), b"x").unwrap();
         std::env::set_var("USERPROFILE", &home);
+        // ドライブ走査を無効化して隔離を保つ（続123）。有効なままだと実機の C:/D: を
+        // 丸ごと走ってしまい、テストが遅く・環境依存になる。
+        std::env::set_var("WORKBENCH_SCAN_DRIVES", "0");
 
         // ① 纯遍历层：scan_dirs + build_index
         EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
@@ -957,6 +1285,277 @@ mod tests {
         SEARCH_ENGINE.store(prev, Ordering::Relaxed);
     }
 
+    /// 診断用（既定 #[ignore]：cargo test --lib diagnose_coverage -- --ignored --nocapture）
+    ///
+    /// 「自分のプロジェクトディレクトリが検索に出てこない」の原因切り分け（続123 調査）。
+    /// 見るのは 2 点：**そもそも索引に入っているか**（範囲の問題）と、
+    /// 入っているのに出ないのか（順位の問題）。混同すると直す場所を間違える。
+    #[test]
+    #[ignore]
+    fn diagnose_coverage() {
+        let dirs = scan_dirs();
+        println!("\n① 現在の索引範囲:");
+        for (d, extra, depth) in &dirs {
+            println!("   {:<40} extra={extra} 深さ={depth}", d.display());
+        }
+
+        // 固定ドライブの一覧（存在する根だけ拾う）
+        println!("\n② このマシンのドライブと、索引に含まれているか:");
+        for letter in 'A'..='Z' {
+            let root = PathBuf::from(format!("{letter}:\\"));
+            if !root.exists() {
+                continue;
+            }
+            let covered = dirs.iter().any(|(d, _, _)| d.starts_with(&root));
+            println!("   {}:\\  {}", letter, if covered { "一部カバー" } else { "★未カバー" });
+        }
+
+        let idx = build_index(&dirs);
+        println!("\n③ 索引 {} 件。特定パスが入っているか:", idx.len());
+        for probe in [
+            "D:\\dev\\workbench-app",
+            "D:\\dev",
+            "C:\\Windows",
+        ] {
+            let hit = idx.iter().any(|e| e.path.eq_ignore_ascii_case(probe));
+            println!("   {:<32} {}", probe, if hit { "入っている" } else { "★入っていない" });
+        }
+
+        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+        for q in ["workbench", "workbench-app", "dev"] {
+            let r = builtin_search(q, 5);
+            println!("\n   [{q}] → {} 件", r.len());
+            for x in &r {
+                println!("       {}", x.path);
+            }
+        }
+        println!();
+    }
+
+    /// 診断用（既定 #[ignore]：cargo test --lib measure_drive_cost -- --ignored --nocapture）
+    ///
+    /// 全固定ドライブを索引に含めた場合のコスト見積り（続123）。
+    /// メモリが律速なので、深さ別の件数を測ってから範囲を決める。
+    #[test]
+    #[ignore]
+    fn measure_drive_cost() {
+        println!("\nドライブ根を深さ別に索引した場合の件数（剪定ルール適用後）");
+        println!("{:<8} | {:>9} | {:>9} | {:>9} | {:>9}", "根", "深さ3", "深さ4", "深さ5", "深さ6");
+        println!("{}", "-".repeat(56));
+        for letter in 'A'..='Z' {
+            let root = PathBuf::from(format!("{letter}:\\"));
+            if !root.exists() {
+                continue;
+            }
+            let mut cells = Vec::new();
+            for d in [3usize, 4, 5, 6] {
+                let t = Instant::now();
+                let n = WalkDir::new(&root)
+                    .max_depth(d)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        !(e.file_type().is_dir()
+                            && e.file_name().to_str().map(should_skip_dir).unwrap_or(false))
+                    })
+                    .filter_map(|e| e.ok())
+                    .filter(|e| !e.file_name().to_str().unwrap_or(".").starts_with('.'))
+                    .count();
+                cells.push((n, t.elapsed()));
+            }
+            println!(
+                "{letter}:\\      | {:>9} | {:>9} | {:>9} | {:>9}",
+                cells[0].0, cells[1].0, cells[2].0, cells[3].0
+            );
+            println!(
+                "  (走査)  | {:>9.1?} | {:>9.1?} | {:>9.1?} | {:>9.1?}",
+                cells[0].1, cells[1].1, cells[2].1, cells[3].1
+            );
+        }
+        println!();
+    }
+
+    /// 診断用（既定 #[ignore]：
+    ///   cargo test --lib probe_builtin_system_roots -- --ignored --nocapture）
+    ///
+    /// 続122 の成果確認：内置エンジンで "windows" を引いて `C:\Windows` が上位に出るか。
+    /// 実際の scan_dirs → build_index → FILE_INDEX 差し替え → builtin_search を通す。
+    ///
+    /// ⚠️ FILE_INDEX / 環境変数というプロセス全体の状態を触るので、
+    /// `set_search_dirs_indexes_extra_dir` と**同じプロセスで走らせてはいけない**
+    /// （あちらは USERPROFILE とシステム根の環境変数を書き換える）。
+    /// 既定 #[ignore] なので通常の `cargo test` では衝突しない。
+    #[test]
+    #[ignore]
+    fn probe_builtin_system_roots() {
+        let dirs = scan_dirs();
+        println!("\n索引する根（続122 でシステム根を追加）:");
+        for (d, extra, depth) in &dirs {
+            println!("  {:<44} extra={extra} 深さ={depth}", d.display());
+        }
+        let t = Instant::now();
+        let idx = build_index(&dirs);
+        let build_ms = t.elapsed();
+        let bytes: usize = std::mem::size_of::<IndexEntry>() * idx.len()
+            + idx.iter().map(|e| e.path.len() + e.name.len() + e.name_lower.len() + e.ext.len()).sum::<usize>();
+        println!(
+            "\n索引: {} 件 / 構築 {:.2?} / 推定 {:.1} MB",
+            idx.len(), build_ms, bytes as f64 / 1_048_576.0
+        );
+
+        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+
+        for q in ["windows", "program files", "system32"] {
+            let r = builtin_search(q, 8);
+            println!("\n  [{q}] → 上位 {}:", r.len());
+            for x in &r {
+                println!("      {}", x.path);
+            }
+        }
+        println!();
+    }
+
+    /// 診断用（既定 #[ignore]：cargo test --lib measure_index_scope -- --ignored --nocapture）
+    ///
+    /// 内置エンジンの**カバー範囲**を広げられるかの見積り（続122 調査）。
+    /// ユーザー報告：「"windows" で検索しても C:\Windows が出てこない」——これは順位の問題では
+    /// なく、そもそも索引が %USERPROFILE% しか見ていないので**存在しない**という話。
+    ///
+    /// 広げるときの制約は 2 つ。ここで両方測る：
+    ///   ① 走査時間（バックグラウンドとはいえ 30 分ごとに回る）
+    ///   ② **メモリ**——アプリ全体で ~30MB が目標。IndexEntry は path/name/name_lower/ext と
+    ///      同じ文字列を 3〜4 重に持っているので、件数がそのままメモリに効く。
+    #[test]
+    #[ignore]
+    fn measure_index_scope() {
+        // IndexEntry 1 件のヒープ実測（構造体自体 + 各 String のバッファ）
+        let est = |v: &Vec<IndexEntry>| -> usize {
+            std::mem::size_of::<IndexEntry>() * v.len()
+                + v.iter()
+                    .map(|e| e.path.len() + e.name.len() + e.name_lower.len() + e.ext.len())
+                    .sum::<usize>()
+        };
+
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        let candidates: Vec<(&str, PathBuf)> = vec![
+            ("%USERPROFILE%（現状）", PathBuf::from(&home)),
+            ("C:\\Windows", PathBuf::from("C:\\Windows")),
+            ("C:\\Program Files", PathBuf::from("C:\\Program Files")),
+            ("C:\\Program Files (x86)", PathBuf::from("C:\\Program Files (x86)")),
+            ("C:\\ProgramData", PathBuf::from("C:\\ProgramData")),
+        ];
+
+        println!("\n索引範囲の候補（現行の剪定ルール = should_skip_dir / 深さ {MAX_WALK_DEPTH} 適用）");
+        println!("{:<26} | {:>9} | {:>9} | {:>10}", "根", "件数", "走査", "推定メモリ");
+        println!("{}", "-".repeat(64));
+        let mut total_n = 0usize;
+        let mut total_b = 0usize;
+        let mut total_t = Duration::ZERO;
+        for (label, dir) in &candidates {
+            if !dir.exists() {
+                println!("{label:<26} | (存在せず)");
+                continue;
+            }
+            let t = Instant::now();
+            let idx = build_index(&[(dir.clone(), false, MAX_WALK_DEPTH)]);
+            let el = t.elapsed();
+            let bytes = est(&idx);
+            println!(
+                "{label:<26} | {:>9} | {:>7.2?} | {:>7.1} MB",
+                idx.len(), el, bytes as f64 / 1_048_576.0
+            );
+            total_n += idx.len();
+            total_b += bytes;
+            total_t += el;
+        }
+        println!("{}", "-".repeat(64));
+        println!(
+            "{:<26} | {:>9} | {:>7.2?} | {:>7.1} MB   ← 全部足した場合",
+            "合計", total_n, total_t, total_b as f64 / 1_048_576.0
+        );
+        println!("  現行の上限 MAX_INDEX_ENTRIES = {MAX_INDEX_ENTRIES}");
+
+        // ── 深さを浅くした場合（続122 の核心仮説）───────────────────────────
+        // ホームから遠いほど「深い階層のファイル」の価値は落ちる。欲しいのは
+        // `C:\Windows` というフォルダ（深さ 1）であって
+        // `C:\Windows\System32\drivers\etc\hosts` ではない。
+        // 深さを絞れば件数＝メモリが激減するはず。それを確かめる。
+        println!("\nシステム根を浅く索引した場合の件数（深さ別）");
+        println!("{:<26} | {:>8} | {:>8} | {:>8} | {:>8}", "根", "深さ2", "深さ3", "深さ4", "深さ10");
+        println!("{}", "-".repeat(70));
+        for (label, dir) in candidates.iter().skip(1) {
+            if !dir.exists() {
+                continue;
+            }
+            let mut cells = Vec::new();
+            for d in [2usize, 3, 4, 10] {
+                let n = WalkDir::new(dir)
+                    .max_depth(d)
+                    .into_iter()
+                    .filter_entry(|e| {
+                        !(e.file_type().is_dir()
+                            && e.file_name().to_str().map(should_skip_dir).unwrap_or(false))
+                    })
+                    .filter_map(|e| e.ok())
+                    .filter(|e| !e.file_name().to_str().unwrap_or(".").starts_with('.'))
+                    .count();
+                cells.push(n);
+            }
+            println!(
+                "{label:<26} | {:>8} | {:>8} | {:>8} | {:>8}",
+                cells[0], cells[1], cells[2], cells[3]
+            );
+        }
+        // ※ 行継続（\ 改行）を使うと全角スペースが行頭に残り clippy に叱られるので分割して出す
+        println!("  ※ IndexEntry は path/name/name_lower/ext に同じ文字列を重複保持している。");
+        println!("     name は path の末尾、ext は name の末尾、name_lower は name の複製 ——");
+        println!("     表現を詰めれば同じ件数でメモリを大きく減らせる余地がある。\n");
+    }
+
+    /// 診断用（既定 #[ignore]：cargo test --lib probe_everything_exclude -- --ignored --nocapture）
+    ///
+    /// 続121 で判明した問題：ノイズ除去を**こちら側のフィルタ**でやると、Everything から
+    /// 引き取った 5000 件のうち 4998 件が WinSxS で、捨てた後に残るのが 2 件になる。
+    /// プールを広げても「Everything 既定順の先頭 5000 件」がノイズで埋まっている限り無意味で、
+    /// `C:\Windows` 本体はそもそもその中に入っていない。
+    /// → 除外は **Everything 側のクエリ構文**に押し込む必要がある。ここはその構文の実証。
+    #[test]
+    #[ignore]
+    fn probe_everything_exclude() {
+        if !crate::everything::is_available() {
+            println!("Everything 未起動。");
+            return;
+        }
+        // 検証したい点：
+        //  ① `path:` 修飾が要る（裸の否定はファイル名しか見ない）
+        //  ② 区切り無しの `!path:target` は**過剰一致**する（"my-target-app" も消える）ので
+        //     `\target\` のように構成要素として括る必要がある
+        //  ③ 空白を含む名前（system volume information）は引用符が要る
+        //  ④ 実際に使う除外句フルセットで `C:\Windows` が候補に入ってくるか
+        let full: String = NOISE_DIRS.iter().map(|d| format!(" !path:\"\\{d}\\\"")).collect();
+        for q in [
+            "windows".to_string(),
+            "windows !path:winsxs".to_string(),
+            "windows !winsxs".to_string(),
+            r#"windows !path:"\winsxs\""#.to_string(),
+            r#"windows !path:"\target\""#.to_string(), // ② 過剰一致しないかの確認用
+            format!("windows{full}"),
+        ] {
+            let q = q.as_str();
+            match crate::everything::query(q, 20) {
+                Ok(r) => {
+                    println!("\nクエリ {q:?} → {} 件", r.len());
+                    for x in r.iter().take(8) {
+                        println!("    {}", x.path);
+                    }
+                }
+                Err(e) => println!("\nクエリ {q:?} → 失敗: {e}"),
+            }
+        }
+        println!();
+    }
+
     /// 診断用（既定 #[ignore]、手動実行：
     ///   cargo test --lib measure_result_limit_cost -- --ignored --nocapture）
     ///
@@ -1024,9 +1623,9 @@ mod tests {
 
         // 続120 の効果を実データで：候補プールを広げると、返す 10 件の中身が実際に変わるか。
         // 変わらなければ「切ってから評価」でも結果は同じ＝この変更に意味が無かったことになる。
-        println!("\n候補プールの広さが、返す上位 10 件をどう変えるか（クエリ: {q:?}）");
+        println!("\n候補プールの広さが、返す上位 10 件をどう変えるか（クエリ: {q:?}、除外句あり）");
         for &pool in &[200usize, EVERYTHING_CANDIDATE_POOL] {
-            if let Ok(r) = crate::everything::query(q, pool) {
+            if let Ok(r) = crate::everything::query(&everything_query_with_exclusions(q), pool) {
                 let got = r.len();
                 let mut ranked = rerank_everything(r, q);
                 ranked.truncate(10);
@@ -1049,7 +1648,7 @@ mod tests {
     fn measure_real_rebuild() {
         let home = PathBuf::from(std::env::var("USERPROFILE").unwrap());
         let t1 = Instant::now();
-        let idx = build_index(&[(home, false)]);
+        let idx = build_index(&[(home, false, MAX_WALK_DEPTH)]);
         let walk = t1.elapsed();
         let exe_lnk = idx.iter().filter(|e| e.ext == "exe" || e.ext == "lnk").count();
         let t2 = Instant::now();
