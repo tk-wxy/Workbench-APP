@@ -507,22 +507,47 @@ fn fill_icons_from_cache(mut results: Vec<FileSearchResult>) -> Vec<FileSearchRe
     results
 }
 
+/// Everything から**一旦引き取って評価する**候補数（続120）。返す件数（limit）とは別物。
+///
+/// なぜ分ける必要があったか：続117 以前も以後も、Everything へは limit(=200) をそのまま
+/// set_max として渡していた。つまり **Everything 自身の既定順（ほぼ名前順）で上位 200 件を
+/// 切り取ってから、その中だけで並べ替えていた**。欲しいファイルが Everything 順で 3000 番目に
+/// あれば、ランキングがどれだけ良くても**そもそも見えない**。件数が少ないのが問題なのではなく、
+/// **候補集合が的外れ**だったという話（ユーザー報告：Everything は 7 万件見つけているのに
+/// 増強検索には数百件しか出ない）。
+///
+/// 5000 の根拠（本機実測、debug ビルド・クエリ "windows"／Everything 側 7 万件超）：
+///   200 件 → クエリ 13ms + rerank 0.3ms ／ 5000 件 → クエリ 43ms + rerank 3.6ms
+/// 150ms デバウンス済みの非同期コマンド内で 46ms は体感に出ない。release ではさらに速い。
+/// 一方 20000 件は 136ms + 16ms で、デバウンス幅に食い込むので採らない。
+/// **返す件数は増えない**ので IPC ペイロードと DOM ノード数は据え置き（そこが本当の律速：
+/// アイコンが 1 件約 1KB で結果に同梱され、かつリストは仮想化されていない）。
+const EVERYTHING_CANDIDATE_POOL: usize = 5000;
+
 /// 查询命令：按当前引擎分发，结果从预热缓存回填 Shell 图标（纯内存查表，不调 Shell API）。
 /// 图标在后台建索引时已批量预提（build_icon_cache），查询路径只剩内存查找。
 /// Everything 不可用时静默降级回内置（保证永远有结果）。
 #[tauri::command]
 pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
+    let want = limit.min(QUERY_LIMIT_CAP);
     let results = if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
-        match crate::everything::query(&query, limit.min(QUERY_LIMIT_CAP)) {
+        // 続120：**広く取って → 評価して → 狭めて返す**。
+        // 内置エンジンは元から索引全体を評価してから take(limit) しているので同じ形になった
+        // ——「切ってから評価する」形になっていたのは Everything 経路だけ。
+        match crate::everything::query(&query, EVERYTHING_CANDIDATE_POOL) {
             // 続117：内置と同じ物差しで並べ直してから返す（rerank_everything の説明を参照）
-            Ok(r) => rerank_everything(r, &query),
+            Ok(r) => {
+                let mut ranked = rerank_everything(r, &query);
+                ranked.truncate(want); // ← アイコン埋めより前に切る（下の fill は返す分だけで済む）
+                ranked
+            }
             Err(e) => {
                 eprintln!("[everything] 查询失败，降级内置: {e}");
-                builtin_search(&query, limit)
+                builtin_search(&query, want)
             }
         }
     } else {
-        builtin_search(&query, limit)
+        builtin_search(&query, want)
     };
     fill_icons_from_cache(results)
 }
@@ -747,6 +772,34 @@ mod tests {
         );
     }
 
+    /// 続120 の本丸：**「切ってから評価」ではなく「広く取って評価してから切る」**こと。
+    ///
+    /// 修正前は Everything に limit(200) をそのまま set_max として渡していたため、
+    /// Everything 既定順で 201 番目以降にある最良一致は**存在自体が見えなかった**。
+    /// ここでは「最良一致が候補の末尾にいる」状況を作り、返す件数を絞っても
+    /// それが拾えることを確認する。search_files 全体は SEARCH_ENGINE / Everything 本体に
+    /// 依存するので、その中核である rerank→truncate の順序を直接検証する。
+    #[test]
+    fn ranking_happens_before_truncation() {
+        // Everything の既定順を模す：先頭 299 件は名前の途中でしか当たらない長い名前、
+        // 最後の 1 件だけが完全な前缀一致（＝本当に欲しいもの）。
+        let mut pool: Vec<FileSearchResult> = (0..299)
+            .map(|i| res(&format!("zzz_archive_{i:04}_report_backup_old.md"), 0))
+            .collect();
+        pool.push(res("report.md", 0)); // 候補プールの**最後**に最良一致
+        assert_eq!(pool.len(), 300);
+
+        let mut ranked = rerank_everything(pool, "report");
+        ranked.truncate(10); // 返すのは 10 件だけ
+
+        assert_eq!(
+            ranked[0].name, "report.md",
+            "候補の末尾にあった最良一致が拾えていない —— 評価より前に切ってしまっている: {:?}",
+            ranked.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(ranked.len(), 10, "返す件数は truncate どおりであるべき");
+    }
+
     /// Everything の構文（`ext:` 等）でファイル名にクエリ語が出ない結果を**落とさない**こと。
     /// 落とすと「Everything では検索できるのに本アプリでは消える」という最悪の挙動になる。
     #[test]
@@ -900,6 +953,90 @@ mod tests {
             println!("  [{syntax}] {} 件（パニックせず完走）", r.len());
         }
         println!("  ✓ Everything 構文でパニックなし（続117 の -i32::MIN overflow 回帰なし）\n");
+
+        SEARCH_ENGINE.store(prev, Ordering::Relaxed);
+    }
+
+    /// 診断用（既定 #[ignore]、手動実行：
+    ///   cargo test --lib measure_result_limit_cost -- --ignored --nocapture）
+    ///
+    /// 「結果件数の上限を開けられるか」を数字で判断するための計測（続120 調査）。
+    /// 上限は 3 段ある：前端 ENH_FILE_LIMIT_EVERYTHING(200) → Rust QUERY_LIMIT_CAP(500)
+    /// → Everything set_max。実効的に効いているのは**前端の 200**。
+    ///
+    /// コストの内訳を分けて測る：
+    ///   ① Everything クエリ本体（IPC ＋ 文字列変換）
+    ///   ② アイコン埋め（**1 件ごとに base64 PNG 文字列を clone する**）
+    ///   ③ JSON シリアライズ（IPC で webview へ渡る実際のペイロード）
+    /// ③ が支配的なら、上限を上げる前に「アイコンを別便にする」等の設計変更が要る。
+    #[test]
+    #[ignore]
+    fn measure_result_limit_cost() {
+        if !crate::everything::is_available() {
+            println!("Everything 未起動のため計測不能。");
+            return;
+        }
+        let prev = SEARCH_ENGINE.load(Ordering::Relaxed);
+        SEARCH_ENGINE.store(ENGINE_EVERYTHING, Ordering::Relaxed);
+        let q = "windows"; // ユーザー報告のクエリ（Everything 側では 7 万件超）
+
+        println!("\n件数上限ごとのコスト（クエリ: {q:?}）");
+        println!("{:>7} | {:>9} | {:>9} | {:>9} | {:>11}", "上限", "クエリ", "rerank", "JSON化", "JSONサイズ");
+        println!("{}", "-".repeat(60));
+        for &n in &[200usize, 500, 1000, 5000, 20000] {
+            let t0 = Instant::now();
+            let raw = match crate::everything::query(q, n) {
+                Ok(r) => r,
+                Err(e) => { println!("{n:>7} | クエリ失敗: {e}"); continue; }
+            };
+            let got = raw.len();
+            let t_query = t0.elapsed();
+
+            let t1 = Instant::now();
+            let ranked = rerank_everything(raw, q);
+            let t_rank = t1.elapsed();
+
+            let t2 = Instant::now();
+            let json = serde_json::to_string(&ranked).unwrap_or_default();
+            let t_json = t2.elapsed();
+
+            println!(
+                "{got:>7} | {:>9.2?} | {:>9.2?} | {:>9.2?} | {:>8.1} KB",
+                t_query, t_rank, t_json, json.len() as f64 / 1024.0
+            );
+        }
+
+        // アイコン 1 個あたりの base64 サイズ ——「上限を上げたときの JSON 増分」の主因。
+        // ICON_CACHE はバックグラウンドワーカーが作るのでテストでは空。実測は直接取る。
+        // get_file_info は自前で COM を初期化するのでそのまま呼べる
+        for ext in ["txt", "exe", "png"] {
+            let probe = std::env::temp_dir().join(format!("wb_iconprobe.{ext}"));
+            let _ = std::fs::write(&probe, b"x");
+            let sz = crate::apps::get_file_info(probe.to_string_lossy().to_string())
+                .ok()
+                .and_then(|i| i.icon)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            println!("  .{ext} アイコンの base64 長: {} B", sz);
+            let _ = std::fs::remove_file(&probe);
+        }
+        println!("  ↑ 上限 N のとき JSON はおよそ N × (アイコン長 + パス長) だけ膨らむ");
+
+        // 続120 の効果を実データで：候補プールを広げると、返す 10 件の中身が実際に変わるか。
+        // 変わらなければ「切ってから評価」でも結果は同じ＝この変更に意味が無かったことになる。
+        println!("\n候補プールの広さが、返す上位 10 件をどう変えるか（クエリ: {q:?}）");
+        for &pool in &[200usize, EVERYTHING_CANDIDATE_POOL] {
+            if let Ok(r) = crate::everything::query(q, pool) {
+                let got = r.len();
+                let mut ranked = rerank_everything(r, q);
+                ranked.truncate(10);
+                println!("  候補 {got:>5} 件 → 上位 10:");
+                for x in &ranked {
+                    println!("      {}", x.name);
+                }
+            }
+        }
+        println!();
 
         SEARCH_ENGINE.store(prev, Ordering::Relaxed);
     }
