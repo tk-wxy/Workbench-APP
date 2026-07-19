@@ -634,7 +634,11 @@ pub fn launch_app(path: String) -> Result<(), String> {
 // camelCase：前端 FileEntry 接口读 `isDir`（Tauri 不会自动转换 serde 字段名，同 filesearch.rs
 // SearchResult 的既有约定）。此前缺这行属潜伏错配——历史调用点只读 .icon 故未暴露，
 // 续112 的「浏览文件…」要靠 isDir 区分 file/folder，补齐。
-#[derive(Debug, Clone, Serialize)]
+// Default は下のシリアライズ回帰テスト用（続119）。このテストは
+// **フィールドを足すたびに 2 回もビルド不能になった**（続115・続119）——しかも cargo check は
+// #[cfg(test)] を通さないので、その場では気づけない。`..Default::default()` で書けるように
+// しておけば、以後フィールドが増えてもテストは壊れない。
+#[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FileInfo {
     pub path: String,
@@ -648,6 +652,80 @@ pub struct FileInfo {
     /// 故前端必须容忍缺失（预览面板对 None 直接不渲染该行，而不是显示 1970）。
     pub modified: Option<u64>,
     pub created: Option<u64>,
+    // ── 続119：プレビュー面板の「消歧」を強めるための 3 項目 ────────────────
+    /// フォルダ内の項目数。ファイルなら常に None。
+    /// 動機：フォルダを選んでも面板の情報が全部「入れ物の外側」の話（位置/更新）で、
+    /// **そのフォルダ自身について何も言っていなかった**。
+    pub entries: Option<u32>,
+    /// 項目数の計上を DIR_COUNT_CAP で打ち切ったか。true なら前端は「N+」と表示する。
+    pub entries_capped: bool,
+    /// 画像のピクセル寸法。画像以外・読めない場合は None。
+    /// 「340 KB」より「1920 × 1080」の方が画像選択では圧倒的に有用。
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    /// .lnk の解決先フルパス。ショートカット以外は None。
+    /// 動機：スタートメニューの .lnk を選ぶと「位置」がスタートメニューのフォルダになり、
+    /// 実体がどこにあるのか分からない。
+    pub target: Option<String>,
+}
+
+/// フォルダ項目数の計上上限（続119）。数十万件のフォルダで read_dir を最後まで回すと
+/// プレビューが固まるので打ち切る。打ち切ったら entries_capped=true で前端に伝える。
+const DIR_COUNT_CAP: u32 = 10_000;
+
+/// フォルダ直下の項目数を数える（再帰しない —— 「このフォルダに何個あるか」が知りたいのであって
+/// 総ファイル数ではない。再帰すると巨大ツリーで固まる上、意味も変わる）。
+fn count_dir_entries(p: &std::path::Path) -> Option<(u32, bool)> {
+    let rd = std::fs::read_dir(p).ok()?; // 権限なし等は None（前端は「—」表示）
+    let mut n = 0u32;
+    for e in rd {
+        if e.is_err() {
+            continue; // 個々の列挙エラーは飛ばす（全体を諦めない）
+        }
+        n += 1;
+        if n >= DIR_COUNT_CAP {
+            return Some((n, true));
+        }
+    }
+    Some((n, false))
+}
+
+/// 画像のピクセル寸法。**ヘッダのみ読む**（into_dimensions）—— 全復号すると
+/// 数千万画素の画像でプレビューが固まる。拡張子で足切りしてから開く。
+fn image_dims(path: &str, ext: &str) -> Option<(u32, u32)> {
+    if !matches!(ext, "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" | "avif") {
+        return None;
+    }
+    // with_guessed_format：拡張子が実体と食い違っていても中身から判定させる
+    image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.into_dimensions().ok()
+}
+
+/// .lnk を解決して実体のフルパスを返す（続119）。
+///
+/// ⚠️ 呼び出し側で COM が初期化済みであること（get_file_info の CoInitializeEx 区間内で呼ぶ）。
+/// 既存の `resolve_lnk` は名前とアイコンを取るだけで**リンク先は解決していない**ので別物。
+fn resolve_lnk_target(path: &str) -> Option<String> {
+    use windows::core::{Interface, PCWSTR}; // Interface = .cast() を生やすトレイト
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    if !path.to_lowercase().ends_with(".lnk") {
+        return None;
+    }
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        let pf: IPersistFile = link.cast().ok()?;
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        pf.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
+        let mut buf = [0u16; 260]; // MAX_PATH。超える先は諦める（None → 前端は行を出さない）
+        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let s = String::from_utf16_lossy(&buf[..end]);
+        if s.is_empty() {
+            None // MSI アドバタイズ型ショートカット等は GetPath が空を返す
+        } else {
+            Some(s)
+        }
+    }
 }
 
 /// SystemTime → Unix 秒。早于 epoch（异常时钟 / 某些网络盘）返回 None，不返回负数或 0。
@@ -674,13 +752,31 @@ pub fn get_file_info(path: String) -> Result<FileInfo, String> {
     let meta = p.metadata().map_err(|e| format!("{}", e))?;
     let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let ext = p.extension().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    // 提取 Windows 系统图标；COM 仅在本次调用线程上临时初始化
+    let is_dir = meta.is_dir();
+    // 提取 Windows 系统图标 + 解析 .lnk；两者都要 COM，共用这一次临时初始化（续119 起）
     let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
     let icon = extract_icon_base64(&path);
+    let target = resolve_lnk_target(&path);
     if com_hr == 0 { unsafe { CoUninitialize(); } } // 仅 S_OK 时配对反初始化
+    // ↓ ディスク I/O を伴うのでフォルダ / 画像それぞれ**該当する場合だけ**走らせる。
+    //   本コマンドはプレビュー面板から呼ばれる非同期経路であり、
+    //   「查询命令（search_files 等）はメモリのみ」という鉄則の対象外。
+    let (entries, entries_capped) = if is_dir {
+        match count_dir_entries(&p) {
+            Some((n, capped)) => (Some(n), capped),
+            None => (None, false),
+        }
+    } else {
+        (None, false)
+    };
+    let (width, height) = match if is_dir { None } else { image_dims(&path, &ext) } {
+        Some((w, h)) => (Some(w), Some(h)),
+        None => (None, None),
+    };
     Ok(FileInfo {
-        path, name, is_dir: meta.is_dir(), size: meta.len(), ext, icon,
+        path, name, is_dir, size: meta.len(), ext, icon,
         modified: unix_secs(meta.modified()), created: unix_secs(meta.created()),
+        entries, entries_capped, width, height, target,
     })
 }
 
@@ -731,23 +827,122 @@ pub fn resolve_lnk(path: String) -> LnkInfo {
 mod tests {
     use super::*;
 
+    /// 続119 で追加した 3 フィールドも camelCase で出ること。
+    /// 前端は `entriesCapped` を読む —— snake_case のままだと undefined（静默 falsy）になり、
+    /// 打ち切った巨大フォルダが「10000 個」と**嘘の確定値**で表示される。
+    #[test]
+    fn file_info_new_fields_serialize_as_camel_case() {
+        let json = serde_json::to_string(&FileInfo {
+            entries: Some(12),
+            entries_capped: true,
+            width: Some(1920),
+            height: Some(1080),
+            target: Some("C:\\app\\real.exe".into()),
+            ..Default::default()
+        })
+        .expect("FileInfo 应可序列化");
+        assert!(json.contains("\"entriesCapped\":true"), "前端读 entriesCapped: {json}");
+        assert!(!json.contains("entries_capped"), "不应残留 snake_case: {json}");
+        for k in ["\"entries\":12", "\"width\":1920", "\"height\":1080"] {
+            assert!(json.contains(k), "缺字段 {k}: {json}");
+        }
+    }
+
+    /// フォルダ項目数（続119）：直下のみ数える・再帰しない・打ち切りが効く。
+    #[test]
+    fn count_dir_entries_counts_shallow_and_caps() {
+        let base = std::env::temp_dir().join("wb_dircount_test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        for i in 0..5 {
+            std::fs::write(base.join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        // 入れ子の中身は数に入ってはいけない（「このフォルダに何個あるか」が知りたい）
+        std::fs::write(base.join("sub").join("deep.txt"), b"x").unwrap();
+        let (n, capped) = count_dir_entries(&base).expect("読めるはず");
+        assert_eq!(n, 6, "直下 = ファイル 5 + フォルダ sub 1（入れ子の deep.txt は数えない）");
+        assert!(!capped, "6 件で打ち切られてはいけない");
+
+        // 存在しないパスは None（前端は「—」表示に退化）
+        assert!(count_dir_entries(&base.join("nope")).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// .lnk 以外に対して resolve_lnk_target が COM を触らず即 None を返すこと（続119）。
+    /// ここが早期 return しないと、全ファイルのプレビューで無駄に ShellLink を生成することになる。
+    #[test]
+    fn resolve_lnk_target_ignores_non_lnk() {
+        assert!(resolve_lnk_target("C:\\x\\a.txt").is_none());
+        assert!(resolve_lnk_target("C:\\x\\a.exe").is_none());
+        // 大文字小文字は問わない（.LNK も存在する）—— 実体が無いので解決自体は失敗するが、
+        // 少なくとも拡張子判定で弾かれてはいけない。パニックしないことを見る。
+        let _ = resolve_lnk_target("C:\\x\\nonexistent.LNK");
+    }
+
+    /// 画像寸法（続119）：非画像拡張子は開かずに None。
+    /// 拡張子で足切りしないと、巨大な zip 等をデコーダに渡すことになる。
+    #[test]
+    fn image_dims_skips_non_images() {
+        assert!(image_dims("C:\\x\\a.zip", "zip").is_none());
+        assert!(image_dims("C:\\x\\a.txt", "txt").is_none());
+        assert!(image_dims("C:\\x\\nonexistent.png", "png").is_none(), "存在しないファイルは None");
+    }
+
+    /// 診断用（既定 #[ignore]、手動実行：
+    ///   cargo test --lib probe_real_lnk -- --ignored --nocapture）
+    ///
+    /// 実機のスタートメニューにある本物の .lnk を get_file_info 経由で解決してみる。
+    /// COM 生成に失敗しても resolve_lnk_target は静かに None を返すだけなので、
+    /// **本当に効いているかは実データを通さないと分からない**。ここはその確認用。
+    /// 併せて画像寸法・フォルダ項目数も実物で見る。
+    #[test]
+    #[ignore]
+    fn probe_real_lnk() {
+        let menu = PathBuf::from(std::env::var("ProgramData").unwrap_or_default())
+            .join("Microsoft/Windows/Start Menu/Programs");
+        let mut shown = 0;
+        if let Ok(rd) = std::fs::read_dir(&menu) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().map(|x| x.eq_ignore_ascii_case("lnk")) != Some(true) {
+                    continue;
+                }
+                let info = match get_file_info(p.to_string_lossy().to_string()) {
+                    Ok(i) => i,
+                    Err(err) => { println!("  ! {} → {err}", p.display()); continue; }
+                };
+                println!(
+                    "  {:<34} → {}",
+                    info.name,
+                    info.target.as_deref().unwrap_or("(解決できず / アドバタイズ型)")
+                );
+                shown += 1;
+                if shown >= 6 { break; }
+            }
+        }
+        if shown == 0 {
+            println!("  スタートメニューに .lnk が見つからず（判定不能）: {}", menu.display());
+        }
+
+        // ついでにフォルダ項目数を実物で（このリポジトリの src ディレクトリ）
+        if let Ok(info) = get_file_info("D:\\dev\\workbench-app\\src".into()) {
+            println!("  src/ の項目数: {:?} (capped={})", info.entries, info.entries_capped);
+        }
+    }
+
     /// FileInfo 必须以 camelCase 过 IPC——前端 `FileEntry` 接口读的是 `isDir`。
     /// 缺 `#[serde(rename_all)]` 时前端拿到的是 undefined（不是报错，是静默 falsy），
     /// 表现为「拖进来的文件夹被当成文件」：磁贴/卡片显通用文件字形、中转卡片元信息不显示「文件夹」。
     /// 这个错配曾潜伏很久（历史调用点只读 .icon 故没暴露），故用测试钉死。
     #[test]
     fn file_info_serializes_is_dir_as_camel_case() {
+        // `..Default::default()` で書く（続119）：ここは serde の rename を見るのが目的で、
+        // 個々のフィールド値はどうでもいい。全列挙するとフィールドを足すたびにビルドが壊れ、
+        // 実際に続115・続119 の 2 回それをやっている。
         let json = serde_json::to_string(&FileInfo {
-            path: "C:\tmp".into(),
             name: "tmp".into(),
             is_dir: true,
-            size: 0,
-            ext: String::new(),
-            icon: None,
-            // 続115 で追加された 2 フィールド。当時ここを直し忘れて cargo test が
-            // ビルドできなくなっていた（cargo check は #[cfg(test)] を compile しないため素通り）。
-            modified: None,
-            created: None,
+            ..Default::default()
         })
         .expect("FileInfo 应可序列化");
         assert!(json.contains("\"isDir\":true"), "前端读 isDir，实际序列化为: {json}");
