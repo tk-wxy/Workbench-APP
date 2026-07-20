@@ -172,7 +172,25 @@ pub fn scan_start_menu() -> Vec<AppInfo> {
     if let Some(ref apps) = *guard {
         return apps.clone();
     }
-    let apps = do_scan();
+    let apps = do_scan(|_| {});
+    *guard = Some(apps.clone());
+    apps
+}
+
+/// 两段式扫描（续128）：`.lnk` 那批一扫完就先回调一次，之后才去枚举 UWP。
+///
+/// 起因是续125 把 UWP 枚举串在 `.lnk` 之后，实测 +1.94s ——`apps-ready` 整体晚到约 2 秒，
+/// 而那 2 秒里 `.lnk` 那批（占绝大多数、且是用户最常用的）其实早就备好了，干等没有意义。
+/// 后台 worker 用它先把第一批送给前端渲染，UWP 扫完再补发一次完整列表。
+///
+/// 命中缓存时**不回调**：此时无需分段，调用方直接拿到完整列表。
+pub fn scan_start_menu_staged(on_partial: impl FnOnce(&[AppInfo])) -> Vec<AppInfo> {
+    let cache = APP_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap();
+    if let Some(ref apps) = *guard {
+        return apps.clone();
+    }
+    let apps = do_scan(on_partial);
     *guard = Some(apps.clone());
     apps
 }
@@ -180,12 +198,12 @@ pub fn scan_start_menu() -> Vec<AppInfo> {
 #[tauri::command]
 pub fn refresh_apps() -> Vec<AppInfo> {
     let cache = APP_CACHE.get_or_init(|| Mutex::new(None));
-    let apps = do_scan();
+    let apps = do_scan(|_| {});
     *cache.lock().unwrap() = Some(apps.clone());
     apps
 }
 
-fn do_scan() -> Vec<AppInfo> {
+fn do_scan(on_partial: impl FnOnce(&[AppInfo])) -> Vec<AppInfo> {
     // SHGetFileInfoW 需要 COM（STA），必须在调用线程初始化
     let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
 
@@ -235,6 +253,12 @@ fn do_scan() -> Vec<AppInfo> {
         }
     }
 
+    // 续128：.lnk 这批已备好，先交出去（UWP 枚举还要约 2 秒，没必要让前端干等）。
+    // 排序放在这里而不是只在末尾做一次——半成品也得是按名字排好的，否则前端先渲染出一个
+    // 乱序列表、2 秒后又整个重排，比晚 2 秒更难看。
+    sort_by_name(&mut apps);
+    on_partial(&apps);
+
     // UWP / Packaged Apps（续125）。放在 .lnk 之后：`seen` 已被 .lnk 填过，
     // 同名冲突时保留 .lnk 那条 —— 它的 path 是真实文件路径，能力严格更强（可 reveal、可复制）。
     let packaged_count = if apps.len() < MAX_APPS {
@@ -256,7 +280,7 @@ fn do_scan() -> Vec<AppInfo> {
         0
     };
 
-    apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    sort_by_name(&mut apps);
     let with_icon = apps.iter().filter(|a| a.icon.is_some()).count();
     println!(
         "[apps] scan done: {} apps ({} packaged), {} with icons",
@@ -268,6 +292,12 @@ fn do_scan() -> Vec<AppInfo> {
 
 /// 应用列表总条数上限（.lnk + UWP 合计）。续125 前是硬编码 400 且只有 .lnk 一路。
 const MAX_APPS: usize = 600;
+
+/// 按名字（不区分大小写）排序。续128 起要排两次——半成品交出去前一次、补完 UWP 后一次，
+/// 故抽成函数，避免两处规则各写一遍将来改歪。
+fn sort_by_name(apps: &mut [AppInfo]) {
+    apps.sort_by_key(|a| a.name.to_lowercase());
+}
 
 fn scan_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -1075,6 +1105,32 @@ mod tests {
         if hr >= 0 {
             unsafe { CoUninitialize() };
         }
+    }
+
+    /// 诊断用（默认 #[ignore]，手动执行：
+    ///   cargo test --lib probe_staged_scan -- --ignored --nocapture）
+    ///
+    /// 验证续128 两段式扫描的实际时序：第一批（.lnk）比完整列表早多少。
+    /// 这个差值就是续125 引入 UWP 枚举后、前端白等的那段时间。
+    #[test]
+    #[ignore]
+    fn probe_staged_scan() {
+        let t0 = std::time::Instant::now();
+        let mut stage1 = (0usize, std::time::Duration::ZERO);
+        let all = scan_start_menu_staged(|partial| {
+            stage1 = (partial.len(), t0.elapsed());
+            // 半成品也必须是排好序的，否则前端先渲染乱序、补完再整体重排
+            let names: Vec<String> = partial.iter().map(|a| a.name.to_lowercase()).collect();
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(names, sorted, "交给前端的半成品必须已按名字排序");
+        });
+        let full = t0.elapsed();
+        println!("第一批(.lnk): {} 条 / {:?}", stage1.0, stage1.1);
+        println!("完整列表:     {} 条 / {:?}", all.len(), full);
+        println!("前端提前拿到结果: {:?}", full.saturating_sub(stage1.1));
+        assert!(stage1.0 > 0, "第一批不应为空");
+        assert!(all.len() >= stage1.0, "完整列表不应少于第一批");
     }
 
     /// 诊断用（默认 #[ignore]，⚠️ **会真的启动一个应用**（计算器），手动执行：
