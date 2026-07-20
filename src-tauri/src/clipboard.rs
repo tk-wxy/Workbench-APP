@@ -21,14 +21,21 @@ static SKIP_CLIP_UNTIL_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::At
 /// 互抢导致 SetClipboardData 报 os error 1418（线程没有打开的剪贴板）。paste 路径靠写前武装
 /// SKIP_CLIP_EVENTS 让监听跳过、不读，故不入此锁、行为不变。
 static CLIPBOARD_LOCK: Mutex<()> = Mutex::new(());
+/// 剪贴板变化事件的「代数」计数器 + 条件变量（续129 事件驱动）：message-only 窗口收到
+/// WM_CLIPBOARDUPDATE 即自增并唤醒监听线程。用代数而非布尔标志，是为了封住 lost wakeup——
+/// 监听线程正在处理上一轮时发生的变化会让代数先行，随后的 wait 一看代数已变即刻返回、不空等，
+/// 故「读取期间又复制一次」不会漏。
+static CLIP_EVENT_GEN: Mutex<u64> = Mutex::new(0);
+static CLIP_EVENT_CV: std::sync::Condvar = std::sync::Condvar::new();
 /// 剪贴板历史落盘路径（setup 阶段写入一次，之后只读）。未初始化时 load/save 静默 no-op。
 static CLIP_HISTORY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 /// 原图落盘目录（setup 阶段初始化）。未初始化时 save_clip_image_to_disk 静默跳过。
 static CLIP_IMAGE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
 // ── 可调参数 ───────────────────────────────────────────────
-/// 剪贴板后台轮询间隔（150ms：快速连续复制时两次变化落在同一采样窗口会塌缩、丢中间项，
-/// 故压低采样窗口。seq 检查是 µs 级，提频几乎零成本）
+/// 剪贴板监听的**兜底**轮询间隔（150ms）。续129 起主路径是事件驱动（WM_CLIPBOARDUPDATE），
+/// 此值降级为 condvar 等待的超时上限：监听器注册失败 / 通知意外丢失时，行为退回与续129 之前
+/// 逐字节相同的 150ms 轮询。**别调大**——它是「绝不比旧版更差」的地板；seq 检查 µs 级，白等一轮近乎零成本。
 const CLIP_POLL_MS: u64 = 150;
 /// 剪贴板被占用（快速复制时源程序短暂锁定）时，本轮内的重试次数
 const CLIP_READ_RETRIES: u32 = 4;
@@ -120,6 +127,21 @@ fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
 /// - `Ok(None)` 剪贴板可访问但无可缓存内容（空 / 不支持的格式）→ 可推进 seq
 /// - `Err(())`  剪贴板打不开/被占用（快速复制时源程序短暂锁定）→ 应重试，**勿推进 seq**
 fn build_clip_entry() -> Result<Option<serde_json::Value>, ()> {
+    // ⚠️ 三态契约的守门人（续129b）。下面每个 reader 都把「剪贴板打不开」和「没有该格式」
+    // 压成同一个 None/Err（`read_clipboard_files` 尤其明显：OpenClipboard 失败也只返回 None），
+    // 于是「被占用」会一路落到函数末尾的 Ok(None) → 推进 seq → **条目永久丢弃且零日志**。
+    // 150ms 轮询时源程序早放开了、几乎不触发；改事件驱动后我们在通知后 µs 级就读，
+    // 正撞上源程序（及被同一通知唤醒的其他监听者）仍持句柄 → 必现。
+    // 故先探一次可开性：打不开 = Err（本轮重试 / 下轮再来），绝不当成「无内容」。
+    build_clip_entry_inner(clipboard_openable())
+}
+
+/// 与 build_clip_entry 分开只为让「可开性 → 三态」这条判定可被确定性测试
+/// （真实的"被占用"只有跨进程才构造得出来，进程内 `OpenClipboard(NULL)` 不互斥，测不了）。
+fn build_clip_entry_inner(openable: bool) -> Result<Option<serde_json::Value>, ()> {
+    if !openable {
+        return Err(());
+    }
     // 检测顺序：图片优先（截图同时有 CF_HDROP+CF_BITMAP/DIB/DIBV5）
     if has_clipboard_image() {
         let mut cb = arboard::Clipboard::new().map_err(|_| ())?;
@@ -151,10 +173,144 @@ fn build_clip_entry() -> Result<Option<serde_json::Value>, ()> {
     if let Ok(img) = cb.get_image() {
         return Ok(image_to_cache_entry(img));
     }
+    // 走到这里 = 所有 reader 都没拿到东西。但「开头探测通过、随后被别人抢走」的竞态仍在
+    // （事件驱动下所有剪贴板监听者被同一条通知同时唤醒，抢句柄是常态），故复检一次：
+    // 此刻打不开 → 刚才的失败是"被占用"，报 Err 去重试，而不是宣告"无内容"把条目丢掉。
+    if !clipboard_openable() {
+        println!("[clipbg] reader 全部落空且剪贴板已被占用 → 判为忙，重试");
+        return Err(());
+    }
+    // 确实可开但没有我们支持的格式（此时推进 seq 是对的，否则会无限重试）。
+    // 必须有日志：续129b 的教训——这条路径原本完全静默，丢条目时无迹可寻。
+    println!("[clipbg] 无可缓存格式（剪贴板可开但无 图片/文件/文本）→ 跳过");
     Ok(None)
 }
 
-/// 后台线程：每 CLIP_POLL_MS 对比剪贴板序列号，变化时读取+缩放+存入缓存，并推送前端。
+/// 探测剪贴板此刻能否打开。**只用来把「被占用」与「无内容」区分开**，不读任何数据。
+/// 有竞态（探测通过后仍可能被别人抢走），故不是保证，只是把常见误判掰正；真正的兜底仍是重试。
+fn clipboard_openable() -> bool {
+    unsafe {
+        if OpenClipboard(0) == 0 {
+            return false;
+        }
+        CloseClipboard();
+        true
+    }
+}
+
+// ── 剪贴板变化通知：事件驱动（续129）───────────────────────────
+/// 读取当前事件代数（监听线程起手取基线用）。
+fn current_clip_event_gen() -> u64 {
+    *CLIP_EVENT_GEN.lock().unwrap()
+}
+
+/// 记录一次剪贴板变化。**只在 wnd proc 里调**，必须极快：不读剪贴板、不取 CLIPBOARD_LOCK、
+/// 不做编码——任何重活都会堵住消息循环，让后续 WM_CLIPBOARDUPDATE 延迟送达，等于退回轮询。
+fn signal_clip_event() {
+    if let Ok(mut gen) = CLIP_EVENT_GEN.lock() {
+        *gen += 1;
+    }
+    CLIP_EVENT_CV.notify_all();
+}
+
+/// 等一次剪贴板变化。`seen` = 调用方上次看到的代数，返回时更新为当前代数。
+/// 返回 true = 被事件唤醒（含「等待前就已发生」的情况，立即返回），false = 兜底超时。
+fn wait_clip_event(seen: &mut u64, timeout_ms: u64) -> bool {
+    let gen = CLIP_EVENT_GEN.lock().unwrap();
+    let (gen, res) = CLIP_EVENT_CV
+        .wait_timeout_while(
+            gen,
+            std::time::Duration::from_millis(timeout_ms),
+            |g| *g == *seen,
+        )
+        .unwrap();
+    let by_event = !res.timed_out();
+    *seen = *gen;
+    by_event
+}
+
+unsafe extern "system" fn clip_listener_wnd_proc(
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
+    wp: windows::Win32::Foundation::WPARAM,
+    lp: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::{DefWindowProcW, WM_CLIPBOARDUPDATE};
+    if msg == WM_CLIPBOARDUPDATE {
+        signal_clip_event();
+        return windows::Win32::Foundation::LRESULT(0);
+    }
+    DefWindowProcW(hwnd, msg, wp, lp)
+}
+
+/// 独立线程：message-only 窗口 + AddClipboardFormatListener + 消息循环。
+/// 这是本项目**唯一**自建消息循环的线程，故意与 tao 主事件循环、与读取线程三方隔离：
+/// 它只把「变了」这一个 bit 传出去（signal_clip_event），真正的读取仍在 start_clipboard_monitor。
+/// 任何一步失败都只 log 并退出线程 → 监听自动退回 CLIP_POLL_MS 轮询，功能不缺失、只是回到旧精度。
+/// 不做 RemoveClipboardFormatListener/DestroyWindow：进程退出即由 OS 回收，本项目无 shutdown 钩子。
+fn start_clipboard_listener() {
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::DataExchange::AddClipboardFormatListener;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
+        HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
+    };
+    std::thread::spawn(|| unsafe {
+        let hinst = match GetModuleHandleW(None) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[cliplistener] GetModuleHandleW failed: {e:?} → 退回轮询");
+                return;
+            }
+        };
+        let class = w!("WorkbenchClipboardListener");
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(clip_listener_wnd_proc),
+            hInstance: hinst.into(),
+            lpszClassName: class,
+            ..Default::default()
+        };
+        if RegisterClassW(&wc) == 0 {
+            eprintln!("[cliplistener] RegisterClassW failed → 退回轮询");
+            return;
+        }
+        let hwnd = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            w!(""),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            HWND_MESSAGE,
+            None,
+            hinst,
+            None,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[cliplistener] CreateWindowExW failed: {e:?} → 退回轮询");
+                return;
+            }
+        };
+        if let Err(e) = AddClipboardFormatListener(hwnd) {
+            eprintln!("[cliplistener] AddClipboardFormatListener failed: {e:?} → 退回轮询");
+            return;
+        }
+        println!("[cliplistener] 事件驱动就绪（WM_CLIPBOARDUPDATE）");
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        eprintln!("[cliplistener] 消息循环退出 → 退回轮询");
+    });
+}
+
+/// 后台线程：等剪贴板变化事件（兜底 CLIP_POLL_MS 超时），变化时读取+缩放+存入缓存，并推送前端。
 /// 图片分支：仅 get_image 在 CLIPBOARD_LOCK 内（最小临界区），thumb/ahash/编码在锁外；
 ///   大图（> MAX_THUMB_DIM）判新后 detached spawn 写原图，不阻塞监听循环（防加宽采样塌缩窗口）。
 /// 文件/文本分支：沿用原有逻辑，仍在锁内重试。
@@ -162,8 +318,11 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     std::thread::spawn(move || {
         let mut last_seq = unsafe { GetClipboardSequenceNumber() };
+        // 事件代数基线：必须在进循环前取，之后每轮由 wait_clip_event 更新。
+        let mut seen_gen = current_clip_event_gen();
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(CLIP_POLL_MS));
+            // 续129：等事件而非盲睡。醒来后的判定完全照旧——seq 仍是唯一真相，事件只决定「多快醒」。
+            let by_event = wait_clip_event(&mut seen_gen, CLIP_POLL_MS);
             let seq = unsafe { GetClipboardSequenceNumber() };
             if seq == last_seq { continue; }
 
@@ -172,19 +331,31 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
             if skip > 0 {
                 SKIP_CLIP_EVENTS.store(skip - 1, Ordering::SeqCst);
                 last_seq = seq;
+                // 有日志才查得动「复制了却没进历史」：静默跳过是续129c 之前的诊断盲区
+                println!("[clipbg] 跳过自写（SKIP_CLIP_EVENTS {skip}→{}）", skip - 1);
                 continue;
             }
-            // 跳过 copy_*「只复制不粘贴」的自写：seq ≤ 水位即自写或更早 → 不入历史面板（防循环）
-            if seq <= SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst) {
+            // 跳过自写：seq ≤ 水位即自写或更早 → 不入历史面板（防循环）
+            let water = SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst);
+            if seq <= water {
                 last_seq = seq;
+                println!("[clipbg] 跳过自写（seq {seq} ≤ 水位 {water}）");
                 continue;
             }
             // 读剪贴板与 copy_* 的写入串行（CLIPBOARD_LOCK），防并发 OpenClipboard 撞 os error 1418
             let clip_guard = CLIPBOARD_LOCK.lock().unwrap();
             // 拿锁后重读 seq + 复核水位
             let seq = unsafe { GetClipboardSequenceNumber() };
-            if seq <= SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst) { last_seq = seq; continue; }
-            println!("[clipbg] seq changed → reading");
+            let water = SKIP_CLIP_UNTIL_SEQ.load(Ordering::SeqCst);
+            if seq <= water {
+                last_seq = seq;
+                println!("[clipbg] 跳过自写（锁后复核：seq {seq} ≤ 水位 {water}）");
+                continue;
+            }
+            println!(
+                "[clipbg] seq changed → reading (wake={})",
+                if by_event { "event" } else { "poll" }
+            );
 
             // ── 图片分支：仅 get_image 在锁内，thumb/ahash/编码在锁外 ──────────────
             if has_clipboard_image() {
@@ -628,6 +799,7 @@ pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<
 
     // 非桌面：CF_HDROP 写回 + Ctrl+V
     SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+    let _sg = SkipGuard; // 防中途 return/? 留下计数残留（吃掉真实复制）
     {
         // 仅罩 write_cf_hdrop 的 OpenClipboard…CloseClipboard；锁在此处不进 write_cf_hdrop
         // （它被已持锁的 copy_files_to_clipboard 共用，进函数会重入死锁）。下面焦点交还/Ctrl+V 在锁外
@@ -779,6 +951,7 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         // CF_HDROP 写回 + Ctrl+V，复用文件粘贴 idiom（与 set_clipboard_files 一致）：
         // 锁加在【调用方】、不进 write_cf_hdrop（防与 copy 路径重入死锁）；写前 SKIP_CLIP_EVENTS 防自写回流。
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        let _sg = SkipGuard; // 防中途 return/? 留下计数残留（吃掉真实复制）
         {
             // 仅罩 write_cf_hdrop 的 OpenClipboard…CloseClipboard 临界区；绝不跨焦点交还/Ctrl+V 持锁
             let _g = CLIPBOARD_LOCK.lock().unwrap();
@@ -821,6 +994,7 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
 
         // 文本写回 idiom 同 paste_clipboard：锁仅罩写入临界区，SKIP_CLIP_EVENTS + suppress 防自写回流。
         SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        let _sg = SkipGuard; // 防中途 return/? 留下计数残留（吃掉真实复制）
         {
             let _g = CLIPBOARD_LOCK.lock().unwrap();
             let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
@@ -852,6 +1026,7 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         // 历史图写回剪贴板（base64 空 = 当前图，已在剪贴板，跳过写入直接 Ctrl+V）
         if !base64.is_empty() {
             SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+            let _sg = SkipGuard; // 防中途 return/? 留下计数残留（吃掉真实复制）
             // 锁外读文件（文件 I/O 绝不进 CLIPBOARD_LOCK）
             let rgba_from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
                 .and_then(|p| std::fs::read(p).ok())
@@ -944,11 +1119,37 @@ pub(crate) fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String
 // 与 paste/set_clipboard_* 的区别：不 hide、不查前台、无桌面分支、无 Ctrl+V。
 // 写后调 suppress_clip_until_now()，使自写内容不回流历史面板（防循环）。
 
-/// copy_* 写回剪贴板后调用：记当前 seq 为水位，令后台监听跳过本次自写，避免自写内容回流历史面板。
+/// RAII 兜底（续129c）：确保 `SKIP_CLIP_EVENTS` 不会因写入路径中途 `?`/`return` 而留下残留。
+/// 4 个 `store(2)` 站点全都有提前退出路径（`write_cf_hdrop(&paths)?`、base64 解码失败 return…），
+/// 残留会去吃掉后面最多 2 次**真实**复制，症状是"复制了却没进历史"且**毫无日志**。
+/// 正常路径由 `suppress_clip_until_now` 提前清零，故 Drop 时通常已是 0、不打印。
+struct SkipGuard;
+impl Drop for SkipGuard {
+    fn drop(&mut self) {
+        let residual = SKIP_CLIP_EVENTS.swap(0, Ordering::SeqCst);
+        if residual > 0 {
+            eprintln!("[clipbg] 写入路径提前退出，清理 SKIP_CLIP_EVENTS 残留 {residual}");
+        }
+    }
+}
+
+/// 写回剪贴板后调用：记当前 seq 为水位，令后台监听跳过本次自写，避免自写内容回流历史面板。
+///
+/// **两层防护的交接点（续129c）**：写入前的 `SKIP_CLIP_EVENTS.store(2)` 负责保护
+/// 「水位还没抬起来」的那段窗口（写完 CloseClipboard 到本函数之间，监听可能抢到锁去读自写内容）；
+/// 本函数抬起水位后，判定改由 seq 水位接管——它与跳变次数/唤醒时序**无关**，是更强的保证。
+/// 故此处必须把计数清零：`store(2)` 是按"最多 2 次 seq 跳变"预设的，而一次唤醒只消费 1 个，
+/// **没被消费完的残留会去吃掉下一次真实复制**（§6 记载的老坑）。续129 改事件驱动后
+/// 自写通常只产生 1 次通知 → 残留几乎必然发生 → 症状即"粘贴过之后，下一次复制没进历史"。
 fn suppress_clip_until_now() {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     let now = unsafe { GetClipboardSequenceNumber() };
     SKIP_CLIP_UNTIL_SEQ.store(now, Ordering::SeqCst);
+    // 水位已接管本次自写的判定 → 计数使命完成，清零，绝不留给下一次真实复制去吃。
+    let residual = SKIP_CLIP_EVENTS.swap(0, Ordering::SeqCst);
+    if residual > 0 {
+        println!("[clipbg] 自写完成，清理 SKIP_CLIP_EVENTS 残留 {residual}（判定已交给 seq 水位）");
+    }
 }
 
 #[tauri::command]
@@ -1152,8 +1353,197 @@ pub(crate) fn init(app: &AppHandle, data_dir: &std::path::Path) {
     let _ = CLIP_IMAGE_DIR.set(image_dir);
     // 2. 读历史（必须在 monitor 之前，否则监听写盘会覆盖磁盘历史）
     load_clip_history();
-    // 3. 启动监听（必须在 load 之后）
+    // 3. 启动事件通知源（续129）。放在 monitor 之前只为让 monitor 一起手就有事件可等；
+    //    二者无强时序依赖——它失败也只是 monitor 退回 CLIP_POLL_MS 轮询。
+    start_clipboard_listener();
+    // 4. 启动监听（必须在 load 之后）
     start_clipboard_monitor(app.clone());
-    // 4. 启动 janitor（sleep CLIP_IMAGE_SWEEP_INITIAL_MS=5s 软时序错开，保证 load 完成再 sweep）
+    // 5. 启动 janitor（sleep CLIP_IMAGE_SWEEP_INITIAL_MS=5s 软时序错开，保证 load 完成再 sweep）
     start_clip_image_janitor();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CLIP_EVENT_GEN 是全局的，而 cargo test 默认并行跑同一进程：不串行化的话，别的用例的
+    /// signal 会把「超时用例」提前唤醒 → 偶发假失败。故三个用例整体串行。
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 续129 事件驱动的核心不变量：**在 wait 之前就发生的变化不能被吞掉**。
+    /// 这条如果破了，症状正是本次要修的「复制两个少一个」——只是从轮询塌缩换成 lost wakeup，
+    /// 而且更难复现。故用代数（而非布尔/裸 Condvar::wait）实现，并在此钉死。
+    #[test]
+    fn clip_event_before_wait_is_not_lost() {
+        let _g = serial();
+        let mut seen = current_clip_event_gen();
+        signal_clip_event(); // 变化发生在 wait 之前
+        let t = std::time::Instant::now();
+        // 超时给足 2s：若实现有 lost wakeup，这里必然等满 2s 且返回 false
+        let by_event = wait_clip_event(&mut seen, 2000);
+        assert!(by_event, "wait 之前发生的事件被吞掉了（lost wakeup）");
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "应立即返回而非等满超时");
+    }
+
+    /// 无事件时必须按超时返回，且报告 by_event=false —— 这是「退回轮询」的降级路径。
+    #[test]
+    fn clip_event_times_out_without_signal() {
+        let _g = serial();
+        let mut seen = current_clip_event_gen();
+        let t = std::time::Instant::now();
+        let by_event = wait_clip_event(&mut seen, 120);
+        assert!(!by_event, "无事件却报告被事件唤醒");
+        assert!(t.elapsed() >= std::time::Duration::from_millis(100), "提前返回，未真正等待");
+    }
+
+    /// 续129b 回归钉死：剪贴板**被别人占着**时，build_clip_entry 必须报 `Err`（可重试），
+    /// 绝不能报 `Ok(None)`（"无内容"）——后者会让调用方推进 seq，**条目永久丢弃且零日志**。
+    /// 这正是续129 首版把「图片/文件/文件夹全都进不了历史」引爆的那条路径。
+    /// 只断言"被占用"这一个方向：我们自己持着句柄，故必然打不开，不受外部环境影响、不会 flaky。
+    /// 续129c 回归钉死：自写写完、水位抬起后，`SKIP_CLIP_EVENTS` 必须归零。
+    /// `store(2)` 是按"最多 2 次 seq 跳变"预设的，但**一次唤醒只消费 1 个**；没消费完的残留
+    /// 会去吃掉下一次**真实**复制 → "粘贴过之后，下一次复制没进历史"。事件驱动下自写通常
+    /// 只产生 1 次通知，残留几乎必然发生，故这条必须钉死。
+    #[test]
+    fn suppress_clears_skip_counter_residual() {
+        let _g = serial();
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        suppress_clip_until_now();
+        assert_eq!(
+            SKIP_CLIP_EVENTS.load(Ordering::SeqCst),
+            0,
+            "水位已接管自写判定，计数残留必须清零，否则会吃掉下一次真实复制"
+        );
+    }
+
+    /// 续129c 回归钉死：写入路径中途 `?`/`return`（如 `write_cf_hdrop(&paths)?` 失败）时，
+    /// SkipGuard 必须在 Drop 里清掉计数——否则残留会静默吃掉后续最多 2 次真实复制。
+    #[test]
+    fn skip_guard_clears_residual_on_early_return() {
+        let _g = serial();
+        SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+        {
+            let _sg = SkipGuard; // 模拟写入路径提前退出：guard 随作用域析构
+        }
+        assert_eq!(
+            SKIP_CLIP_EVENTS.load(Ordering::SeqCst),
+            0,
+            "提前退出未清计数 → 残留会吃掉真实复制"
+        );
+    }
+
+    /// 💀 别再试「在另一个线程 OpenClipboard 占住、看主线程是否读不到」来构造这个前提：
+    /// `OpenClipboard(NULL)` 是**按任务/进程**关联的，同进程另一线程照样能打开并读到内容
+    /// （续129b 实测：holder 线程持着句柄，主线程 build_clip_entry 仍返回 Ok(Some(text))）。
+    /// 真实的"被占用"只在跨进程发生。故这里直接对判定本身断言。
+    #[test]
+    fn busy_clipboard_reports_err_not_empty() {
+        let _g = serial();
+        let r = build_clip_entry_inner(false);
+        assert!(
+            r.is_err(),
+            "剪贴板打不开时报了 {r:?}（应为 Err）——误判成 Ok(None)「无内容」会推进 seq、静默丢条目"
+        );
+    }
+
+    /// 探针（碰真实系统剪贴板，故 #[ignore]，用 `cargo test -- --ignored probe_clipboard_listener --nocapture` 跑）：
+    /// 验证 AddClipboardFormatListener 真的把 WM_CLIPBOARDUPDATE 送到了，并量出「复制 → 醒来」延迟。
+    /// 这是续129 唯一能在无 GUI 环境下端到端证伪的点——上面三个单测只证明 condvar 语义，不证明通知真的来。
+    #[test]
+    #[ignore]
+    fn probe_clipboard_listener() {
+        let _g = serial();
+        start_clipboard_listener();
+        std::thread::sleep(std::time::Duration::from_millis(300)); // 等注册落地
+        let mut seen = current_clip_event_gen();
+
+        // 单次复制：量延迟
+        let mut cb = arboard::Clipboard::new().expect("clipboard");
+        cb.set_text("workbench probe A").expect("set_text A");
+        let t = std::time::Instant::now();
+        let by_event = wait_clip_event(&mut seen, 3000);
+        let lat = t.elapsed();
+        println!("[probe] 单次复制 → 唤醒: by_event={by_event} 延迟={lat:?}");
+        assert!(by_event, "WM_CLIPBOARDUPDATE 未送达 → 事件驱动没生效（会静默退回轮询）");
+
+        // 快速连发：150ms 轮询下 B 会被 C 覆盖而塌缩；事件驱动应收到多次独立通知
+        let g0 = current_clip_event_gen();
+        for s in ["probe B", "probe C", "probe D"] {
+            cb.set_text(s).expect("set_text");
+            std::thread::sleep(std::time::Duration::from_millis(30)); // 30ms « 150ms 轮询窗口
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300)); // 等通知排空
+        let got = current_clip_event_gen() - g0;
+        println!("[probe] 30ms 间隔连发 3 次 → 收到 {got} 次通知（轮询模式下这 3 次会塌缩成 1）");
+        assert!(got >= 3, "连发 3 次只收到 {got} 次通知，塌缩仍在");
+    }
+
+    /// 探针（碰真实系统剪贴板，#[ignore]）：量「残留塌缩窗口」——事件驱动把「醒来延迟」压到 µs 后，
+    /// 剩下的丢条目风险只剩「读取本身还没读完，源头就被下一次复制覆盖」。读取耗时即该窗口的宽度。
+    /// 注意只量到「字节已读出剪贴板」为止：此后内容已是我们的副本，再被覆盖也不丢。
+    #[test]
+    #[ignore]
+    fn probe_read_latency() {
+        let _g = serial();
+        let mut cb = arboard::Clipboard::new().expect("clipboard");
+
+        cb.set_text("workbench probe text").expect("set_text");
+        let t = std::time::Instant::now();
+        let r = build_clip_entry();
+        println!("[probe] 文本读取耗时={:?} ok={}", t.elapsed(), r.is_ok());
+
+        // 3200×2000 ≈ 开发机截图尺寸，代表最坏情况
+        let (w, h) = (3200usize, 2000usize);
+        let bytes = vec![128u8; w * h * 4];
+        // 换新句柄：上面 build_clip_entry 内部另开过剪贴板，复用旧 cb 会撞 os error 1418
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // set_image 多步、open 窗口长，易与外部（含正在运行的本 app 实例）抢句柄撞 1418 —— 重试几次；
+        // 仍失败就跳过图片测量而非让整个探针失败（这不是被测对象）。
+        let mut placed = false;
+        for _ in 0..5 {
+            let mut cb2 = arboard::Clipboard::new().expect("clipboard2");
+            match cb2.set_image(arboard::ImageData {
+                width: w,
+                height: h,
+                bytes: bytes.clone().into(),
+            }) {
+                Ok(()) => {
+                    placed = true;
+                    break;
+                }
+                Err(e) => {
+                    println!("[probe] set_image 重试中: {e}");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+        if !placed {
+            println!("[probe] 图片放置失败（剪贴板被外部占用），跳过图片测量");
+            return;
+        }
+        let mut cb3 = arboard::Clipboard::new().expect("clipboard3");
+        let t = std::time::Instant::now();
+        let img = cb3.get_image().expect("get_image");
+        println!(
+            "[probe] 图片 {}×{} 读出剪贴板耗时={:?}",
+            img.width,
+            img.height,
+            t.elapsed()
+        );
+    }
+
+    /// 处理一轮期间连发多次变化，只需醒来一次（代数一次性追平），但绝不能永远追不上。
+    #[test]
+    fn clip_event_gen_advances_monotonically() {
+        let _g = serial();
+        let mut seen = current_clip_event_gen();
+        signal_clip_event();
+        signal_clip_event();
+        signal_clip_event();
+        assert!(wait_clip_event(&mut seen, 2000));
+        assert_eq!(seen, current_clip_event_gen(), "代数未追平，下轮会空转");
+    }
 }
