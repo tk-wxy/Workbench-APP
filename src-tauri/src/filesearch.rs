@@ -399,11 +399,30 @@ fn everything_query_with_exclusions(query: &str) -> String {
 // dirs 的第二项 = 该根是否为用户手动添加的额外目录，逐条记进 IndexEntry.extra（查询时加分用）。
 fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
     let mut out = Vec::new();
+    // 已登记的路径（小写）。**根之间会重叠，剪枝挡不住所有情形**（续131c）：
+    // `covered` 那套只处理「后来的根**包含**先前的根」（走到那个目录节点就整树剪掉），
+    // 而额外扫描目录几乎总是**嵌套在**先前的根里面——例如额外目录 `D:\dev\mcdownloader`
+    // 落在盘符根 `D:\`（深度 3）之下，`D:\dev\mcdownloader\src` 正好深度 3：
+    // 盘符根那轮收一次，额外目录那轮再收一次 → **同一路径两条索引**。
+    //
+    // 后果不止是列表里多一行：前端 `enhKey` 用 `"fs:" + path` 当 React key，
+    // 重复路径 = 重复 key = 列表 reconciliation 错乱（旧行残留、段表头错位）。
+    // 故这里按路径兜底去重，与剪枝互补：剪枝省遍历开销，去重保正确性。
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     // 已经遍历过的根。后续的根（如驱动器根）若包含它们，就整棵子树剪掉，
     // **防止重复登记**（续123）。因为 home 走得深、驱动器根走得浅，
     // 顺序必须是「深的根在前」—— scan_dirs 就是按这个顺序返回的。
     let mut covered: Vec<PathBuf> = Vec::new();
-    for (dir, is_extra, depth) in dirs {
+    // 额外目录的小写前缀表。`extra` 标记**必须按路径前缀判定，不能按"哪个根收的它"**（续131c）：
+    // 去重之后，一个路径由谁先收到是不确定的（盘符根可能先于额外目录收走它），
+    // 而 `extra=false` 会让它丢掉 EXTRA_DIR_BONUS —— 那正是续111b 修好的
+    // 「加了额外扫描目录却搜不到里面的内容」。按前缀判定与顺序无关，怎么去重都不会错。
+    let extra_prefixes: Vec<String> = dirs
+        .iter()
+        .filter(|(_, is_extra, _)| *is_extra)
+        .map(|(d, _, _)| d.to_string_lossy().to_lowercase())
+        .collect();
+    for (dir, _is_extra, depth) in dirs {
         if out.len() >= MAX_INDEX_ENTRIES {
             break;
         }
@@ -453,7 +472,13 @@ fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let path_s = path.to_string_lossy().to_string();
-            out.push(IndexEntry::new(path_s, &name, &ext, is_dir, *is_extra, mtime));
+            // 去重按小写比（Windows 路径大小写不敏感），登记仍用原始大小写
+            let key = path_s.to_lowercase();
+            if !seen.insert(key.clone()) {
+                continue; // 先前的根已收过这条，跳过（见函数顶部 seen 的说明）
+            }
+            let is_extra = extra_prefixes.iter().any(|p| key.starts_with(p.as_str()));
+            out.push(IndexEntry::new(path_s, &name, &ext, is_dir, is_extra, mtime));
         }
         covered.push(dir.clone());
     }
@@ -1380,6 +1405,51 @@ mod tests {
         // 时钟偏差 / 网络盘导致时间戳在未来，这是真实会发生的。
         // saturating_sub 让 age 饱和到 0 → 最高档。既不 panic 也不会出现负加分。
         assert_eq!(recency_bonus(now + 9999 * DAY, now), RECENCY_BONUS_MAX, "未来时间饱和到最高档");
+    }
+
+    /// 嵌套根不得产生重复条目（续131c）。
+    ///
+    /// 复刻用户真机上的形态：额外扫描目录 `D:\dev\mcdownloader` 落在盘符根 `D:\`（深度 3）之下，
+    /// 而 `D:\dev\mcdownloader\src` 正好是深度 3 —— 盘符根收一次、额外目录再收一次。
+    /// 症状不止是列表多一行：前端 `enhKey` 拿 path 当 React key，重复 key 会让整个结果列表
+    /// reconciliation 错乱（旧行残留在顶部、段表头错位）。
+    ///
+    /// 直接测 `build_index`（纯函数、只吃入参），**不碰 FILE_INDEX/USERPROFILE 等全局量**，
+    /// 故可与其他测试并行，不受 `set_search_dirs_indexes_extra_dir` 的「只此一个」约束。
+    #[test]
+    fn nested_roots_do_not_duplicate_entries() {
+        let base = std::env::temp_dir().join("wb_idx_nested_test");
+        let extra = base.join("dev").join("mcdownloader");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(extra.join("src").join("deep")).unwrap();
+        fs::write(extra.join("src").join("shallow.txt"), b"x").unwrap();
+        fs::write(extra.join("src").join("deep").join("deep.txt"), b"x").unwrap();
+
+        // 盘符根那样的浅遍历在前，额外目录（深）在后 —— scan_dirs 的真实顺序
+        let dirs = vec![(base.clone(), false, 3), (extra.clone(), true, MAX_WALK_DEPTH)];
+        let idx = build_index(&dirs);
+
+        let paths: Vec<String> = idx.iter().map(|e| e.path.to_string()).collect();
+        let mut uniq = paths.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(paths.len(), uniq.len(), "索引出现重复路径：{paths:?}");
+
+        // 深度 3 的浅遍历够不到 deep.txt，额外目录的深遍历必须补上
+        assert!(
+            idx.iter().any(|e| e.name() == "deep.txt"),
+            "额外目录的深层文件缺失：{paths:?}"
+        );
+        // extra 标记按路径前缀判定 → 无论被哪个根先收走都不能丢
+        // （丢了就是续111b 那个「加了额外目录却搜不到」的回归）
+        for e in idx.iter().filter(|e| e.path.contains("mcdownloader")) {
+            assert!(e.extra, "额外目录下的条目丢了 extra 标记：{}", e.path);
+        }
+        assert!(
+            idx.iter().any(|e| e.name() == "src" && e.extra),
+            "被浅遍历先收走的 src 也必须带 extra 标记：{paths:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// 额外目录端到端契约（跑真实的 set_search_dirs 命令，含其后台重建与图标预热）：

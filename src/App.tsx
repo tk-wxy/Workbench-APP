@@ -4,6 +4,7 @@ import { makeT, type Lang } from "./i18n";
 import { IMG_EXTS, fmtSize, ago, agoSec, dirOf, fmtDateTime, fileCategory, catToGroup, type FileCat, type FileGroup } from "./lib/format";
 import { groupFiles } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
+import { matchName, type PinyinTable, type PinyinVariant } from "./lib/pinyin";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
          IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
          IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip } from "./icons";
@@ -24,6 +25,27 @@ interface ClipItem { type: "text" | "image" | "file"; content?: string; time: nu
 interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
+type TFn = ReturnType<typeof makeT>;
+// 只有含汉字的名字才需要派生拼音（纯英文名走直接匹配即可）。在前端先滤一道，
+// 免得把满屏英文文件名送去 Rust 白跑一趟。
+const HAS_CJK = /[一-鿿]/;
+// 把拼音表裁到 keep 集合内。**返回新对象**（React state 不可原地改）；
+// 无需裁剪时返回原引用，避免制造无意义的重渲。
+const pruneTable = (tbl: PinyinTable, keep: Set<string>): PinyinTable => {
+  const keys = Object.keys(tbl);
+  if (keys.length === keep.size && keys.every(k => keep.has(k))) return tbl;
+  const out: PinyinTable = {};
+  for (const k of keys) if (keep.has(k)) out[k] = tbl[k];
+  return out;
+};
+// 中转 / 剪贴板条目在增强搜索里的「显示名」= 被搜索的那个串。
+// 抽成函数是因为它有**两个**消费者且必须一字不差（续131）：增强搜索 Tier1 的匹配、
+// 以及拼音派生的取名——两边算出不同的名字，派生表就会查不到、拼音匹配静默失效。
+const stageDisplayName = (s: StageItem, t: TFn) => s.name || s.items?.[0]?.name || t("文件");
+const clipDisplayName = (c: ClipItem, t: TFn) =>
+  c.type === "text" ? (c.content || "").trim().slice(0, 80)
+  : c.type === "image" ? t("图片")
+  : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
 const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
 // 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
@@ -33,13 +55,29 @@ const ENH_MIN_SECTION = 3;
 // 预览面板（续115）：按住 ↓ 连续穿过结果时不能每项都发 IPC，故未命中缓存的取用防抖；
 // 命中缓存则**立即出**（不等防抖），来回移动时面板不闪。
 const PREVIEW_DEBOUNCE_MS = 130;
-const PREVIEW_CACHE_MAX = 300; // 超出直接整表清空：预览是纯展示，重取代价低，不值得上 LRU
+/// 预览元数据缓存的条数上限（续131d 从 300 改到 60，并从「整表清空」改为 LRU 淘汰）。
+///
+/// 改小的依据是实测：`get_large_icon` 单张 base64 **均值 43.9 KB**（最大 108 KB，
+/// 见 apps.rs 的 `probe_large_icon_cost` 探针），300 条 ≈ **12.6 MB** —— 与整个文件索引
+/// （续126 瘦身后 9.8 MB）同量级，对一个常驻后台的工具太重。60 条 ≈ 2.6 MB，
+/// 而「会再看一眼」的项本来也就那么几条，命中率损失可忽略。
+///
+/// 淘汰策略必须**同时**换掉：原注释说「重取代价低，不值得上 LRU」，在预览是"一帧换好"时成立；
+/// 续131d 之后重取要走「低清 → 淡入高清」，整表清空 = 所有项一起退回那个观感。
+const PREVIEW_CACHE_MAX = 60;
 // 增强搜索列表的 hover 选中驻留门槛（续118）。指针在某行连续停留超过这个时长才提交选中变更。
 // 70ms 的依据：擦过一行通常 <30ms，有意停留远超 70ms，两者区分得干净；而预览面板本就有
 // 130ms 元数据防抖，再叠 70ms 仍在既有延迟特征内，手感不会变钝。
 const HOVER_DWELL_MS = 70;
 const ENH_FILE_LIMIT_BUILTIN = 150;
 const ENH_FILE_LIMIT_EVERYTHING = 500;
+// 文件查询的防抖，**按引擎分档**（续131）。防抖的目的是压住"每敲一键一次查询"的开销，
+// 那个开销两个引擎差着数量级，用同一个值必然有一边配错：
+//   内置 = 纯内存读索引，实测 <5ms，加 IPC 往返也就百微秒级 → 150ms 里绝大部分是白等；
+//   Everything = 跨进程 IPC + 全盘查询 + 5000 条候选池重排，量级完全不同，150ms 是它的保险。
+// 故内置降到 50ms（仍能吃掉连续击键，正常打字相邻间隔 80~200ms），Everything 保持 150ms。
+const ENH_DEBOUNCE_BUILTIN_MS = 50;
+const ENH_DEBOUNCE_EVERYTHING_MS = 150;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
@@ -168,6 +206,18 @@ const enhKey = (r: EnhResult) =>
 // 结果对应的真实文件路径（取不到=空串，如纯文本/图片剪贴板项）。
 // 与渲染里的 rPath 不同：那个只服务「加入启动台/中转」的按钮反馈、故意排除 stage/clip；
 // 预览要对 stage/clip 里的文件项也显示位置与时间，所以单独一份。
+/// 把 base64 图先解码好再交给渲染（续131d）。
+/// 不这么做的话，`<img>` 换 src 的那一帧浏览器可能还没解完码，替换会多出一个中间态。
+/// 失败一律当成功返回——预解码只是为了让替换更干净，不该让取不到图标变成取不到面板。
+async function preloadImg(src: string | null): Promise<void> {
+  if (!src) return;
+  try {
+    const im = new Image();
+    im.src = src;
+    if (im.decode) await im.decode();
+  } catch { /* 解码失败照常渲染，浏览器会自己处理 */ }
+}
+
 const enhPath = (r: EnhResult) =>
   r.kind === "app" ? r.app.path : r.kind === "fs" ? r.path : (r.item.items?.[0]?.path ?? "");
 
@@ -223,6 +273,9 @@ export default function App() {
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
+  // 拼音派生表（续131）：原名 → 拼音变体。派生在 Rust，这里只缓存结果。
+  // 空数组 = 已查过且该名无汉字（与"还没查过"区分开，避免反复重查纯英文名）。
+  const [pinyin, setPinyin] = useState<PinyinTable>({});
   const [store, setStore] = useState<any>(null);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
@@ -671,21 +724,66 @@ export default function App() {
       .map(({ app, ranges }) => ({ app, ranges }));
   }, [search, sortedApps, appUsage]);
 
+  // ── 拼音派生表的维护（续131）────────────────────────────────────────────────
+  //
+  // 不变量：**表的键集 == 已请求集 == 当前三个列表里所有含汉字的名字**。
+  // 每次列表变化都按这个集合裁剪，所以表不会随会话变长而无限膨胀
+  // （剪贴板文本条目会持续换新，不裁剪的话一场长会话能攒出几千条）。
+  // 两者必须**一起**裁剪：只裁表不裁已请求集，条目被移除又加回来时会
+  // "认为已请求过"而不再请求，拼音就静默失效了。
+  //
+  // 派生**不进逐键路径**：只在 apps/stage/clipboard 变化时跑一次，匹配读的是缓存。
+  //
+  // ⚠️ **裁剪只在同步段做，异步回来只合并、不裁剪**，且**不要给这个 effect 加 cancelled 守卫**。
+  // 首版两样都反了，埋了一个启动期必现的静默 bug：请求发出前名字就已记进"已请求集"，
+  // 而 effect 的 cleanup 在任何一次列表变化时都会把在途结果判死（apps/stage/clipboard
+  // 启动时本就前后脚到齐，必然踩中）→ 结果被丢弃，可"已请求集"里还留着这批名字
+  // → 后续轮次认为请求过而不再请求 → **这批名字永久没有拼音，且零日志零报错**。
+  // 现在：结果无条件合并（name→变体 是幂等的，合早合晚都对），过期的键由下一轮同步裁剪清掉。
+  const pinyinReqRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const all = new Set<string>();
+    const add = (n: string) => { if (n && HAS_CJK.test(n)) all.add(n); };
+    for (const a of apps) add(a.name);
+    for (const s of stage) if (s.type === "file") add(stageDisplayName(s, t));
+    for (const c of clipboard) add(clipDisplayName(c, t));
+    // 裁剪表与已请求集（即使本轮无新名字也要做——条目只减不增时同样要收缩）。
+    // 两者必须**一起**裁：只裁表不裁已请求集，条目被移除又加回来时会"认为已请求过"
+    // 而不再请求，拼音就静默失效了。
+    pinyinReqRef.current = new Set([...all].filter(n => pinyinReqRef.current.has(n)));
+    setPinyin(prev => pruneTable(prev, all));
+    const want = [...all].filter(n => !pinyinReqRef.current.has(n));
+    if (!want.length) return;
+    for (const n of want) pinyinReqRef.current.add(n);
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const res = await invoke<PinyinVariant[][]>("to_pinyin_batch", { names: want });
+        setPinyin(prev => { const next = { ...prev }; want.forEach((n, i) => { next[n] = res[i] ?? []; }); return next; });
+      } catch (e) {
+        // 失败就把这批从已请求集摘掉，下次列表变化时自然重试（拼音失效只是搜不到，不该永久卡住）。
+        // **必须留日志**：这条分支"正常不该发生"，而它一旦发生就是拼音静默失效——
+        // 续129b/129c 两次栽在静默分支上，不再重蹈。
+        console.warn("[pinyin] 派生失败，本批退回直接匹配：", e);
+        for (const n of want) pinyinReqRef.current.delete(n);
+      }
+    })();
+  }, [apps, stage, clipboard, t]);
+
   // ── 增强搜索 Tier 1（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
   // 有查询时上限 10（D5）；空查询兜底仍给 30 常用应用（此时无文件结果，总数 ≤30 不超）。
   const enhTier1 = useMemo<EnhResult[]>(() => {
     const q = enhQuery.trim();
     const nowS = Math.floor(Date.now() / 1000);
     if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
-    const appHits = apps.map(app => { const r = fuzzyScore(q, app.name); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = s.name || s.items?.[0]?.name || "文件"; const r = fuzzyScore(q, nm); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
+    // matchName = 直接模糊匹配 + 拼音匹配取优（续131）。三类条目共用它，口径一致。
+    const appHits = apps.map(app => { const r = matchName(q, app.name, pinyin); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
+    const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = stageDisplayName(s, t); const r = matchName(q, nm, pinyin); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
     // 剪贴板历史条目（续101）：名称=文本内容/文件名/图片标签；名称模糊未命中时用类型词（"图片""txt"）兜底给基础分。
     const ql = q.toLowerCase();
     const clipHits = clipboard.map(c => {
-      const nm = c.type === "text" ? (c.content || "").trim().slice(0, 80)
-        : c.type === "image" ? t("图片")
-        : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
-      const r = fuzzyScore(q, nm);
+      const nm = clipDisplayName(c, t);
+      const r = matchName(q, nm, pinyin);
       let score = r.score, ranges = r.ranges;
       if (score === 0 && typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }).some(k => k.toLowerCase().includes(ql))) { score = 5; ranges = []; }
       return { kind: "clip" as const, item: c, name: nm, score, ranges };
@@ -694,16 +792,26 @@ export default function App() {
       .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
       .slice(0, 10)
       .map(({ score, ...rest }) => rest as EnhResult);
-  }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t]);
+  }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t, pinyin]);
 
-  // ── 文件查询：150ms 防抖（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
+  // ── 文件查询：防抖后 invoke（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
+  // 防抖时长按引擎分档，见 ENH_DEBOUNCE_* 常量注释（续131）
+  //
+  // ⚠️ **必须有竞态守卫**（续131c）：`clearTimeout` 只能取消还没发出的查询，一旦 invoke 在途就拦不住了，
+  // 而后发的查询完全可能先返回（词越短候选越多、越慢）——旧结果就会盖掉新结果，
+  // 症状是「搜 ste 却列出一堆只配 s 的结果」。防抖从 150ms 降到 50ms 后两次请求叠在一起的概率大增，
+  // 这个一直存在的漏洞才被实测撞出来。守卫用自增 token：只有最后一次发出的查询有权写结果。
+  const fsReqRef = useRef(0);
   useEffect(() => {
     if (!enhOpen) return;
     const q = enhQuery.trim();
-    if (!q) { setFsResults([]); return; }
+    // 清空也要占一个 token，否则在途的旧查询会把结果写回已清空的列表
+    if (!q) { fsReqRef.current++; setFsResults([]); return; }
     // Everything 覆盖全盘、结果量大，给更高 limit；内置仅用户目录，50 足够
-    const lim = searchEngine==="everything" ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
+    const ev = searchEngine==="everything";
+    const lim = ev ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
     const t = setTimeout(async () => {
+      const token = ++fsReqRef.current;
       try {
         const { invoke } = await import("@tauri-apps/api/core");
         // 续126 ③：Rust 侧不再给每条结果内联 base64 图标，而是返回「结果（只带 iconKey）+ 去重后的图标表」。
@@ -711,9 +819,10 @@ export default function App() {
         // 这里**收到后立刻回填成原来的形状**：下游 4 个消费点（EnhResult 构造 / 预览面板 / 加入启动台 / 列表渲染）
         // 一行都不用改。回填不产生拷贝——JS 字符串不可变，同扩展名的各行共享同一个引用。
         const r = await invoke<{ results: { path: string; name: string; ext: string; isDir: boolean; iconKey: string }[]; icons: Record<string, string> }>("search_files", { query: q, limit: lim });
+        if (token !== fsReqRef.current) return; // 已有更新的查询发出，本次结果作废
         setFsResults(r.results.map(x => ({ ...x, icon: r.icons[x.iconKey] ?? null })));
-      } catch { setFsResults([]); }
-    }, 150);
+      } catch { if (token === fsReqRef.current) setFsResults([]); }
+    }, ev ? ENH_DEBOUNCE_EVERYTHING_MS : ENH_DEBOUNCE_BUILTIN_MS);
     return () => clearTimeout(t);
   }, [enhQuery, enhOpen, searchEngine]);
 
@@ -853,7 +962,15 @@ export default function App() {
     previewKeyRef.current = key;              // 竞态守卫基准：响应回来时若已不等，说明选中变了
     if (!r || !path) { setPreviewMeta(null); return; } // 纯文本/图片剪贴板项无路径，无需取
     const hit = previewCacheRef.current.get(key);
-    if (hit) { setPreviewMeta({ key, ...hit }); return; }
+    if (hit) {
+      // LRU 触碰：删了再塞回去 = 移到 Map 末尾（Map 保插入序）。
+      // **只在 effect 里做，不在渲染期做**——渲染期那次读取（见 enhPreview）必须保持纯净，
+      // 改动 ref 会让同一次渲染变得有副作用。effect 每次选中变化都会跑，触碰不会漏。
+      previewCacheRef.current.delete(key);
+      previewCacheRef.current.set(key, hit);
+      setPreviewMeta({ key, ...hit });
+      return;
+    }
     const timer = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -867,7 +984,17 @@ export default function App() {
         ]);
         const entry = { info, icon: icon ?? null, thumb: thumb ?? null };
         previewCacheRef.current.set(key, entry);
-        if (previewCacheRef.current.size > PREVIEW_CACHE_MAX) previewCacheRef.current.clear();
+        // LRU 淘汰：Map 的迭代序 = 插入序，队首就是最久没被触碰的那条，逐条删到不超上限。
+        // **不能再用整表清空**（续131d）：清空一次会让所有项都退回"低清淡入一次高清"，
+        // 正是刚修掉的那个体验问题周期性重演。
+        while (previewCacheRef.current.size > PREVIEW_CACHE_MAX) {
+          const oldest = previewCacheRef.current.keys().next().value;
+          if (oldest === undefined) break;
+          previewCacheRef.current.delete(oldest);
+        }
+        // 先解码再上屏（续131d）：高清图标一挂上去就能立刻画出来，替换只占一帧。
+        // 放在写缓存**之后**——缓存的是数据，解码只服务这次渲染，失败也不该让缓存落空。
+        await Promise.all([preloadImg(entry.icon), preloadImg(entry.thumb)]);
         if (previewKeyRef.current === key) setPreviewMeta({ key, ...entry }); // 迟到的响应直接丢弃
       } catch {}
     }, PREVIEW_DEBOUNCE_MS);
@@ -881,7 +1008,14 @@ export default function App() {
     const r = enhResults[enhSelIdx] ?? enhResults[0];
     if (!r) return null;
     const key = enhKey(r);
-    const meta = previewMeta?.key === key ? previewMeta : null; // 只认当前选中项的元数据，防串味
+    // 只认当前选中项的元数据，防串味。
+    // ⚠️ **命中缓存时必须在这里直接读缓存，不能等 state**（续131d 修正）：
+    // effect 在**渲染之后**才跑，所以"选中变了"那一帧 `previewMeta` 还是上一项的、判定为 null
+    // → 面板先渲染一帧低清图，effect 随后 setPreviewMeta 才换高清。
+    // 结果就是**哪怕刚看过这一项，也照样从低清淡入一次高清**（用户原话：比抖动还难受）。
+    // previewCacheRef 是纯数据缓存、读它幂等，渲染期读取安全；state 仍保留——
+    // 它负责在异步取回后触发重渲，两者职责不同。
+    const meta = previewMeta?.key === key ? previewMeta : (previewCacheRef.current.get(key) ?? null);
     const info = meta?.info ?? null;
     // rtl：只给「位置」行——用 direction:rtl 让超长路径省略头部、保住尾部（文件名侧）。
     // 绝不能全表铺开：时间/大小含中性字符，RTL 排版会把它们的标点顺序弄错。
@@ -968,13 +1102,13 @@ export default function App() {
     // 故「是图片但缩略图生成失败、回退到图标」时也只是少了内边距，不会变形。
     const photoExt = (ext?: string | null, isDir?: boolean) =>
       !isDir && IMG_EXTS.includes((ext ?? "").toLowerCase());
-    let title = "", badge = "", big: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
+    let title = "", badge = "", big: string | null = null, low: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
     // cat = 徽标配色用的分类键。中转 / 剪贴板条目可能没有真实扩展名（如纯文本），
     // 故不走扩展名而直接定 FileCat，再用 catToGroup 折到色组（复用 format.ts 的映射）。
     let cat: FileCat = "generic";
     if (r.kind === "app") {
       title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" }; cat = "exe";
-      big = meta?.icon ?? r.app.icon ?? null;
+      big = meta?.icon ?? r.app.icon ?? null; low = r.app.icon ?? null;
       // 应用只给位置：大小是可执行文件的体积、意义不大，修改时间基本等于安装日期。
       // 两者对「这是我要的那个吗」都不起作用，故不显示（续116）。
       loc = dirOf(r.app.path);
@@ -983,15 +1117,15 @@ export default function App() {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
       cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
       glyph = r.isDir ? { isDir: true } : { ext: r.ext };
-      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = photoExt(r.ext, r.isDir);
+      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; low = r.icon ?? null; photo = photoExt(r.ext, r.isDir);
       fileFacts(r.path, r.isDir, r.ext);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
       // 徽标并列「出处 · 种别」（续116）：种别的信息量不足以独占一行，
       // 但在中转 / 剪贴板里光有出处又看不出是什么条目。折进一个徽标，省下一行。
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = true; }
-      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = photoExt(it.ext, it.isDir); if (p) fileFacts(p, it.isDir, it.ext); }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; low = (p && stageThumbs[p]) || it.content || null; photo = true; }
+      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; low = (p && stageThumbs[p]) || null; photo = photoExt(it.ext, it.isDir); if (p) fileFacts(p, it.isDir, it.ext); }
       if (it.pinned) push(t("状态"), t("已固定"));
     } else { // clip
       const it = r.item, p = it.items?.[0]?.path;
@@ -1001,7 +1135,11 @@ export default function App() {
       // 剪贴板条目唯一有用的元信息。相对表述 + 绝对值 hover 查看（ClipItem.time 是毫秒 → 直接用 ago）
       push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
     }
-    return { r, key, title, badge, cat, group: catToGroup(cat), big, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
+    // 渲染用的两层（续131d）：low 恒是**同步已知**的那张，第一帧就在场——这样高清到达时
+    // 它才有「从可见淡出」的前值可插值；若与高清同帧挂载，它带着 is-hidden 出生，过渡根本不会发生。
+    // hi 只在**确实比 low 更好**时才有值（两者相同则为 null，免得同一张图白叠两层）。
+    const hi = big && big !== low ? big : null;
+    return { r, key, title, badge, cat, group: catToGroup(cat), low, hi, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
   }, [enhResults, enhSelIdx, previewMeta, stageThumbs, t]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
@@ -2093,7 +2231,13 @@ export default function App() {
   // 其余依赖（enhAdded / 各 handler）变化时整批重建是可以接受的：那都是用户主动操作
   // 且低频，而 ↑↓ 是按住方向键时每秒几十次的高频路径。
   const enhRows = useMemo(() => enhResults.map((r,i)=>{
-            const key = enhKey(r);
+            // ⚠️ key 必须带上行号（续131c）。`enhKey` 对文件结果是 `"fs:"+path`，
+            // 只要结果里出现两条同路径（续131c 之前索引嵌套根就会造出来），
+            // 同一列表里就有重复 key → React reconciliation 错乱：旧行残留在顶部、
+            // 段表头跟着错位（表头就包在这个 Fragment 里）。索引侧已去重，这里是兜底——
+            // Everything 引擎的结果不归我们控制，不能假设它一定没有重复。
+            // 结果列表每次查询整体重建、不是 prepend 列表，故带下标不会踩续96 那个「index key 错位复用」的坑。
+            const key = enhKey(r) + "#" + i;
             const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
                        : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
                        : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
@@ -2484,9 +2628,18 @@ export default function App() {
           <aside className="enh-preview">
             <div className="enh-pv-head">
               <div className={`enh-pv-icon${enhPreview.photo?" enh-pv-icon-img":""}`}>
-                {enhPreview.big
-                  ? <img src={enhPreview.big} alt="" draggable={false}/>
-                  : <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
+                {/* 低清→高清的替换做成「下层淡出」而非直接对调（续131d）。
+                    根因：Windows 多分辨率图标的 32px 与 256px **是两套不同的美术资源**
+                    （内部留白/比例不一样），瞬间对调时外框虽没动，画面里的图形却像挪了一下——
+                    用户报「图标在不清楚到清楚的瞬间抖一下」。几何早在续127 就钉死了，
+                    这一下不是布局跳变，是内容跳变，只能在视觉层化解。
+                    高清图**不做淡入**（保持命中缓存时的即时感，按住 ↑↓ 连翻不会觉得黏），
+                    只让压在下面的低清图淡出，把两套美术的差异抹平。 */}
+                {enhPreview.low &&
+                  <img className={`enh-pv-ic-low${enhPreview.hi ? " is-hidden" : ""}`}
+                       src={enhPreview.low} alt="" draggable={false}/>}
+                {enhPreview.hi && <img src={enhPreview.hi} alt="" draggable={false}/>}
+                {!enhPreview.low && !enhPreview.hi && <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
               </div>
               <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
               {/* 用 data-group 取色（续116）：颜色是分类而非装饰——

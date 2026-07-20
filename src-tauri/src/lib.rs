@@ -4,6 +4,7 @@ mod dragout; // 中转区拖出（DoDragDrop：IDataObject + IDropSource，独�
 mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
 mod everything; // 可选 Everything 搜索引擎（libloading 动态加载 SDK DLL）
 mod clipboard; // 剪贴板子系统（历史/粘贴/复制/janitor/监听）
+mod pinyin_util; // 汉字→拼音派生（增强搜索的拼音匹配，续131）
 
 use std::os::windows::process::CommandExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -720,6 +721,7 @@ pub fn run() {
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
             filesearch::search_files, filesearch::get_index_status,
             filesearch::set_search_engine, filesearch::set_search_dirs,
+            pinyin_util::to_pinyin_batch,
             everything::reload_everything,
             dragout::start_drag_out,
             dragout::get_dragout_auto_close, dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
