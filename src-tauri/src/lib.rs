@@ -692,8 +692,14 @@ fn start_apps_worker(app: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1)); // 应用扫描比文件索引轻，1s 即可
         let started = std::time::Instant::now();
-        let apps = apps::scan_start_menu(); // 复用现有逻辑 + 缓存，后台线程执行
-        println!("[apps] background scan: {} apps in {:?}", apps.len(), started.elapsed());
+        // 续128 两段式：.lnk 那批先 emit 一次，UWP（约 2s）扫完再 emit 完整列表。
+        // 前端的 apps-ready 监听本就是覆盖式 setApps，第二次直接顶掉第一次，无需改动前端。
+        let partial_app = app.clone();
+        let apps = apps::scan_start_menu_staged(|partial| {
+            println!("[apps] stage 1 (.lnk): {} apps in {:?}", partial.len(), started.elapsed());
+            let _ = partial_app.emit("apps-ready", partial.to_vec());
+        });
+        println!("[apps] background scan done: {} apps in {:?}", apps.len(), started.elapsed());
         let _ = app.emit("apps-ready", apps);
     });
 }

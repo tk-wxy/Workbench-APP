@@ -132,6 +132,11 @@ const ENGINE_EVERYTHING: u8 = 1;
 const MAX_INDEX_ENTRIES: usize = 300_000; // 整个用户目录可能很大，硬顶防爆内存
 const MAX_WALK_DEPTH: usize = 10; // 从 %USERPROFILE% 根算起，比旧 5 子目录方案需更深
 const REBUILD_INTERVAL_SECS: u64 = 30 * 60; // 30 分钟周期重建
+/// 图标缓存每隔多少轮重建做一次**全量**刷新（续128）。
+/// 增量复用是按 key 命中的，而 exe/lnk 的 key 是文件路径——程序升级换了图标，
+/// 只要路径没变就会一直命中旧值。这个常量把「图标陈旧」的上限钉在 12 × 30min = 6 小时。
+/// 调小 = 图标更跟手但更费 Shell；调大 = 更省但陈旧窗口更长。
+const ICON_CACHE_FULL_REFRESH_EVERY: u32 = 12;
 const INITIAL_DELAY_SECS: u64 = 3; // 避开开机高峰后再首次建索引
 const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全盘可返回大量结果，前端按引擎传不同 limit）
 
@@ -463,11 +468,31 @@ pub fn start_index_worker(app: AppHandle) {
     ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_secs(INITIAL_DELAY_SECS));
+        let mut round: u32 = 0;
         loop {
             let dirs = scan_dirs();
             let started = Instant::now();
             let new_index = build_index(&dirs); // 耗时部分，不持锁
-            let new_icons = build_icon_cache(&new_index); // 遍历后、替换前批量预热图标（后台线程，不持锁）
+            // 图标预热（续128 改为增量）：取上一轮缓存的快照当基线，只提本轮新出现的 key。
+            // 每 ICON_CACHE_FULL_REFRESH_EVERY 轮传空表做一次全刷——否则 exe/lnk 是按路径做 key 的，
+            // 程序升级换了图标后会**永远**停在旧图上。全刷把陈旧上限钉死在约 6 小时。
+            let base = if round.is_multiple_of(ICON_CACHE_FULL_REFRESH_EVERY) {
+                HashMap::new()
+            } else {
+                ICON_CACHE
+                    .get()
+                    .and_then(|l| l.lock().ok())
+                    .map(|g| g.clone()) // 快照后立即出锁：下面的 Shell 提取绝不持锁
+                    .unwrap_or_default()
+            };
+            let icon_started = Instant::now();
+            let new_icons = build_icon_cache(&new_index, &base); // 遍历后、替换前预热（后台线程，不持锁）
+            let icon_ms = icon_started.elapsed();
+            let reused = new_icons.len().saturating_sub(
+                new_icons.keys().filter(|k| !base.contains_key(*k)).count(),
+            );
+            let icon_total = new_icons.len();
+            round = round.wrapping_add(1);
             let count = new_index.len();
             if let Some(lock) = FILE_INDEX.get() {
                 if let Ok(mut guard) = lock.lock() {
@@ -480,9 +505,13 @@ pub fn start_index_worker(app: AppHandle) {
                 }
             }
             eprintln!(
-                "[fileindex] ready: {} entries ({:?})",
+                "[fileindex] ready: {} entries ({:?}) / 图标 {} key（复用 {}，新提 {}，耗时 {:?}）",
                 count,
-                started.elapsed()
+                started.elapsed(),
+                icon_total,
+                reused,
+                icon_total - reused,
+                icon_ms
             );
             let _ = app.emit("file-index-ready", count); // 通知前端
             std::thread::sleep(Duration::from_secs(REBUILD_INTERVAL_SECS));
@@ -691,7 +720,16 @@ fn icon_key(is_dir: bool, ext: &str, path: &str) -> String {
 /// 返回 key → 图标（提取失败存 None，仍保留 key——便于「试过但无图标」与「未试过」区分）。
 /// ⚠️ 耗时（Shell API），但只在后台线程、遍历完成后、替换全局索引前调用，绝不碰前台查询路径。
 /// 单次 COM init 由 apps::get_file_icons 内部统管整批。
-fn build_icon_cache(entries: &[IndexEntry]) -> HashMap<String, Option<String>> {
+///
+/// **续128 增量化**：`prev` 传上一轮的缓存，其中已有的 key 直接搬过来、不再碰 Shell。
+/// 起因是实测发现这个函数每轮要跑 **8.5~9.5 秒 / 1958 个 key**，而 `start_index_worker`
+/// 每 30 分钟重建一次索引就连带全量重跑一次——绝大多数 key 是扩展名（`.txt` 的图标不会变），
+/// 一个常驻后台的工具没有理由每半小时花 9 秒重新提一遍同样的图。
+/// 传空表即退化为全量提取（首轮 / 周期性全刷）。
+fn build_icon_cache(
+    entries: &[IndexEntry],
+    prev: &HashMap<String, Option<String>>,
+) -> HashMap<String, Option<String>> {
     // key → 代表路径（第一次遇到该类型时记录）
     let mut key_to_rep: HashMap<String, String> = HashMap::new();
     for e in entries {
@@ -699,15 +737,27 @@ fn build_icon_cache(entries: &[IndexEntry]) -> HashMap<String, Option<String>> {
             .entry(icon_key(e.is_dir, e.ext(), &e.path))
             .or_insert_with(|| e.path.to_string());
     }
-    // 批量提取去重后的代表路径
-    let reps: Vec<String> = key_to_rep.values().cloned().collect();
-    let path_to_icon: HashMap<String, Option<String>> =
-        crate::apps::get_file_icons(reps).into_iter().collect();
-    // 组装 key → icon（保留所有 key，值取代表路径的提取结果）
-    key_to_rep
-        .into_iter()
-        .map(|(key, rep)| (key, path_to_icon.get(&rep).cloned().flatten()))
-        .collect()
+    // 复用上一轮已提过的 key；**只有本轮新出现的 key 才去调 Shell**。
+    // 反过来，上一轮有、本轮索引里已不存在的 key 自然不会进 out —— 缓存不会无限增长。
+    let mut out: HashMap<String, Option<String>> = HashMap::with_capacity(key_to_rep.len());
+    let mut missing: Vec<(String, String)> = Vec::new();
+    for (key, rep) in key_to_rep {
+        match prev.get(&key) {
+            Some(icon) => {
+                out.insert(key, icon.clone());
+            }
+            None => missing.push((key, rep)),
+        }
+    }
+    if !missing.is_empty() {
+        let reps: Vec<String> = missing.iter().map(|(_, rep)| rep.clone()).collect();
+        let path_to_icon: HashMap<String, Option<String>> =
+            crate::apps::get_file_icons(reps).into_iter().collect();
+        for (key, rep) in missing {
+            out.insert(key, path_to_icon.get(&rep).cloned().flatten());
+        }
+    }
+    out
 }
 
 /// 查询响应（续126 ③）：结果表 + **去重后的**图标表。
@@ -1000,6 +1050,34 @@ mod tests {
         assert!(t.ext() == "txt" || t.ext().is_empty(), "要么正确派生、要么干净退化，不得越界");
     }
 
+    /// 图标缓存增量复用（续128）：上一轮已有的 key 必须原样搬过来，
+    /// 且**本轮索引里没有的 key 不得留下**（否则缓存会随程序常驻无限增长）。
+    ///
+    /// 这里不能靠「跑得快不快」来验证——那是环境依赖。改为用一个**不可能被 Shell 提取出来的
+    /// 哨兵值**：若结果里还是这个哨兵，就证明它是搬过来的而非重新提取的。
+    #[test]
+    fn icon_cache_reuses_previous_round() {
+        let idx = vec![
+            IndexEntry::new("C:\\x\\a.txt".into(), "a.txt", "txt", false, false, 0),
+            IndexEntry::new("C:\\x\\b.txt".into(), "b.txt", "txt", false, false, 0),
+        ];
+        let sentinel = Some("data:image/png;base64,SENTINEL".to_string());
+        let mut prev = HashMap::new();
+        prev.insert("txt".to_string(), sentinel.clone());
+        // 上一轮残留的、本轮索引里已不存在的 key
+        prev.insert("zzz-gone".to_string(), Some("stale".to_string()));
+
+        let out = build_icon_cache(&idx, &prev);
+        assert_eq!(out.get("txt"), Some(&sentinel), "命中的 key 必须复用、不重新提取");
+        assert!(!out.contains_key("zzz-gone"), "本轮索引里没有的 key 不得留下（防无限增长）");
+        assert_eq!(out.len(), 1, "两个 .txt 去重后只应有一个 key");
+
+        // 空基线 = 全量提取路径（首轮 / 周期性全刷）。这里只验证它不 panic 且 key 齐全，
+        // 图标值取决于运行环境（CI 上可能提不到），故不断言具体内容。
+        let full = build_icon_cache(&idx, &HashMap::new());
+        assert!(full.contains_key("txt"), "全量路径也必须产出该 key");
+    }
+
     /// 诊断用（默认 #[ignore]：
     ///   cargo test --lib measure_icon_payload -- --ignored --nocapture）
     ///
@@ -1014,8 +1092,22 @@ mod tests {
         let idx = build_index(&dirs);
         println!("索引 {} 条，开始预热图标缓存（慢）…", idx.len());
         let t = Instant::now();
-        let cache = build_icon_cache(&idx);
-        println!("图标缓存: {} key / {:.2?}", cache.len(), t.elapsed());
+        let cache = build_icon_cache(&idx, &HashMap::new());
+        let cold = t.elapsed();
+        println!("图标缓存（冷，全量）: {} key / {:.2?}", cache.len(), cold);
+        // 续128：第二轮传上一轮缓存当基线，应当几乎全部命中复用
+        let t2 = Instant::now();
+        let again = build_icon_cache(&idx, &cache);
+        let warm = t2.elapsed();
+        let fresh = again.keys().filter(|k| !cache.contains_key(*k)).count();
+        println!(
+            "图标缓存（热，增量）: {} key / {:.2?} / 需新提 {} 个 → 省下 {:.0}%",
+            again.len(), warm, fresh,
+            (1.0 - warm.as_secs_f64() / cold.as_secs_f64().max(1e-9)) * 100.0
+        );
+        // 缓存本身的常驻内存（base64 字符串 + key）
+        let bytes: usize = cache.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, |s| s.len())).sum();
+        println!("图标缓存常驻内存: 约 {:.1} MB", bytes as f64 / 1_048_576.0);
 
         FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
         *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
@@ -1782,7 +1874,7 @@ mod tests {
         let walk = t1.elapsed();
         let exe_lnk = idx.iter().filter(|e| e.ext() == "exe" || e.ext() == "lnk").count();
         let t2 = Instant::now();
-        let icons = build_icon_cache(&idx);
+        let icons = build_icon_cache(&idx, &HashMap::new());
         println!(
             "遍历: {walk:?} / {} 条（其中 exe+lnk {exe_lnk} 个 → 每个单独提图标）\n图标预热: {:?} / {} key\n合计: {:?}",
             idx.len(),
@@ -1812,7 +1904,7 @@ pub fn set_search_dirs(dirs: Vec<String>) {
         let started = Instant::now();
         let dirs = scan_dirs();
         let new_index = build_index(&dirs);
-        let new_icons = build_icon_cache(&new_index); // 同步预热图标，与索引一起换入
+        let new_icons = build_icon_cache(&new_index, &HashMap::new()); // 同步预热图标，与索引一起换入
         let (total, extra) = (new_index.len(), new_index.iter().filter(|e| e.extra).count());
         if let Some(lock) = FILE_INDEX.get() {
             if let Ok(mut guard) = lock.lock() {
