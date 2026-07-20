@@ -328,6 +328,7 @@ export default function App() {
   const [launcherSelIdx, setLauncherSelIdx] = useState(-1); // 启动器网格键盘选中项（-1=未选中，焦点在搜索框）
   const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
+  const enhResultsRef = useRef<HTMLDivElement>(null); // 结果列表容器：选中高亮命令式加 class 时的查询根（续127）
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
   const enhPinnedRef = useRef(false); enhPinnedRef.current = enhPinned; // 供 onChange 闭包读最新 pinned 状态
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
@@ -705,8 +706,12 @@ export default function App() {
     const t = setTimeout(async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: lim });
-        setFsResults(r);
+        // 续126 ③：Rust 侧不再给每条结果内联 base64 图标，而是返回「结果（只带 iconKey）+ 去重后的图标表」。
+        // 实测查询 "windows" 的 IPC 载荷 660KB → 79KB（-88%）——同一张扩展名图标此前被重复送了 500 遍。
+        // 这里**收到后立刻回填成原来的形状**：下游 4 个消费点（EnhResult 构造 / 预览面板 / 加入启动台 / 列表渲染）
+        // 一行都不用改。回填不产生拷贝——JS 字符串不可变，同扩展名的各行共享同一个引用。
+        const r = await invoke<{ results: { path: string; name: string; ext: string; isDir: boolean; iconKey: string }[]; icons: Record<string, string> }>("search_files", { query: q, limit: lim });
+        setFsResults(r.results.map(x => ({ ...x, icon: r.icons[x.iconKey] ?? null })));
       } catch { setFsResults([]); }
     }, 150);
     return () => clearTimeout(t);
@@ -758,11 +763,17 @@ export default function App() {
   // 结果集变化时的清理放在 enhResults 声明之后（见那里）——此处引用不到它。
   useEffect(() => { if (!enhOpen) cancelHoverSelect(); }, [enhOpen, cancelHoverSelect]);
 
-  // 长结果列表下让键盘选中项滚入视野（否则 ↑↓ 导航会移出可视区）
-  useEffect(() => {
-    if (!enhOpen) return;
-    document.querySelector(".enh-result.selected")?.scrollIntoView({ block: "nearest" });
-  }, [enhSelIdx, enhOpen]);
+  // 选中高亮 + 滚入视野。**高亮是命令式加 class，不进 React**（续127）。
+  //
+  // 为什么：行是 `enhResults.map` 全量渲染的，若 className 里带 `i===enhSelIdx`，
+  // 每按一次 ↑↓ 就要让 React reconcile 全部 500 行——而真正变化的只有 2 行。
+  // 用户实测「↑↓ 翻结果时卡顿」即源于此。改成这里直接摘/挂 class 后：
+  // 行数组由 useMemo 缓存（依赖里**不含 enhSelIdx**），一次按键的开销从 O(500) 降到 O(1)。
+  // 这与续109 拖拽 ghost「坐标只进 ref + 直写 DOM」是同一套写法。
+  //
+  // ⚠️ 依赖里必须有 enhResults：换查询时 enhSelIdx 常常仍是 0（值没变、effect 不会重跑），
+  // 那样新列表就一行都不会高亮。
+  // 依赖里要有 enhResults，而此处引用不到它（声明在下方），故 effect 本体放在其声明之后。
 
   // 启动器键盘选中：滚入视野；关闭覆盖层 / 搜索过滤态变化时复位到「未选中」（焦点回搜索框）
   useEffect(() => {
@@ -814,6 +825,7 @@ export default function App() {
   // 结果集变化时清掉待定的 hover 提交（续118）：边打字边把鼠标停在某行时，结果会在
   // 驻留窗口内被换掉，此时旧下标已指向另一个条目——让定时器落地就是选中了不相干的东西。
   useEffect(() => cancelHoverSelect, [enhResults, cancelHoverSelect]);
+  // 选中高亮 + 滚入视野的本体在 enhRows 定义之后——它必须依赖 enhRows（见那里的说明）。
   // 每段首项的下标：Ctrl+↑↓ 跨段跳转的边界表（取代续114 硬编码的 enhTier1.length）
   const enhSectionStarts = useMemo<number[]>(() => {
     const starts: number[] = []; let acc = 0;
@@ -943,8 +955,19 @@ export default function App() {
       });
     };
 
-    // photo=true 表示 big 是「照片缩略图」（应铺满裁切）；false 表示是图标（应居中留白）。
+    // photo=true 表示 big 应「铺满」（照片缩略图）；false 表示应「居中留白」（图标）。
     // 混为一谈会把应用图标按 cover 裁掉边缘。
+    //
+    // ⚠️ **photo 必须由同步已知的信息（扩展名 / 条目类型）决定，不能看 meta 的内容**（续127）。
+    // 这就是续115/119 给文字行立的那条不变量，当初漏了图标这一处：
+    // 原先写的是 `photo = !!meta?.thumb`，于是图片文件在 meta 到达前是图标态（72×72 contain）、
+    // 130ms 后缩略图到达翻成照片态（88×88 cover）——**几何尺寸在选中后跳一次**，
+    // 来回移动选中项就是持续抖动（用户报「信息卡片抖动太厉害」）。
+    // 现在几何从第一帧就定死，meta 到达只换 src（低清→高清），不再改盒子。
+    // 注：图标本身是正方形，正方形源在正方形框里 cover 不裁掉任何东西，
+    // 故「是图片但缩略图生成失败、回退到图标」时也只是少了内边距，不会变形。
+    const photoExt = (ext?: string | null, isDir?: boolean) =>
+      !isDir && IMG_EXTS.includes((ext ?? "").toLowerCase());
     let title = "", badge = "", big: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
     // cat = 徽标配色用的分类键。中转 / 剪贴板条目可能没有真实扩展名（如纯文本），
     // 故不走扩展名而直接定 FileCat，再用 catToGroup 折到色组（复用 format.ts 的映射）。
@@ -960,21 +983,21 @@ export default function App() {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
       cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
       glyph = r.isDir ? { isDir: true } : { ext: r.ext };
-      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = !!meta?.thumb;
+      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; photo = photoExt(r.ext, r.isDir);
       fileFacts(r.path, r.isDir, r.ext);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
       // 徽标并列「出处 · 种别」（续116）：种别的信息量不足以独占一行，
       // 但在中转 / 剪贴板里光有出处又看不出是什么条目。折进一个徽标，省下一行。
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = !!big; }
-      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = !!((p && stageThumbs[p]) || meta?.thumb); if (p) fileFacts(p, it.isDir, it.ext); }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; photo = true; }
+      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; photo = photoExt(it.ext, it.isDir); if (p) fileFacts(p, it.isDir, it.ext); }
       if (it.pinned) push(t("状态"), t("已固定"));
     } else { // clip
       const it = r.item, p = it.items?.[0]?.path;
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = !!big; }
-      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = !!meta?.thumb; if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = true; }
+      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = photoExt(it.items?.[0]?.ext); if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
       // 剪贴板条目唯一有用的元信息。相对表述 + 绝对值 hover 查看（ClipItem.time 是毫秒 → 直接用 ago）
       push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
     }
@@ -2058,7 +2081,72 @@ export default function App() {
       }
     } // clip：仅默认「取走粘贴」，无附加项（已在剪贴板中，复制冗余）
     openCtxMenu(e, items);
+    // ↑ 该函数体结束于下方 deps；enhRows 紧随其后定义（它要用 openEnhCtxMenu）
   }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, toastAddResult, showToast, t]);
+
+  // ── 增强搜索结果行（续127：从 JSX 内联的 map 提出来缓存）──
+  //
+  // **依赖里绝不能出现 enhSelIdx**——那正是本次优化的全部要点：↑↓ 只改选中项时，
+  // 这份元素数组保持同一批引用，React 直接 bail out，500 行一行都不 reconcile。
+  // 选中高亮由上面那个 effect 命令式加 class（行上有 data-idx 供其定位）。
+  //
+  // 其余依赖（enhAdded / 各 handler）变化时整批重建是可以接受的：那都是用户主动操作
+  // 且低频，而 ↑↓ 是按住方向键时每秒几十次的高频路径。
+  const enhRows = useMemo(() => enhResults.map((r,i)=>{
+            const key = enhKey(r);
+            const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
+                       : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
+                       : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
+                       : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
+                                                 : <FileGlyph size={22} isDir={r.kind==="fs" && r.isDir} ext={r.kind==="fs"?r.ext:""}/>;
+            const label = r.kind==="app" ? r.app.name : r.name;
+            const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
+            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
+            const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
+            // 段表头：本行是某段首项时插在其前（续114b 起由 enhHeadAt 驱动，段的增删无需改此处）
+            const head = enhHeadAt.get(i);
+            const divider = head ? <div key={`enh-head-${i}`} className="enh-divider">{head}</div> : null;
+            return (
+              <Fragment key={key}>
+                {divider}
+                <div className="enh-result" data-idx={i}
+                  onMouseEnter={e=>onEnhRowEnter(i,e)}
+                  onMouseLeave={cancelHoverSelect}
+                  onContextMenu={e=>openEnhCtxMenu(e,r)}
+                  onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
+                  <div className="enh-result-icon">{icon}</div>
+                  <div className="enh-result-meta">
+                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                    {r.kind==="fs" && <span className="enh-result-dir">{dirOf(r.path)}</span>}
+                  </div>
+                  <span className="enh-result-badge">{badge}</span>
+                  {(r.kind==="fs" || r.kind==="app") && (
+                    <div className="enh-result-actions">
+                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=await addFsToStage(r);if(res==="added"){setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"stage",r.name);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
+                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=r.kind==="app"?addAppToLauncher(r.app):await addFsToLauncher(r);const nm=r.kind==="app"?r.app.name:r.name;if(res==="added"){setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"launcher",nm);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
+                    </div>
+                  )}
+                </div>
+              </Fragment>
+            );
+          }), [enhResults, enhHeadAt, enhAdded, lang, t, onEnhRowEnter, cancelHoverSelect, openEnhCtxMenu, activateEnh, addFsToStage, addFsToLauncher, addAppToLauncher, toastAddResult]);
+
+  // 选中高亮 + 滚入视野。**高亮命令式加 class，不进 React**（续127，说明见 onEnhRowEnter 附近）。
+  //
+  // ⚠️ 依赖必须是 **enhRows 本身**，不能只写 enhResults：
+  // enhRows 重建时（如点了「中转/启动台」按钮使 enhAdded 变化）React 会按 `className="enh-result"`
+  // 重渲这些行，**把命令式加上的 .selected 抹掉**；此时 enhSelIdx/enhResults 都没变，
+  // effect 若不重跑，高亮就凭空消失、直到下次按 ↑↓ 才回来。
+  // enhRows 的引用恰好在「行被重建」时才变，正是需要的那个信号。
+  useEffect(() => {
+    if (!enhOpen) return;
+    const box = enhResultsRef.current;
+    if (!box) return;
+    box.querySelector(".enh-result.selected")?.classList.remove("selected");
+    const cur = box.querySelector<HTMLElement>(`.enh-result[data-idx="${enhSelIdx}"]`);
+    cur?.classList.add("selected");
+    cur?.scrollIntoView({ block: "nearest" });
+  }, [enhSelIdx, enhOpen, enhRows]);
 
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
@@ -2387,46 +2475,9 @@ export default function App() {
         <div className="enh-body">
         {/* onMouseMove 只记坐标（写 ref、零渲染），供行的 mouseenter 判定「指针是否真的动过」——
             见上方 onEnhRowEnter 的位移门说明。挂容器而非每行，避免 N 个监听器。 */}
-        <div className="enh-results"
+        <div className="enh-results" ref={enhResultsRef}
           onMouseMove={e=>{ hoverPosRef.current = { x: e.clientX, y: e.clientY }; }}>
-          {enhResults.length ? enhResults.map((r,i)=>{
-            const key = enhKey(r);
-            const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
-                       : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
-                       : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
-                       : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
-                                                 : <FileGlyph size={22} isDir={r.kind==="fs" && r.isDir} ext={r.kind==="fs"?r.ext:""}/>;
-            const label = r.kind==="app" ? r.app.name : r.name;
-            const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
-            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
-            const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
-            // 段表头：本行是某段首项时插在其前（续114b 起由 enhHeadAt 驱动，段的增删无需改此处）
-            const head = enhHeadAt.get(i);
-            const divider = head ? <div key={`enh-head-${i}`} className="enh-divider">{head}</div> : null;
-            return (
-              <Fragment key={key}>
-                {divider}
-                <div className={`enh-result${i===enhSelIdx?" selected":""}`}
-                  onMouseEnter={e=>onEnhRowEnter(i,e)}
-                  onMouseLeave={cancelHoverSelect}
-                  onContextMenu={e=>openEnhCtxMenu(e,r)}
-                  onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
-                  <div className="enh-result-icon">{icon}</div>
-                  <div className="enh-result-meta">
-                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
-                    {r.kind==="fs" && <span className="enh-result-dir">{dirOf(r.path)}</span>}
-                  </div>
-                  <span className="enh-result-badge">{badge}</span>
-                  {(r.kind==="fs" || r.kind==="app") && (
-                    <div className="enh-result-actions">
-                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=await addFsToStage(r);if(res==="added"){setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"stage",r.name);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
-                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=r.kind==="app"?addAppToLauncher(r.app):await addFsToLauncher(r);const nm=r.kind==="app"?r.app.name:r.name;if(res==="added"){setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"launcher",nm);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
-                    </div>
-                  )}
-                </div>
-              </Fragment>
-            );
-          }) : <p className="empty-hint">{enhQuery.trim()?t("无匹配"):t("输入以搜索")}</p>}
+          {enhResults.length ? enhRows : <p className="empty-hint">{enhQuery.trim()?t("无匹配"):t("输入以搜索")}</p>}
         </div>
         {/* ── 预览面板（续115）：当前选中项的详情 + 快捷操作 ── */}
         {enhPreview && (
