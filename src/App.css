@@ -51,8 +51,8 @@
   --card-thumb-bg: #f3f3f4;
   --card-border-c: rgba(0,0,0,0.09);
   --card-border-hover-c: rgba(0,0,0,0.20);
-  /* 分类色·浅色主题：同色相を暗く寄せる（白い --card-bg 上での可読性確保。暗色版のままだと
-     淡すぎて文字が読めない）。色相の並び順は暗色版と一致させ、テーマ切替で分類感が崩れないようにする。 */
+  /* 分类色·浅色主题：同色相往暗处压（保证在白色 --card-bg 上的可读性——直接沿用暗色版会太淡、字看不清）。
+     色相排列顺序与暗色版保持一致，切换主题时分类感不会错乱。 */
   --c-folder: #9A6B00;
   --c-image:  #8B2FC9;
   --c-media:  #C2255C;
@@ -460,17 +460,23 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 @keyframes enh-pv-in{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
 
 .enh-pv-head{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;}
+/* 图标框（续127 改为「外框恒定、内边距区分形态」）：
+   此前图标态写 img{width:72px}、照片态写 img{width:100%}，两者一翻就是 72→88 的几何跳变。
+   现在 img 恒为 100%，形态只由**容器的 padding + object-fit** 区分——外框 88px 始终不动，
+   内框尺寸也由同步已知的 photo 在第一帧定死（见 App.tsx photoExt 处的注释）。 */
 .enh-pv-icon{width:88px;height:88px;border-radius:16px;background:var(--fill-1);
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;}
-.enh-pv-icon img{width:72px;height:72px;object-fit:contain;}
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;
+  padding:8px;}
+.enh-pv-icon img{width:100%;height:100%;object-fit:contain;}
 /* 图片缩略图铺满圆角容器（区别于图标的居中留白）——一眼能分辨"这是图片本身"还是"类型图标" */
-.enh-pv-icon-img img{width:100%;height:100%;object-fit:cover;}
+.enh-pv-icon-img{padding:0;}
+.enh-pv-icon-img img{object-fit:cover;}
 .enh-pv-title{font-size:15px;font-weight:600;color:var(--text);line-height:1.35;
   word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
-/* 徽标（続116 で色分け）：改修前はこの面板で**最もコントラストの低い**要素（--text3 ＋薄枠）
-   だったのに、「これは何なのか」という最も価値の高い信号を担っていた。分类色を与えて、
-   ①面板唯一の彩度源にする ②↑↓ で送っていくとき同類が同色でリズムが出る、の二役を持たせる。
-   既定は other（無彩）—— data-group が無い/未知でも壊れない。 */
+/* 徽标（续116 上分类色）：改版前它是这个面板里**对比度最低**的元素（--text3 + 淡边框），
+   却承担着「这到底是个什么东西」这条最有价值的信号。给它分类色，兼两个职责：
+   ①成为面板唯一的彩度来源 ②↑↓ 逐条翻看时同类同色、形成节奏。
+   默认 other（无彩）—— data-group 缺失或未知也不会坏。 */
 .enh-pv-badge{font-size:10px;font-weight:600;letter-spacing:0.02em;border-radius:4px;padding:2px 9px;
   color:var(--c-other);border:1px solid color-mix(in srgb,var(--c-other) 26%,transparent);
   background:color-mix(in srgb,var(--c-other) 12%,transparent);}
@@ -482,25 +488,24 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-pv-badge[data-group="code"]   {color:var(--c-code);   border-color:color-mix(in srgb,var(--c-code) 30%,transparent);   background:color-mix(in srgb,var(--c-code) 13%,transparent);}
 .enh-pv-badge[data-group="exe"]    {color:var(--c-exe);    border-color:color-mix(in srgb,var(--c-exe) 30%,transparent);    background:color-mix(in srgb,var(--c-exe) 13%,transparent);}
 
-/* 位置ブロック（続116）：この面板の主役。dt/dd の一行から独立ブロックへ昇格させ、
-   フォント/余白/背景で「まず目に入る」位置に置く。パスは direction:rtl で**頭を省略して尻を残す**
-   （ファイル名に近い側のほうが識別に効く）—— dd の .enh-pv-rtl と同じ手。
-   ⚠ rtl はこのブロック限定：時刻/サイズは中性文字を含み、RTL 整形で句読点の順序が壊れる。 */
+/* 位置块（续116）：这个面板的主角。从 dt/dd 的一行升格为独立块，
+   用字号/留白/背景把它放在「第一眼就看到」的位置。路径用 direction:rtl **省头留尾**
+   （靠近文件名那一侧对识别更有用）—— 与 dd 的 .enh-pv-rtl 同一手法。
+   ⚠ rtl 仅限这一块：时间/大小含中性字符，RTL 整形会把标点顺序弄乱。 */
 .enh-pv-loc{display:flex;align-items:center;gap:7px;min-width:0;
   background:var(--fill-1);border-radius:7px;padding:7px 9px;}
 .enh-pv-loc-ic{color:var(--text3);flex-shrink:0;}
 .enh-pv-loc-t{direction:rtl;text-align:left;font-size:11.5px;line-height:1.4;color:var(--text2);
   min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 
-/* stat strip（続116）：一目で走査する 1〜2 個の事実だけをここへ。値を大きく・ラベルを小さく置いて
-   「値が主・ラベルが従」の階層を作る（改修前は dt も dd も 11px で、不透明度 0.30/0.55 の差しか
-   なかったため全体が均質な灰色の塊に見えていた＝「平淡」の主因のひとつ）。
-   枠数は同期既知の情報だけで決まる（App.tsx fileFacts のコメント参照）ので、
-   メタ到着で高さが動かない。 */
+/* stat strip（续116）：只放一眼扫过就想知道的那 1~2 条事实。值大、标签小，
+   造出「值为主、标签为从」的层次（改版前 dt 和 dd 都是 11px、只差 0.30/0.55 的不透明度，
+   整体看起来就是一坨均质的灰——这是「平淡」的主因之一）。
+   槽位数只由同步已知的信息决定（见 App.tsx fileFacts 处的注释），故 meta 到达时高度不会跳。 */
 .enh-pv-stats{display:flex;gap:10px;}
 .enh-pv-stat{flex:1 1 0;min-width:0;background:var(--fill-1);border-radius:7px;padding:8px 10px;}
 .enh-pv-stat-v{font-size:13px;font-weight:600;color:var(--text);line-height:1.25;
-  /* 数字を等幅に：↑↓ で送るとき桁が揃わないと値がガタガタ動いて見える */
+  /* 数字等宽：↑↓ 逐条翻看时位数不对齐的话，值会看着一跳一跳的 */
   font-variant-numeric:tabular-nums;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .enh-pv-stat-l{margin-top:3px;font-size:9px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;
@@ -528,7 +533,15 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color 100ms,border-color 100ms,background 100ms;}
 .enh-pv-btn:hover{color:var(--text);border-color:var(--accent);background:rgba(99,102,241,0.12);}
 .enh-pv-btn-primary{flex-basis:100%;color:var(--text);border-color:var(--accent);background:rgba(99,102,241,0.14);}
-.enh-result{position:relative;display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;}
+/* 续126 ③：跳过视口外行的渲染/布局。
+   为什么不做 JS 虚拟化：那要把「分段列表」摊成扁平索引模型，而键盘导航（续114 的 Ctrl+↑↓）、
+   scrollIntoView、hover 的位移门/驻留门（续118）全都建立在「行的 DOM 节点真实存在」之上——
+   收益未经测量，却要拿三个会话调出来的交互不变量去换。content-visibility 是浏览器原生的
+   同类优化：**节点仍在 DOM 里**，上述机制一律照常，只是离屏时不做布局与绘制。
+   contain-intrinsic-size 的 auto 关键字 = 记住上次真实高度，故首屏用 52px 估算、
+   滚过一次之后按真值算，滚动条不会跳。 */
+.enh-result{position:relative;display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:8px;cursor:pointer;
+  content-visibility:auto;contain-intrinsic-size:auto 52px;}
 .enh-result:hover,.enh-result.selected{background:var(--hover);}
 .enh-result-icon{width:32px;height:32px;border-radius:7px;background:var(--fill-2);display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
 .enh-result-icon img{width:24px;height:24px;object-fit:contain;}

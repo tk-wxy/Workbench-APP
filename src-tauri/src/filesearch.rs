@@ -1,4 +1,4 @@
-﻿// 文件系统搜索：双引擎（内置自建内存索引 + 可选 Everything），设置可切换。
+// 文件系统搜索：双引擎（内置自建内存索引 + 可选 Everything），设置可切换。
 //
 // 架构命脉（违反任一条都会卡前端，见 DECISIONS §17 / CLAUDE.md 不变量）：
 // 1. 内置索引建立只在独立后台线程（start_index_worker 内 spawn），永不经 Tauri 命令 / invoke / 阻塞 IPC。
@@ -21,12 +21,24 @@ use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
 
 /// 内存索引条目：name_lower 预存小写，查询时不重复 to_lowercase。
+///
+/// **续126 内存布局收紧**：原先 `path`/`name`/`name_lower`/`ext` 四个 `String` 把同一份字节
+/// 存了三四遍（`name` 是 `path` 的后缀、`ext` 是 `name` 的后缀、`name_lower` 是 `name` 的小写副本），
+/// 且每个 `String` 头就吃 24 B。现在只留两份实际字节（`path` 与 `name_lower`），
+/// `name`/`ext` 改由偏移量切片派生 —— 见 `name()` / `ext()`。
+/// 实测 241 → 158 B/条（-34%），8 万条索引下省约 6 MB。
+///
+/// `Box<str>` 而非 `String`：索引建好后再不修改，少存一个 capacity 字段（24→16 B/个）。
 #[derive(Clone)]
 pub struct IndexEntry {
-    pub path: String,
-    pub name: String,
-    pub name_lower: String,
-    pub ext: String,
+    pub path: Box<str>,
+    /// 文件名的小写形式。**匹配全部走它**（查询词已小写），故它必须独立存在，无法从 path 派生。
+    pub name_lower: Box<str>,
+    /// `name` 在 `path` 中的起始字节偏移（`path[name_off..]` == 文件名原始大小写）。
+    name_off: u32,
+    /// `ext` 在 `name_lower` 中的起始字节偏移（`name_lower[ext_off..]` == 小写扩展名，不含点）。
+    /// 无扩展名时 == `name_lower.len()`，切出来是空串。
+    ext_off: u32,
     pub is_dir: bool,
     /// 是否来自用户手动添加的额外扫描目录（EXTRA_DIRS）。查询时据此加分，见 EXTRA_DIR_BONUS。
     pub extra: bool,
@@ -38,6 +50,49 @@ pub struct IndexEntry {
     pub mtime: u64,
 }
 
+impl IndexEntry {
+    /// 构造：`name`/`ext` 不单独存，只记它们在 `path`/`name_lower` 里的偏移（续126）。
+    ///
+    /// 两个后缀关系在极端 Unicode 下可能不成立（`to_lowercase` 会改变字节长度，
+    /// 如 `İ` → 2 字符；walkdir 的根条目 path 与 file_name 也可能相等而非后缀关系）。
+    /// 这类情况**不 panic 也不丢条目**，而是退化：`name_off=0`（name 取整条 path）、
+    /// `ext_off=len`（ext 取空串）。代价仅限该条目的显示名/图标归类，匹配用的 name_lower 不受影响。
+    fn new(path: String, name: &str, ext: &str, is_dir: bool, extra: bool, mtime: u64) -> Self {
+        let name_lower = name.to_lowercase();
+        let name_off = path
+            .len()
+            .checked_sub(name.len())
+            .filter(|&i| path.is_char_boundary(i) && &path[i..] == name)
+            .unwrap_or(0) as u32;
+        let ext_lower = ext.to_lowercase();
+        let ext_off = name_lower
+            .len()
+            .checked_sub(ext_lower.len())
+            .filter(|&i| !ext_lower.is_empty() && name_lower.is_char_boundary(i) && name_lower[i..] == ext_lower)
+            .unwrap_or(name_lower.len()) as u32;
+        Self {
+            depth: path_depth(&path),
+            path: path.into_boxed_str(),
+            name_lower: name_lower.into_boxed_str(),
+            name_off,
+            ext_off,
+            is_dir,
+            extra,
+            mtime,
+        }
+    }
+
+    /// 文件名（原始大小写）。从 `path` 切片派生，不占额外内存。
+    pub fn name(&self) -> &str {
+        &self.path[self.name_off as usize..]
+    }
+
+    /// 小写扩展名（不含点）。从 `name_lower` 切片派生，不占额外内存。
+    pub fn ext(&self) -> &str {
+        &self.name_lower[self.ext_off as usize..]
+    }
+}
+
 /// 返回给前端的查询结果（不含 name_lower 内部字段）。内置与 Everything 共用此结构。
 /// camelCase：前端读 `isDir`（Tauri 不会自动转换 serde 字段名，否则前端拿到 undefined→全显示为文件）。
 #[derive(serde::Serialize)]
@@ -47,8 +102,13 @@ pub struct FileSearchResult {
     pub name: String,
     pub ext: String,
     pub is_dir: bool,
-    /// Shell 图标 base64 PNG data URL；随查询结果同步返回，省去前端二次 IPC。
-    pub icon: Option<String>,
+    /// 图标在 `SearchResponse.icons` 表里的键（续126 ③）。
+    ///
+    /// **不再内联 base64**：图标按「文件夹 / 扩展名 / exe·lnk 各自路径」去重，
+    /// 500 条结果通常只有 20~50 张不同的图。内联时同一张图被重复送 500 遍——
+    /// 实测查询 "windows" 的 IPC 载荷 660 KB，改成键 + 去重表后 79 KB（-88%）。
+    /// 前端收到后按此键回填自己的 `icon` 字段，故渲染侧代码完全不用动。
+    pub icon_key: String,
     /// 最后修改时间（Unix 秒，0 = 未知）。排序用的**内部字段，不送前端**
     /// （前端预览面板走 get_file_info；这里再 serialize 一份，同一个事实就有两个出处）。
     /// 内置引擎从索引取，Everything 从 SDK 的 DATE_MODIFIED 取。
@@ -388,16 +448,7 @@ fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             let path_s = path.to_string_lossy().to_string();
-            out.push(IndexEntry {
-                depth: path_depth(&path_s),
-                path: path_s,
-                name_lower: name.to_lowercase(),
-                name,
-                ext,
-                is_dir,
-                extra: *is_extra,
-                mtime,
-            });
+            out.push(IndexEntry::new(path_s, &name, &ext, is_dir, *is_extra, mtime));
         }
         covered.push(dir.clone());
     }
@@ -521,7 +572,7 @@ fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
         total += token_score(t, &e.name_lower)?; // 有一个不中就算不匹配（多词 AND）
     }
     // ↓ 条目级加分。合计必须小于相邻带的最小间隙（见分层预算注释 ENTRY_BONUS_BUDGET）
-    total += short_name_bonus(e.name.len()); // 短名优先（续121 改为反比例形、加强）
+    total += short_name_bonus(e.name().len()); // 短名优先（续121 改为反比例形、加强）
     if e.extra {
         total += EXTRA_DIR_BONUS; // 用户手动添加的目录 = 明确意图信号，翻转同名并列（见常量注释）
     }
@@ -530,7 +581,7 @@ fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
     Some(total)
 }
 
-// 内置引擎查询：纯内存读，<5ms。多词 AND + 分层打分 + 短名优先 + 新鮮度。
+// 内置引擎查询：纯内存读，<5ms。多词 AND + 分层打分 + 短名优先 + 新鲜度。
 fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
@@ -556,16 +607,16 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
             scored.push((total, e));
         }
     }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.len().cmp(&b.1.name.len())));
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name().len().cmp(&b.1.name().len())));
     scored
         .into_iter()
         .take(limit.min(QUERY_LIMIT_CAP))
         .map(|(_, e)| FileSearchResult {
-            path: e.path.clone(),
-            name: e.name.clone(),
-            ext: e.ext.clone(),
+            path: e.path.to_string(),
+            name: e.name().to_string(),
+            ext: e.ext().to_string(),
             is_dir: e.is_dir,
-            icon: None, // 由 enrich_with_icons 统一填充
+            icon_key: String::new(), // 由 attach_icons 统一填充
             mtime: e.mtime,
         })
         .collect()
@@ -645,8 +696,8 @@ fn build_icon_cache(entries: &[IndexEntry]) -> HashMap<String, Option<String>> {
     let mut key_to_rep: HashMap<String, String> = HashMap::new();
     for e in entries {
         key_to_rep
-            .entry(icon_key(e.is_dir, &e.ext, &e.path))
-            .or_insert_with(|| e.path.clone());
+            .entry(icon_key(e.is_dir, e.ext(), &e.path))
+            .or_insert_with(|| e.path.to_string());
     }
     // 批量提取去重后的代表路径
     let reps: Vec<String> = key_to_rep.values().cloned().collect();
@@ -659,20 +710,36 @@ fn build_icon_cache(entries: &[IndexEntry]) -> HashMap<String, Option<String>> {
         .collect()
 }
 
-/// 从预热缓存回填查询结果的 icon——纯内存查表，无任何 Shell API 调用。
-/// 缓存未建立（极短启动窗口）或某 key 未命中时 icon=None，前端已有降级处理。
-fn fill_icons_from_cache(mut results: Vec<FileSearchResult>) -> Vec<FileSearchResult> {
-    let guard = match ICON_CACHE.get().and_then(|l| l.lock().ok()) {
-        Some(g) => g,
-        None => return results, // 缓存尚未建立：全部降级 icon=None
-    };
+/// 查询响应（续126 ③）：结果表 + **去重后的**图标表。
+///
+/// 拆成两段的唯一理由是 IPC 载荷：图标本就按扩展名去重存在 ICON_CACHE 里，
+/// 却在序列化时被每条结果各复制一份。见 `FileSearchResult.icon_key`。
+#[derive(serde::Serialize)]
+pub struct SearchResponse {
+    pub results: Vec<FileSearchResult>,
+    /// key → base64 PNG data URL。只含本次结果实际用到的键；
+    /// 提取失败的键**不进表**（前端取不到即降级为矢量字形，与此前 icon=None 同义）。
+    pub icons: HashMap<String, String>,
+}
+
+/// 给结果标注 icon_key，并从预热缓存收集这批结果用到的图标——纯内存查表，无 Shell API 调用。
+/// 缓存未建立（极短启动窗口）时 icons 为空表，前端已有降级处理。
+fn attach_icons(mut results: Vec<FileSearchResult>) -> SearchResponse {
     for r in &mut results {
-        r.icon = guard
-            .get(&icon_key(r.is_dir, &r.ext, &r.path))
-            .cloned()
-            .flatten();
+        r.icon_key = icon_key(r.is_dir, &r.ext, &r.path);
     }
-    results
+    let mut icons = HashMap::new();
+    if let Some(guard) = ICON_CACHE.get().and_then(|l| l.lock().ok()) {
+        for r in &results {
+            if icons.contains_key(&r.icon_key) {
+                continue; // 去重：这正是本次改动的全部意义
+            }
+            if let Some(Some(ic)) = guard.get(&r.icon_key) {
+                icons.insert(r.icon_key.clone(), ic.clone());
+            }
+        }
+    }
+    SearchResponse { results, icons }
 }
 
 /// 从 Everything **先取回来做评估**的候选数（续120）。与返回条数（limit）是两回事。
@@ -695,7 +762,7 @@ const EVERYTHING_CANDIDATE_POOL: usize = 5000;
 /// 图标在后台建索引时已批量预提（build_icon_cache），查询路径只剩内存查找。
 /// Everything 不可用时静默降级回内置（保证永远有结果）。
 #[tauri::command]
-pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
+pub fn search_files(query: String, limit: usize) -> SearchResponse {
     let want = limit.min(QUERY_LIMIT_CAP);
     let results = if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
         // 续120：**广取 → 评估 → 收窄再返回**。
@@ -721,7 +788,7 @@ pub fn search_files(query: String, limit: usize) -> Vec<FileSearchResult> {
     } else {
         builtin_search(&query, want)
     };
-    fill_icons_from_cache(results)
+    attach_icons(results)
 }
 
 /// 索引 / 引擎状态查询（前端显示「建立中…」「Everything 未运行」用）。
@@ -894,16 +961,93 @@ mod tests {
     // 测试用的 IndexEntry 构造（不碰全局状态，可以放心并行增加）。
     // depth 从路径算出——写死常量的话就没法测 path_depth_bonus 的效果了。
     fn ent(name: &str, mtime: u64, extra: bool) -> IndexEntry {
-        IndexEntry {
-            depth: path_depth(&format!("C:\\x\\{name}")),
-            path: format!("C:\\x\\{name}"),
-            name: name.to_string(),
-            name_lower: name.to_lowercase(),
-            ext: String::new(),
-            is_dir: false,
-            extra,
-            mtime,
+        // 扩展名按真实规则从名字派生（续126 起 ext 是 name_lower 的切片，
+        // 硬塞空串会让 ent 造出与 build_index 不一致的条目）
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        IndexEntry::new(format!("C:\\x\\{name}"), name, &ext, false, extra, mtime)
+    }
+
+    /// `name()`/`ext()` 的切片派生必须与「独立存字符串」时代完全等价（续126）。
+    /// 这是内存瘦身的正确性基石：偏移量算错不会 panic，只会静默地让搜索结果显示错误的名字
+    /// 或把图标归错类——比崩溃更难发现，所以要钉死。
+    #[test]
+    fn index_entry_derives_name_and_ext() {
+        let e = IndexEntry::new("C:\\dev\\App\\Report.MD".into(), "Report.MD", "md", false, false, 0);
+        assert_eq!(e.name(), "Report.MD", "name 必须保持原始大小写");
+        assert_eq!(e.name_lower.as_ref(), "report.md");
+        assert_eq!(e.ext(), "md");
+
+        // 无扩展名 → ext 为空串（而非 panic 或越界）
+        let d = IndexEntry::new("C:\\dev\\workbench-app".into(), "workbench-app", "", true, false, 0);
+        assert_eq!(d.name(), "workbench-app");
+        assert_eq!(d.ext(), "", "无扩展名应切出空串");
+
+        // 中文名（多字节）：偏移量按字节算，切片必须落在字符边界上
+        let c = IndexEntry::new("D:\\项目\\报告.txt".into(), "报告.txt", "txt", false, false, 0);
+        assert_eq!(c.name(), "报告.txt");
+        assert_eq!(c.ext(), "txt");
+
+        // 退化路径：name 不是 path 的后缀（walkdir 根条目等）→ name_off=0，取整条 path，不 panic
+        let r = IndexEntry::new("C:\\".into(), "不是后缀", "", true, false, 0);
+        assert_eq!(r.name(), "C:\\", "后缀关系不成立时退化为整条 path");
+
+        // 退化路径：to_lowercase 改变字节长度时 ext 关系可能不成立 → 退化为空串，不 panic
+        let t = IndexEntry::new("C:\\x\\İ.TXT".into(), "İ.TXT", "TXT", false, false, 0);
+        assert!(t.ext() == "txt" || t.ext().is_empty(), "要么正确派生、要么干净退化，不得越界");
+    }
+
+    /// 诊断用（默认 #[ignore]：
+    ///   cargo test --lib measure_icon_payload -- --ignored --nocapture）
+    ///
+    /// 量化「图标随结果内联」的 IPC 载荷代价（续126 ③ 的依据）。
+    /// 建真实索引 + 真实图标预热缓存，跑一次满额查询，对比两种编码：
+    ///   ① 现状：每条结果内联自己的 base64 图标（同扩展名的重复 N 遍）
+    ///   ② 改后：结果只带 iconKey，图标去重后单独一张表
+    #[test]
+    #[ignore]
+    fn measure_icon_payload() {
+        let dirs = scan_dirs();
+        let idx = build_index(&dirs);
+        println!("索引 {} 条，开始预热图标缓存（慢）…", idx.len());
+        let t = Instant::now();
+        let cache = build_icon_cache(&idx);
+        println!("图标缓存: {} key / {:.2?}", cache.len(), t.elapsed());
+
+        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+        ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        *ICON_CACHE.get().unwrap().lock().unwrap() = cache;
+
+        for q in ["e", "windows", "config"] {
+            let resp = attach_icons(builtin_search(q, QUERY_LIMIT_CAP));
+            if resp.results.is_empty() {
+                continue;
+            }
+            // ② 改后的**真实**载荷（就是前端实际收到的那份 JSON）
+            let keyed = serde_json::to_string(&resp).unwrap_or_default().len();
+
+            // ① 改前的等价载荷：把去重表摊回每条结果里内联
+            let inline: usize = serde_json::to_string(&resp.results).unwrap_or_default().len()
+                + resp
+                    .results
+                    .iter()
+                    .map(|r| resp.icons.get(&r.icon_key).map_or(0, |ic| ic.len() + 10))
+                    .sum::<usize>();
+
+            println!(
+                "\n[{q}] {} 条 / 去重后图标 {} 张",
+                resp.results.len(), resp.icons.len()
+            );
+            println!("  ① 内联（改前）:   {:>8.1} KB", inline as f64 / 1024.0);
+            println!("  ② key+表（现行）: {:>8.1} KB   → 削减 {:.0}%",
+                keyed as f64 / 1024.0,
+                (1.0 - keyed as f64 / inline as f64) * 100.0);
         }
+        println!();
     }
 
     /// 用**真实字符串**验证分层前提本身（续117）。
@@ -965,16 +1109,10 @@ mod tests {
         let tokens = [q.as_str()];
 
         // 子序列侧：能触到封顶的长名（短名加分≈0）+ 额外目录 + 今日更新
-        let mut fuzzy_fresh = ent("", now, true);
-        let fname = "a_".repeat(60);
-        fuzzy_fresh.name = fname.clone();
-        fuzzy_fresh.name_lower = fname;
+        let fuzzy_fresh = ent(&"a_".repeat(60), now, true);
 
         // 子串侧：查询词出现在第 600 字符（位置罚分饱和）+ 10 年前 + 普通目录
-        let mut exact_old = ent("", now - 3650 * DAY, false);
-        let xname = format!("{}{}.md", "x".repeat(600), q);
-        exact_old.name = xname.clone();
-        exact_old.name_lower = xname;
+        let exact_old = ent(&format!("{}{}.md", "x".repeat(600), q), now - 3650 * DAY, false);
 
         let f = entry_score(&tokens, &fuzzy_fresh, now).expect("子序列应当命中");
         let x = entry_score(&tokens, &exact_old, now).expect("子串应当命中");
@@ -982,7 +1120,7 @@ mod tests {
         assert_eq!(
             f,
             SUBSEQ_CAP
-                + short_name_bonus(fuzzy_fresh.name.len())
+                + short_name_bonus(fuzzy_fresh.name().len())
                 + EXTRA_DIR_BONUS
                 + RECENCY_BONUS_MAX
                 + path_depth_bonus(fuzzy_fresh.depth),
@@ -991,7 +1129,7 @@ mod tests {
         assert_eq!(
             x,
             L_SUBSTR - POS_PENALTY_MAX
-                + short_name_bonus(exact_old.name.len())
+                + short_name_bonus(exact_old.name().len())
                 + path_depth_bonus(exact_old.depth),
             "子串侧没有构成预期的最坏情形"
         );
@@ -1044,7 +1182,7 @@ mod tests {
             name: name.to_string(),
             ext: String::new(),
             is_dir: false,
-            icon: None,
+            icon_key: String::new(),
             mtime,
         }
     }
@@ -1184,7 +1322,7 @@ mod tests {
         EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
         *EXTRA_DIRS.get().unwrap().lock().unwrap() = vec![extra.clone()];
         let idx = build_index(&scan_dirs());
-        let names: Vec<&str> = idx.iter().map(|e| e.name.as_str()).collect();
+        let names: Vec<&str> = idx.iter().map(|e| e.name()).collect();
         assert!(names.contains(&"home_marker.txt"), "USERPROFILE 未进索引: {names:?}");
         assert!(names.contains(&"zzmarker_extra.txt"), "额外目录未进索引: {names:?}");
 
@@ -1270,14 +1408,14 @@ mod tests {
         // 修复前这里会因 `-i32::MIN` 触发 attempt to negate with overflow 而崩溃。
         for syntax in ["ext:txt", "*.md", "size:>1mb"] {
             let r = search_files(syntax.to_string(), 20);
-            println!("  [{syntax}] {} 条（未 panic，跑完）", r.len());
+            println!("  [{syntax}] {} 条（未 panic，跑完）", r.results.len());
         }
         println!("  ✓ Everything 语法下无 panic（续117 的 -i32::MIN 溢出未回归）\n");
 
         SEARCH_ENGINE.store(prev, Ordering::Relaxed);
     }
 
-    /// 診断用（既定 #[ignore]：cargo test --lib diagnose_coverage -- --ignored --nocapture）
+    /// 诊断用（默认 #[ignore]：cargo test --lib diagnose_coverage -- --ignored --nocapture）
     ///
     /// 排查「自己的项目目录搜不出来」的成因（续123 调查）。
     /// 看两点：**它到底在不在索引里**（范围问题），还是在索引里却排不上来（排序问题）。
@@ -1325,7 +1463,7 @@ mod tests {
         println!();
     }
 
-    /// 診断用（既定 #[ignore]：cargo test --lib measure_drive_cost -- --ignored --nocapture）
+    /// 诊断用（默认 #[ignore]：cargo test --lib measure_drive_cost -- --ignored --nocapture）
     ///
     /// 把全部固定驱动器纳入索引的代价估算（续123）。
     /// 内存是瓶颈，所以先按深度测条数再定范围。
@@ -1367,7 +1505,7 @@ mod tests {
         println!();
     }
 
-    /// 診断用（既定 #[ignore]：
+    /// 诊断用（默认 #[ignore]：
     ///   cargo test --lib probe_builtin_system_roots -- --ignored --nocapture）
     ///
     /// 验证续122/123 的成效：内置引擎查 "windows" 时 `C:\Windows` 能否排到前面。
@@ -1389,7 +1527,7 @@ mod tests {
         let idx = build_index(&dirs);
         let build_ms = t.elapsed();
         let bytes: usize = std::mem::size_of::<IndexEntry>() * idx.len()
-            + idx.iter().map(|e| e.path.len() + e.name.len() + e.name_lower.len() + e.ext.len()).sum::<usize>();
+            + idx.iter().map(|e| e.path.len() + e.name_lower.len()).sum::<usize>();
         println!(
             "\n索引: {} 条 / 构建 {:.2?} / 估算 {:.1} MB",
             idx.len(), build_ms, bytes as f64 / 1_048_576.0
@@ -1400,7 +1538,7 @@ mod tests {
 
         for q in ["windows", "program files", "system32"] {
             let r = builtin_search(q, 8);
-            println!("\n  [{q}] → 上位 {}:", r.len());
+            println!("\n  [{q}] → 前 {} 名:", r.len());
             for x in &r {
                 println!("      {}", x.path);
             }
@@ -1408,7 +1546,7 @@ mod tests {
         println!();
     }
 
-    /// 診断用（既定 #[ignore]：cargo test --lib measure_index_scope -- --ignored --nocapture）
+    /// 诊断用（默认 #[ignore]：cargo test --lib measure_index_scope -- --ignored --nocapture）
     ///
     /// 估算能否扩大内置引擎的**覆盖范围**（续122 调查）。
     /// 用户反馈：「搜 "windows" 却出不来 C:\Windows」——这不是排序问题，
@@ -1421,17 +1559,17 @@ mod tests {
     #[test]
     #[ignore]
     fn measure_index_scope() {
-        // 单条 IndexEntry 的堆占用实测（结构体本身 + 各 String 的缓冲区）
+        // 单条 IndexEntry 的堆占用实测（结构体本身 + 两个 Box<str> 缓冲区；续126 起 name/ext 是切片，不占额外内存）
         let est = |v: &Vec<IndexEntry>| -> usize {
             std::mem::size_of::<IndexEntry>() * v.len()
                 + v.iter()
-                    .map(|e| e.path.len() + e.name.len() + e.name_lower.len() + e.ext.len())
+                    .map(|e| e.path.len() + e.name_lower.len())
                     .sum::<usize>()
         };
 
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         let candidates: Vec<(&str, PathBuf)> = vec![
-            ("%USERPROFILE%（現状）", PathBuf::from(&home)),
+            ("%USERPROFILE%（现状）", PathBuf::from(&home)),
             ("C:\\Windows", PathBuf::from("C:\\Windows")),
             ("C:\\Program Files", PathBuf::from("C:\\Program Files")),
             ("C:\\Program Files (x86)", PathBuf::from("C:\\Program Files (x86)")),
@@ -1505,7 +1643,7 @@ mod tests {
         println!("     压缩表示后，同样条数可以显著降低内存占用。\n");
     }
 
-    /// 診断用（既定 #[ignore]：cargo test --lib probe_everything_exclude -- --ignored --nocapture）
+    /// 诊断用（默认 #[ignore]：cargo test --lib probe_everything_exclude -- --ignored --nocapture）
     ///
     /// 续121 发现的问题：噪声排除若放在**我们这侧过滤**，
     /// 从 Everything 取回的 5000 条里有 4998 条是 WinSxS，扔完只剩 2 条。
@@ -1621,7 +1759,7 @@ mod tests {
                 let got = r.len();
                 let mut ranked = rerank_everything(r, q);
                 ranked.truncate(10);
-                println!("  候補 {got:>5} 件 → 上位 10:");
+                println!("  候选 {got:>5} 条 → 前 10 名:");
                 for x in &ranked {
                     println!("      {}", x.name);
                 }
@@ -1642,7 +1780,7 @@ mod tests {
         let t1 = Instant::now();
         let idx = build_index(&[(home, false, MAX_WALK_DEPTH)]);
         let walk = t1.elapsed();
-        let exe_lnk = idx.iter().filter(|e| e.ext == "exe" || e.ext == "lnk").count();
+        let exe_lnk = idx.iter().filter(|e| e.ext() == "exe" || e.ext() == "lnk").count();
         let t2 = Instant::now();
         let icons = build_icon_cache(&idx);
         println!(

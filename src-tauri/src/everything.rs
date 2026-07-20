@@ -232,7 +232,7 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
                 name,
                 ext,
                 is_dir,
-                icon: None, // 由 filesearch::fill_icons_from_cache 从预热缓存回填
+                icon_key: String::new(), // 由 filesearch::attach_icons 统一标注并收集
                 mtime,
             });
         }
