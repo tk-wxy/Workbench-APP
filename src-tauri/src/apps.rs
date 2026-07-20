@@ -1,4 +1,4 @@
-use serde::Serialize;
+﻿use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
@@ -18,6 +18,10 @@ pub struct AppInfo {
     pub path: String,
     /// base64 编码的 PNG 图标（data URL 格式）
     pub icon: Option<String>,
+    /// 是否为 UWP / Packaged App（续125）。true 时 `path` 不是文件系统路径而是
+    /// `shell:AppsFolder\<AUMID>` —— 它只对 ShellExecuteW 有意义，
+    /// 「打开所在目录」「复制到剪贴板」这类按真实路径办事的操作对它无效，前端须据此置灰。
+    pub packaged: bool,
 }
 
 // ── Windows API FFI ────────────────────────────────────────
@@ -206,7 +210,7 @@ fn do_scan() -> Vec<AppInfo> {
             .collect();
 
         for entry in entries {
-            if apps.len() >= 400 {
+            if apps.len() >= MAX_APPS {
                 break;
             }
             let lnk_path = entry.path();
@@ -227,16 +231,43 @@ fn do_scan() -> Vec<AppInfo> {
             let path_str = lnk_path.to_string_lossy().to_string();
             let icon = extract_icon_base64(&path_str);
 
-            apps.push(AppInfo { name, path: path_str, icon });
+            apps.push(AppInfo { name, path: path_str, icon, packaged: false });
         }
     }
 
+    // UWP / Packaged Apps（续125）。放在 .lnk 之后：`seen` 已被 .lnk 填过，
+    // 同名冲突时保留 .lnk 那条 —— 它的 path 是真实文件路径，能力严格更强（可 reveal、可复制）。
+    let packaged_count = if apps.len() < MAX_APPS {
+        let before = apps.len();
+        for app in scan_packaged_apps() {
+            if apps.len() >= MAX_APPS {
+                break;
+            }
+            if should_skip(&app.name) {
+                continue;
+            }
+            if !seen.insert(app.name.to_lowercase()) {
+                continue;
+            }
+            apps.push(app);
+        }
+        apps.len() - before
+    } else {
+        0
+    };
+
     apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     let with_icon = apps.iter().filter(|a| a.icon.is_some()).count();
-    println!("[apps] scan done: {} apps, {} with icons", apps.len(), with_icon);
+    println!(
+        "[apps] scan done: {} apps ({} packaged), {} with icons",
+        apps.len(), packaged_count, with_icon
+    );
     if com_hr >= 0 { unsafe { CoUninitialize(); } }
     apps
 }
+
+/// 应用列表总条数上限（.lnk + UWP 合计）。续125 前是硬编码 400 且只有 .lnk 一路。
+const MAX_APPS: usize = 600;
 
 fn scan_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
@@ -303,6 +334,113 @@ fn should_skip(name: &str) -> bool {
 fn should_skip_by_path(path: &str) -> bool {
     let lower = path.to_lowercase();
     SKIP_PATH_SEGS.iter().any(|seg| lower.contains(seg))
+}
+
+// ── UWP / Packaged Apps（续125）────────────────────────────
+//
+// 背景：UWP 应用不是 .lnk，开始菜单目录里根本没有它们的文件，所以 `scan_start_menu`
+// 从来看不到「计算器」「设置」「照片」这些 Windows 自带应用。Windows 自己的搜索能搜到，
+// 靠的是 shell 命名空间里的虚拟文件夹 `shell:AppsFolder`。
+//
+// 三点与 .lnk 路线的本质差异：
+// ① 没有文件路径 —— 标识是 AUMID（`PackageFamilyName!AppId`），
+//    我们存成 `shell:AppsFolder\<AUMID>` 交给 ShellExecuteW（免去引 IApplicationActivationManager）。
+// ② 图标取不到 —— SHGetFileInfoW 对 AUMID 无从下手，得走 IShellItemImageFactory 拿磁贴图。
+// ③ 这两点合起来意味着 `AppInfo.packaged=true` 的条目**没有真实路径**，
+//    前端凡是按路径办事的操作都要屏蔽（见 AppInfo.packaged 注释）。
+
+/// UWP 磁贴图标的取图尺寸。列表里显示 32~48px，取 64 给高 DPI 留余量；
+/// 配 SIIGBF_BIGGERSIZEOK 允许 shell 返回更大的原生尺寸（不放大糊图）。
+const PACKAGED_ICON_PX: i32 = 64;
+
+/// 枚举 `shell:AppsFolder` 里的 Packaged App。
+///
+/// ⚠️ 要求调用方已初始化 COM（在 `do_scan` 的 CoInitializeEx 区间内调用）。
+/// AppsFolder 里**同时**列着传统 Win32 应用和 UWP，这里只取后者：
+/// 前者已由 .lnk 扫描覆盖且信息更全，重复收进来只会制造同名条目。
+fn scan_packaged_apps() -> Vec<AppInfo> {
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::UI::Shell::{
+        IEnumShellItems, IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName,
+        BHID_EnumItems, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK,
+        SIIGBF_ICONONLY,
+    };
+
+    let mut out: Vec<AppInfo> = Vec::new();
+    unsafe {
+        let wide = str_to_wide("shell:AppsFolder");
+        let folder: IShellItem = match SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[apps] AppsFolder 解析失败，跳过 UWP 扫描: {e}");
+                return out;
+            }
+        };
+        let items: IEnumShellItems = match folder.BindToHandler(None, &BHID_EnumItems) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("[apps] AppsFolder 枚举器创建失败: {e}");
+                return out;
+            }
+        };
+
+        loop {
+            let mut fetched = [None::<IShellItem>; 1];
+            let mut got = 0u32;
+            if items.Next(&mut fetched, Some(&mut got)).is_err() || got == 0 {
+                break;
+            }
+            let Some(item) = fetched[0].take() else { break };
+
+            // 解析名 = AUMID。取不到就跳过——没有它就没法启动，收进来是个死条目。
+            let Some(aumid) = co_string(item.GetDisplayName(SIGDN_PARENTRELATIVEPARSING).ok())
+            else {
+                continue;
+            };
+            if !is_packaged_aumid(&aumid) {
+                continue; // Win32 项，交给 .lnk 扫描
+            }
+            let Some(name) = co_string(item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()) else {
+                continue;
+            };
+
+            // 磁贴图标：GetImage 直接给 HBITMAP（没有 HICON 这一层），复用 hbitmap_to_png。
+            let icon = item.cast::<IShellItemImageFactory>().ok().and_then(|f| {
+                let size = SIZE { cx: PACKAGED_ICON_PX, cy: PACKAGED_ICON_PX };
+                let hbm = f.GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK).ok()?;
+                let png = hbitmap_to_png(hbm.0 as isize);
+                DeleteObject(hbm.0 as isize); // GetImage 的 HBITMAP 归调用方所有
+                png
+            });
+
+            out.push(AppInfo {
+                name,
+                path: format!("shell:AppsFolder\\{aumid}"),
+                icon,
+                packaged: true,
+            });
+        }
+    }
+    out
+}
+
+/// CoTaskMem 分配的宽字符串 → String，顺带释放。GetDisplayName 的返回值必须这样收尾。
+fn co_string(p: Option<windows::core::PWSTR>) -> Option<String> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    let p = p?;
+    if p.is_null() {
+        return None;
+    }
+    let s = unsafe { p.to_string().ok() };
+    unsafe { CoTaskMemFree(Some(p.0 as *const std::ffi::c_void)) };
+    s.filter(|x| !x.is_empty())
+}
+
+/// AUMID 判定：Packaged App 的解析名形如 `Microsoft.WindowsCalculator_8wekyb3d8bbwe!App`。
+/// AppsFolder 里的 Win32 项解析名是文件路径或 `{GUID}` 形式，靠「有 `!`、且不含路径分隔符/盘符」区分。
+fn is_packaged_aumid(s: &str) -> bool {
+    s.contains('!') && !s.contains('\\') && !s.contains('/') && !s.contains(':')
 }
 
 // ── 图标提取（SHGFI_SYSICONINDEX + ImageList_GetIcon，无 overlay）──
@@ -380,20 +518,33 @@ fn hicon_to_png(hicon: isize) -> Option<String> {
         if GetIconInfo(hicon, &mut ii) == 0 { return None; }
         if ii.hbmColor == 0 { DeleteObject(ii.hbmMask); return None; }
 
+        let result = hbitmap_to_png(ii.hbmColor);
+        DeleteObject(ii.hbmColor);
+        DeleteObject(ii.hbmMask);
+        result
+    }
+}
+
+/// 32bpp HBITMAP → base64 PNG data URL。
+/// **不接管 hbm 所有权**，调用方负责 DeleteObject。
+/// 续125 从 hicon_to_png 中段抽出：UWP 磁贴图标由 IShellItemImageFactory::GetImage 直接给 HBITMAP，
+/// 没有 HICON 这一层，两条路复用同一段位图解码。
+fn hbitmap_to_png(hbm: isize) -> Option<String> {
+    unsafe {
         let hdc = CreateCompatibleDC(0);
-        if hdc == 0 { DeleteObject(ii.hbmColor); DeleteObject(ii.hbmMask); return None; }
+        if hdc == 0 { return None; }
 
         // GetObject 获取尺寸（GetDIBits cLines=0 在此系统不填 biWidth/biHeight）
         let mut bm: BITMAP = std::mem::zeroed();
         let go_ret = GetObjectW(
-            ii.hbmColor,
+            hbm,
             std::mem::size_of::<BITMAP>() as i32,
             &mut bm as *mut BITMAP as *mut std::ffi::c_void,
         );
         let width = bm.bmWidth;
         let height = bm.bmHeight;
         if go_ret == 0 || width <= 0 || height <= 0 {
-            DeleteDC(hdc); DeleteObject(ii.hbmColor); DeleteObject(ii.hbmMask);
+            DeleteDC(hdc);
             return None;
         }
 
@@ -407,8 +558,8 @@ fn hicon_to_png(hicon: isize) -> Option<String> {
 
         let row_size = ((width * 32 + 31) / 32) * 4;
         let mut pixels = vec![0u8; (row_size * height) as usize];
-        let p_ret = GetDIBits(hdc, ii.hbmColor, 0, height as u32, pixels.as_mut_ptr(), &mut bih, DIB_RGB_COLORS);
-        DeleteDC(hdc); DeleteObject(ii.hbmColor); DeleteObject(ii.hbmMask);
+        let p_ret = GetDIBits(hdc, hbm, 0, height as u32, pixels.as_mut_ptr(), &mut bih, DIB_RGB_COLORS);
+        DeleteDC(hdc);
         if p_ret == 0 { return None; }
 
         // BGRA → RGBA
@@ -886,6 +1037,68 @@ mod tests {
         assert!(image_dims("C:\\x\\a.zip", "zip").is_none());
         assert!(image_dims("C:\\x\\a.txt", "txt").is_none());
         assert!(image_dims("C:\\x\\nonexistent.png", "png").is_none(), "文件不存在应返回 None");
+    }
+
+    /// AUMID 判定（续125）：只认 `PFN!AppId`，AppsFolder 里的 Win32 项一律排除。
+    /// 判错的代价是双向的：漏判 = UWP 搜不到（本次要修的问题本身），
+    /// 误判 = 把 Win32 项按 `shell:AppsFolder\<路径>` 存起来，启动必失败。
+    #[test]
+    fn packaged_aumid_detection() {
+        assert!(is_packaged_aumid("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"));
+        assert!(is_packaged_aumid("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"));
+        // Win32 项：路径 / GUID 形式，都不该被当成 AUMID
+        assert!(!is_packaged_aumid("C:\\Program Files\\App\\app.exe"));
+        assert!(!is_packaged_aumid("{7b81be6a-ce2b-4676-a29e-eb907a5126c5}\\x"));
+        assert!(!is_packaged_aumid("Notepad"));
+        assert!(!is_packaged_aumid(""));
+    }
+
+    /// 诊断用（默认 #[ignore]，手动执行：
+    ///   cargo test --lib probe_packaged_apps -- --ignored --nocapture）
+    ///
+    /// 真机枚举 shell:AppsFolder，看 UWP 条数 / 图标命中率 / 耗时。
+    /// 耗时是这里的关键指标：扫描跑在 start_apps_worker 后台线程里，
+    /// 但它是「首次呼出前必须就绪」的预建工作，太慢就得改增量。
+    #[test]
+    #[ignore]
+    fn probe_packaged_apps() {
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+        let t0 = std::time::Instant::now();
+        let list = scan_packaged_apps();
+        let dt = t0.elapsed();
+        let with_icon = list.iter().filter(|a| a.icon.is_some()).count();
+        println!("UWP {} 条 / {} 带图标 / 耗时 {:?}", list.len(), with_icon, dt);
+        for a in list.iter().take(15) {
+            println!("  {:<40} {}", a.name, a.path);
+        }
+        assert!(list.iter().all(|a| a.packaged), "本函数只应产出 packaged 条目");
+        if hr >= 0 {
+            unsafe { CoUninitialize() };
+        }
+    }
+
+    /// 诊断用（默认 #[ignore]，⚠️ **会真的启动一个应用**（计算器），手动执行：
+    ///   cargo test --lib probe_launch_packaged -- --ignored --nocapture）
+    ///
+    /// 验证整条 UWP 路线的关键假设：`launch_app` 现成的 ShellExecuteW 能否吃
+    /// `shell:AppsFolder\<AUMID>`。若不能，就得改走 IApplicationActivationManager。
+    #[test]
+    #[ignore]
+    fn probe_launch_packaged() {
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
+        let list = scan_packaged_apps();
+        let target = list
+            .iter()
+            .find(|a| a.path.contains("WindowsCalculator"))
+            .or_else(|| list.first())
+            .expect("本机应至少有一个 Packaged App");
+        println!("启动: {} → {}", target.name, target.path);
+        let r = launch_app(target.path.clone());
+        println!("结果: {r:?}");
+        if hr >= 0 {
+            unsafe { CoUninitialize() };
+        }
+        assert!(r.is_ok(), "ShellExecuteW 无法启动 AUMID，需改用 IApplicationActivationManager");
     }
 
     /// 诊断用（默认 #[ignore]，手动执行：
