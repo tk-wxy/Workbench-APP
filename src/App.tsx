@@ -65,6 +65,10 @@ const PREVIEW_DEBOUNCE_MS = 130;
 /// 淘汰策略必须**同时**换掉：原注释说「重取代价低，不值得上 LRU」，在预览是"一帧换好"时成立；
 /// 续131d 之后重取要走「低清 → 淡入高清」，整表清空 = 所有项一起退回那个观感。
 const PREVIEW_CACHE_MAX = 60;
+/// 预览大图标共享表的上限（续131e，按 `iconKey` 而非路径计数）。
+/// 常见扩展名撑死几十个，会撑大它的只有 exe/lnk（各有各的图标、键是自身路径）。
+/// 100 条 ≈ 4.4 MB 封顶，同样走 LRU。
+const LARGE_ICON_CACHE_MAX = 100;
 // 增强搜索列表的 hover 选中驻留门槛（续118）。指针在某行连续停留超过这个时长才提交选中变更。
 // 70ms 的依据：擦过一行通常 <30ms，有意停留远超 70ms，两者区分得干净；而预览面板本就有
 // 130ms 元数据防抖，再叠 70ms 仍在既有延迟特征内，手感不会变钝。
@@ -197,7 +201,9 @@ type EnhResult =
   | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
   | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
   | { kind: "clip";  item: ClipItem; name: string; ranges: [number, number][] } // 剪贴板历史结果；activate=取走粘贴（copyAndPaste）
-  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
+  // 文件系统结果（无 ranges，Rust 侧已打分排序）。iconKey = Rust 算好的「图标身份」
+  // （目录 / 扩展名 / exe·lnk 用自身路径），续126 起随结果返回；预览大图标按它去重，见 largeIconRef。
+  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null; iconKey?: string };
 
 // 结果唯一键：渲染 key + 预览缓存键 + 预览竞态守卫共用一套，避免三处各写一份跑偏
 const enhKey = (r: EnhResult) =>
@@ -386,7 +392,7 @@ export default function App() {
   const enhPinnedRef = useRef(false); enhPinnedRef.current = enhPinned; // 供 onChange 闭包读最新 pinned 状态
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
-  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null }[]>([]);
+  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null; iconKey?: string }[]>([]);
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
   // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
@@ -922,7 +928,7 @@ export default function App() {
     for (const { group, items } of groupFiles(fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING), ENH_MIN_SECTION)) {
       out.push({
         key: `fs-${group}`, label: G_LABEL[group],
-        items: items.map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon })),
+        items: items.map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon, iconKey: f.iconKey })),
       });
     }
 
@@ -954,6 +960,16 @@ export default function App() {
   const [previewMeta, setPreviewMeta] = useState<{ key: string; info: FileEntry | null; icon: string | null; thumb: string | null } | null>(null);
   const previewCacheRef = useRef(new Map<string, { info: FileEntry | null; icon: string | null; thumb: string | null }>());
   const previewKeyRef = useRef("");
+  /// 预览大图标按「图标身份」共享（续131e）：`iconKey` 是 Rust 算的——目录一个键、
+  /// 普通文件按扩展名、exe/lnk 用自身路径（各有各的图标，本就不该共享）。
+  ///
+  /// 为什么不按路径存：50 个 .txt 就是 50 次 `get_large_icon`（每次 14~64ms 的 Shell COM）
+  /// 外加 50 份各自独立的 43.9 KB 字符串——同一张图标反复取、反复占内存。
+  /// 续126 已经给**列表**图标做过同样的去重，预览这一路当时没跟上。
+  ///
+  /// 键直接用 Rust 回传的 `iconKey`，**不在前端另写一套身份规则**——两套规则迟早跑偏。
+  /// 命中时不仅省掉 IPC，还能在第一帧就画出高清图（连那次淡入都不会发生）。
+  const largeIconRef = useRef(new Map<string, string | null>());
   useEffect(() => {
     if (!enhOpen) { setPreviewMeta(null); return; }
     const r = enhResults[enhSelIdx] ?? enhResults[0];
@@ -976,12 +992,26 @@ export default function App() {
         const { invoke } = await import("@tauri-apps/api/core");
         // 图片文件另取真缩略图（复用续99c 的落盘缓存，重复访问零解码原图）；非图片跳过这次 IPC
         const isImg = IMG_EXTS.includes((path.split(".").pop() ?? "").toLowerCase());
+        // 大图标先查「图标身份」共享表（续131e）：同扩展名的第二个文件起直接复用，
+        // 既省掉 14~64ms 的 Shell COM，又让 50 个 .txt 共用同一个字符串实例
+        // （JS 字符串按引用共享，去重后内存是真降下来的，不是只少了几次调用）。
+        const ikey = r.kind === "fs" ? (r.iconKey ?? "") : "";
+        const shared = ikey ? largeIconRef.current.get(ikey) : undefined;
         // 三个命令并行；任一失败不影响其余（大图标失败会回退到小图标/矢量字形）
         const [info, icon, thumb] = await Promise.all([
           invoke<FileEntry>("get_file_info", { path }).catch(() => null),
-          invoke<string | null>("get_large_icon", { path }).catch(() => null),
+          shared !== undefined ? Promise.resolve(shared)
+                               : invoke<string | null>("get_large_icon", { path }).catch(() => null),
           isImg ? invoke<string>("get_stage_thumbnail", { path }).catch(() => null) : Promise.resolve(null),
         ]);
+        if (ikey && shared === undefined) {
+          largeIconRef.current.set(ikey, icon ?? null); // 含 null：取不到也记下来，别每次都去白试
+          while (largeIconRef.current.size > LARGE_ICON_CACHE_MAX) {
+            const oldest = largeIconRef.current.keys().next().value;
+            if (oldest === undefined) break;
+            largeIconRef.current.delete(oldest);
+          }
+        }
         const entry = { info, icon: icon ?? null, thumb: thumb ?? null };
         previewCacheRef.current.set(key, entry);
         // LRU 淘汰：Map 的迭代序 = 插入序，队首就是最久没被触碰的那条，逐条删到不超上限。
@@ -1117,7 +1147,10 @@ export default function App() {
       title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
       cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
       glyph = r.isDir ? { isDir: true } : { ext: r.ext };
-      big = meta?.thumb ?? meta?.icon ?? r.icon ?? null; low = r.icon ?? null; photo = photoExt(r.ext, r.isDir);
+      // 共享表命中时**第一帧就是高清**——同扩展名的第二个文件起，连那次淡入都不会发生（续131e）。
+      // 与上面读 previewCacheRef 同理：渲染期只读、不改，保持纯净。
+      const sharedIcon = r.iconKey ? (largeIconRef.current.get(r.iconKey) ?? null) : null;
+      big = meta?.thumb ?? meta?.icon ?? sharedIcon ?? r.icon ?? null; low = r.icon ?? null; photo = photoExt(r.ext, r.isDir);
       fileFacts(r.path, r.isDir, r.ext);
     } else if (r.kind === "stage") {
       const it = r.item, p = it.items?.[0]?.path;
