@@ -9,7 +9,9 @@ import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
          IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip } from "./icons";
 
 // ── 类型 ──
-interface AppInfo { name: string; path: string; icon: string | null; }
+// packaged=true 即 UWP / Packaged App（续125）：path 是 `shell:AppsFolder\<AUMID>` 而非真实文件路径，
+// 只能交给 launch_app（ShellExecuteW 已实测可直接启动 AUMID）。凡按路径办事的操作都要屏蔽。
+interface AppInfo { name: string; path: string; icon: string | null; packaged?: boolean; }
 interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 // modified/created 为 Unix 秒，可能缺失（网络盘等不保证提供创建时间）——预览面板对缺失直接不渲染该行
 // 续119 新增 entries/entriesCapped/width/height/target（与 Rust apps.rs 的 FileInfo 对应）。
@@ -2040,8 +2042,12 @@ export default function App() {
       items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher(r), "launcher", r.name) });
       items.push({ label: t("加入中转区"), action: async () => toastAddResult(await addFsToStage(r), "stage", r.name) });
     } else if (r.kind === "app") {
-      items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }); showToast(t("已复制到剪贴板")); } });
-      items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
+      // UWP 没有真实文件路径（path 是 shell:AppsFolder\AUMID），复制/定位这两项对它无意义——
+      // 不是置灰而是整条不出现，菜单里留个必然失败的项比没有更糟。「加入启动台」照常可用。
+      if (!r.app.packaged) {
+        items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }); showToast(t("已复制到剪贴板")); } });
+        items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
+      }
       items.push({ label: t("加入启动台"), action: () => toastAddResult(addAppToLauncher(r.app), "launcher", r.app.name) });
     } else if (r.kind === "stage") { // stage（恒 file 类型）
       const path = r.item.items?.[0]?.path;
