@@ -1008,6 +1008,52 @@ pub fn resolve_lnk(path: String) -> LnkInfo {
 mod tests {
     use super::*;
 
+    /// 预览面板大图标的**载荷与耗时**（`cargo test --lib probe_large_icon_cost -- --ignored --nocapture`）。
+    /// 量两件事：① 每次预览一个没看过的项要过多大的 IPC；
+    /// ② 前端 `previewCacheRef`（上限 `PREVIEW_CACHE_MAX=300` 条）装满时的常驻内存。
+    /// 后者是"预览缓存"这个设计的真实代价，此前从没量过。
+    #[test]
+    #[ignore]
+    fn probe_large_icon_cost() {
+        let win = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let paths = [
+            format!("{win}\\explorer.exe"),
+            format!("{win}\\notepad.exe"),
+            format!("{win}\\System32\\cmd.exe"),
+            format!("{win}\\System32\\drivers\\etc\\hosts"),
+            win.clone(), // 文件夹
+        ];
+        let mut total_small = 0usize;
+        let mut total_large = 0usize;
+        let mut n = 0usize;
+        for p in &paths {
+            let t0 = std::time::Instant::now();
+            let large = get_large_icon(p.clone());
+            let dt = t0.elapsed();
+            let t1 = std::time::Instant::now();
+            let small = extract_icon_base64(p);
+            let dt_s = t1.elapsed();
+            let (ls, ss) = (large.as_ref().map_or(0, |s| s.len()), small.as_ref().map_or(0, |s| s.len()));
+            if ls == 0 { println!("{p}: 大图标取不到（跳过）"); continue; }
+            total_large += ls;
+            total_small += ss;
+            n += 1;
+            println!(
+                "{:<46} 大 {:>7} B / {:>8.2?}   小 {:>6} B / {:>8.2?}",
+                p.rsplit('\\').next().unwrap_or(p), ls, dt, ss, dt_s
+            );
+        }
+        assert!(n > 0, "一个大图标都没取到，探针无意义");
+        let avg = total_large / n;
+        println!(
+            "\n均值：大图标 {avg} B（小图标 {} B，约 {:.1}×）\n\
+             预览缓存装满 300 条 ≈ {:.1} MB（仅大图标；图片项还会另存一张缩略图）",
+            total_small / n,
+            avg as f64 / (total_small / n).max(1) as f64,
+            avg as f64 * 300.0 / 1024.0 / 1024.0
+        );
+    }
+
     /// 续119 新增的 3 个字段也必须以 camelCase 输出。
     /// 前端读的是 `entriesCapped`——若留成 snake_case 就会拿到 undefined（静默 falsy），
     /// 于是被截断的巨大文件夹会显示成「10000 个」这个**撒谎的确定值**。

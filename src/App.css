@@ -466,11 +466,18 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
    内框尺寸也由同步已知的 photo 在第一帧定死（见 App.tsx photoExt 处的注释）。 */
 .enh-pv-icon{width:88px;height:88px;border-radius:16px;background:var(--fill-1);
   display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;
-  padding:8px;}
-.enh-pv-icon img{width:100%;height:100%;object-fit:contain;}
+  position:relative;}
+/* 图标绝对定位、由 inset 表达原来的 8px 内边距（续131d）：低清与高清两张要**叠在同一位置**
+   才能做淡出交接，用 padding + 流式布局的话两张会一上一下排开。
+   inset 与 width/height 同时给：Safari 系内核对只给 inset 的替换元素尺寸计算不一致。 */
+.enh-pv-icon img{position:absolute;inset:8px;width:calc(100% - 16px);height:calc(100% - 16px);
+  object-fit:contain;}
 /* 图片缩略图铺满圆角容器（区别于图标的居中留白）——一眼能分辨"这是图片本身"还是"类型图标" */
-.enh-pv-icon-img{padding:0;}
-.enh-pv-icon-img img{object-fit:cover;}
+.enh-pv-icon-img img{inset:0;width:100%;height:100%;object-fit:cover;}
+/* 低清图：压在高清图下面，高清一到就淡出（续131d，说明见 App.tsx 该处注释）。
+   首帧就带 is-hidden 时不会有过渡（无前值可插值）→ 命中缓存的即时呈现不受影响。 */
+.enh-pv-ic-low{transition:opacity 160ms ease-out;}
+.enh-pv-ic-low.is-hidden{opacity:0;}
 .enh-pv-title{font-size:15px;font-weight:600;color:var(--text);line-height:1.35;
   word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
 /* 徽标（续116 上分类色）：改版前它是这个面板里**对比度最低**的元素（--text3 + 淡边框），

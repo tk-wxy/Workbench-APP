@@ -47,3 +47,8 @@ tauri-plugin-store = "2"
 enigo = "0.2"
 arboard = "3"
 image = "0.25"
+# 汉字→拼音（增强搜索的拼音匹配，续131）。
+# `plain` = 无声调：匹配用不上声调，带声调的输出还是非 ASCII、反而没法拿来做子序列匹配。
+# `heteronym` = 多音字全读音：没它「音乐」只会派生出首选读音 yinle，
+# 用户搜 yinyue / 网易云音乐搜 wyyyy 全都落空（实测踩到）。
+pinyin = { version = "0.11.0", default-features = false, features = ["heteronym", "plain"] }
