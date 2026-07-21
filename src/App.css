@@ -12,6 +12,12 @@
   --text2: rgba(255,255,255,0.55);
   --text3: rgba(255,255,255,0.30);
   --accent: #0078D4;
+  /* accent 低透明底：卡片 hover 操作按钮的底色，色相必须与 --accent 一致
+     （此前误用靛蓝 rgba(99,102,241) 配蓝色 accent 边框 → 撞色，续134 统一）。 */
+  --accent-soft: rgba(0,120,212,0.16);
+  /* 滚动条滑块色（续134）：轨道透明，滑块用半透明中性色 + hover 加深。 */
+  --scroll-thumb: rgba(255,255,255,0.16);
+  --scroll-thumb-hover: rgba(255,255,255,0.32);
   --radius: 8px;
   --font: 'Segoe UI Variable','Segoe UI',system-ui,'Microsoft YaHei',sans-serif;
   /* 拖拽 ghost 背景（续109）：取「--fill-2 叠在 --bg 上」的合成值定死为不透明色。
@@ -46,6 +52,9 @@
   --text: #1a1a1c;
   --text2: rgba(0,0,0,0.60);
   --text3: rgba(0,0,0,0.40);
+  --accent-soft: rgba(0,120,212,0.12);
+  --scroll-thumb: rgba(0,0,0,0.22);
+  --scroll-thumb-hover: rgba(0,0,0,0.40);
   /* 中转卡片专用颜色（浅色主题） */
   --card-bg: #ffffff;
   --card-thumb-bg: #f3f3f4;
@@ -70,9 +79,15 @@ html,body,#root{margin:0;padding:0;width:100%;height:100%;overflow:hidden;backgr
 html{user-select:none;-webkit-user-select:none;}
 input,textarea{user-select:text;-webkit-user-select:text;}
 ::selection{background:var(--accent);color:#fff;}
-::-webkit-scrollbar{width:3px;}
+/* 滚动条（续134 视觉优化）：悬浮式圆角滑块——8px 轨道里用 2px 透明边框把可见滑块收成
+   ~4px 并留出两侧留白（background-clip:padding-box），圆角全包、hover 加深。轨道全透明。
+   比原 3px 裸条更精致、更好抓，且不喧宾夺主。 */
+::-webkit-scrollbar{width:8px;height:8px;}
 ::-webkit-scrollbar-track{background:transparent;}
-::-webkit-scrollbar-thumb{background:var(--fill-2);border-radius:2px;}
+::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border-radius:8px;
+  border:2px solid transparent;background-clip:padding-box;}
+::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover);background-clip:padding-box;}
+::-webkit-scrollbar-corner{background:transparent;}
 
 /* ── 简化版 overlay（无动画）── */
 .overlay-simple{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;z-index:99999;
@@ -558,12 +573,18 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-result-dir{font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .enh-result-badge{flex-shrink:0;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:1px 6px;transition:opacity 120ms;}
 /* 悬浮时右侧操作按钮替代 badge（绝对叠覆，双方 transition 交叉淡入淡出）*/
-.enh-result-actions{position:absolute;right:12px;top:50%;transform:translateY(-50%);display:flex;gap:4px;opacity:0;pointer-events:none;transition:opacity 120ms;}
+.enh-result-actions{position:absolute;right:10px;top:50%;transform:translateY(-50%);display:flex;gap:6px;opacity:0;pointer-events:none;transition:opacity 120ms;}
 .enh-result:hover .enh-result-badge{opacity:0;pointer-events:none;}
 .enh-result:hover .enh-result-actions{opacity:1;pointer-events:auto;}
-.enh-action-btn{font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:4px;padding:2px 8px;background:var(--fill-2);cursor:pointer;white-space:nowrap;line-height:1.4;transition:color 100ms,border-color 100ms,background 100ms;}
-.enh-action-btn:hover{color:var(--text);border-color:var(--accent);background:rgba(99,102,241,0.1);}
-.enh-action-btn.enh-action-added,.enh-action-btn.enh-action-added:hover{color:#4ade80;border-color:rgba(74,222,128,0.35);background:rgba(74,222,128,0.08);}
+/* 核心操作按钮（续134 视觉优化）：更清晰的默认态（text2 + 柔和底）、圆角与行同族（6px），
+   hover 统一到 accent 色相（文字/边框/底色同为 accent，修掉此前边框蓝·底色靛蓝的撞色）。
+   min-width + 居中让「中转/启动台」切成 ✓ 时按钮宽度不跳动。 */
+.enh-action-btn{display:inline-flex;align-items:center;justify-content:center;min-width:44px;
+  font-size:11px;color:var(--text2);border:1px solid var(--border);border-radius:6px;padding:3px 10px;
+  background:var(--fill-1);cursor:pointer;white-space:nowrap;line-height:1.5;
+  transition:color 120ms,border-color 120ms,background 120ms;}
+.enh-action-btn:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);}
+.enh-action-btn.enh-action-added,.enh-action-btn.enh-action-added:hover{color:#3fbf6e;border-color:rgba(63,191,110,0.4);background:rgba(63,191,110,0.1);}
 .enh-divider{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;padding:10px 12px 4px;}
 .enh-index-hint{width:min(640px,80%);font-size:11px;color:var(--text3);padding:6px 12px;font-style:italic;}
 .hotkey-input{width:140px;padding:4px 8px;background:var(--fill-2);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;font-family:var(--font);}
