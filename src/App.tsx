@@ -809,7 +809,10 @@ export default function App() {
   // 这个一直存在的漏洞才被实测撞出来。守卫用自增 token：只有最后一次发出的查询有权写结果。
   const fsReqRef = useRef(0);
   useEffect(() => {
-    if (!enhOpen) return;
+    // 续136：关闭增强搜索时清掉 fsResults（原先只清 enhQuery、不清结果 →
+    // 上一次搜索最多 500 条结果 + 图标 base64 引用一直滞留 JS 堆到下次搜索）。
+    // 占一个 token 让在途查询作废（否则关闭瞬间在途的旧查询会把结果写回已清空的列表）。
+    if (!enhOpen) { fsReqRef.current++; setFsResults([]); return; }
     const q = enhQuery.trim();
     // 清空也要占一个 token，否则在途的旧查询会把结果写回已清空的列表
     if (!q) { fsReqRef.current++; setFsResults([]); return; }
