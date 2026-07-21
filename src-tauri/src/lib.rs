@@ -199,6 +199,9 @@ fn open_file(path: String) -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("无法打开: {}", e))?;
+    // 续132：文件/文件夹「使用学习」——open_file 是所有打开路径的唯一漏斗，
+    // 在此记录即全覆盖（reveal_in_explorer 不记，那是定位非打开）。内存 bump 同步、落盘异步。
+    filesearch::record_file_open(&path);
     Ok(())
 }
 
@@ -753,6 +756,7 @@ pub fn run() {
             // 剪贴板子系统初始化（路径→load→monitor→janitor 时序封装在 clipboard::init 内）
             let data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
             clipboard::init(app.handle(), &data_dir);
+            filesearch::init_file_usage(&data_dir); // 文件使用学习：装载持久化的打开记录（续132）
             apps::init_thumb_cache(&data_dir); // 中转区图片缩略图落盘缓存（续99c：重启秒开）
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             everything::init(app.handle()); // 可选 Everything：登记资源目录供加载 SDK DLL
