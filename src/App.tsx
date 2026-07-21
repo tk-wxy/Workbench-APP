@@ -2216,11 +2216,13 @@ export default function App() {
 
   // 启动器条目右键菜单（file/folder 额外加「打开所在目录」；通用：从启动器移除）
   const openLauncherCtxMenu = useCallback((e: React.MouseEvent, it: LauncherItem) => {
-    const items: CtxMenuItem[] = [];
+    // 「打开」置顶：左键本就能打开，但右键菜单里补一条更符合直觉（与增强搜索结果菜单一致）。
+    // 无图标元素调用 → openLauncherItem 走 !iconEl 分支直接打开并隐藏，不播放大动画。
+    const items: CtxMenuItem[] = [{ label: t("打开"), action: () => openLauncherItem(it) }];
     if (it.kind !== "app") items.push({ label: t("打开所在目录"), action: async () => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
     items.push({ label: t("从启动器移除"), action: () => removeLauncherItem(it.id) });
     openCtxMenu(e, items);
-  }, [openCtxMenu, removeLauncherItem, t]);
+  }, [openCtxMenu, removeLauncherItem, openLauncherItem, t]);
 
   // 增强搜索结果右键菜单：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区（按 kind 取可用子集）
   // stage 结果只有 file 类型（enhTier1 已按 type==="file" 过滤），故其 items[0].path 恒有效
