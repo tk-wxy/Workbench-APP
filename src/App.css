@@ -91,8 +91,12 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 
 /* ── 简化版 overlay（无动画）── */
 .overlay-simple{position:fixed;top:0;left:0;right:0;bottom:0;display:flex;flex-direction:column;z-index:99999;
-  /* blur 由 24→12px（续102）：--bg 为 0.97 不透明，静止时模糊仅 ~3% 可见，24px 核在全屏实时桌面 @200%DPI 每帧重算是呼出/淡出掉帧主因；12px 半径滤镜成本约减半、静止观感几乎无差。 */
-  background:var(--bg);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);
+  /* 续136：去掉 backdrop-filter blur（前身 续102 曾把半径 24→12px）。三段时序实测确认「每次呼出重新
+     合成 blur」是把 GPU 顶到 838MB、总量冲到 1.43G 的元凶——关掉后 toggle 峰值 GPU 838→408（-430MB）、
+     空闲 350→292 且消除了每 60s 一次的周期重合成尖峰。--bg 本就 0.97 不透明、静止时 blur 仅 ~3% 可见，
+     去掉后观感几乎无差（用户实测确认保留）。
+     ⚠ 别再加回 backdrop-filter：全屏 @200%DPI 实时模糊真实桌面是本应用最大的单项内存/GPU 成本。 */
+  background:var(--bg);
   border:none;outline:none;margin:0;padding:0;}
 .overlay-visible{opacity:1;pointer-events:auto;}
 .overlay-hidden{opacity:0;pointer-events:none;}
@@ -437,7 +441,7 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
    打开：@keyframes 单向飞入（opacity+transform）；关闭：只 fade opacity，无 transform 回弹
    —— 避免关闭时出现"掉落缩小"的关闭感，让切换视图更平滑 */
 .enh-layer{position:absolute;inset:0;z-index:50;display:flex;flex-direction:column;align-items:center;
-  padding-top:8vh;background:var(--bg);backdrop-filter:blur(12px) saturate(1.4);-webkit-backdrop-filter:blur(12px) saturate(1.4);/* 续102：同 overlay 降 24→12px */
+  padding-top:8vh;background:var(--bg);/* 续136：去掉 backdrop-filter blur，同 .overlay-simple（GPU 主因，去掉省 ~440MB 峰值）*/
   opacity:0;transform:none;pointer-events:none;transition:opacity 100ms ease;}
 .enh-layer.enh-open{animation:enh-layer-in 160ms ease forwards;pointer-events:auto;}
 @keyframes enh-layer-in{from{opacity:0;transform:translateY(10px) scale(0.985);}to{opacity:1;transform:none;}}
@@ -457,8 +461,8 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 
 /* ── 预览面板（续115）──
    「大图标 + 名称 + 元信息 + 快捷操作」的纵向叙事：先认出是什么，再看细节，最后动手。
-   ⚠ 背景用实色（--card-bg）而非 backdrop-filter：外层 .enh-layer 已有一层 blur，
-     再叠一层等于同区域重复合成（续102/续109 的老账），而它背后本就不透明、收益≈0。
+   ⚠ 背景用实色（--card-bg）而非 backdrop-filter：面板背后本就不透明（--card-bg + 外层 --bg 0.97），
+     再叠 backdrop-filter 是纯浪费的重复合成（续102/续109 的老账；续136 起外层 .enh-layer 也已去 blur）。
    位置：绝对定位在列表容器**左外侧**（right:100%+间距），故不占布局流、列表保持居中。
    高度：**随内容**（不铺满）——信息只有几行时铺满整屏会显得空旷失衡；长内容才滚动。 */
 .enh-preview{position:absolute;right:calc(100% + 16px);top:0;width:300px;
