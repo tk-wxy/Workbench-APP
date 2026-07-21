@@ -131,6 +131,14 @@ extern "system" {
 // 再向 SHGetImageList 要 JUMBO 档的列表句柄，用同一个 iIcon 取出大图。
 const SHIL_JUMBO: i32 = 0x4;
 
+/// 预览大图标从 JUMBO 256px 缩到此上限再返回（续136 内存优化）。
+///
+/// 预览面板显示 88px(CSS)，@200%DPI = 176 物理像素——256px 是**过采样**。
+/// 缩到 192px（覆盖到 ~218% DPI 仍不糊，而本机 200% 下 192 > 176 = 略上采样、绝对清晰），
+/// renderer 里每张已解码位图 256²→192²（省 ~43%）、base64 体积也随之变小。
+/// **只作用于大图标路径**（extract_large_icon_base64 → Some）；32px 小图标 / UWP 磁贴传 None、不缩。
+const PREVIEW_ICON_MAX: u32 = 192;
+
 #[repr(C)]
 struct GUID { data1: u32, data2: u16, data3: u16, data4: [u8; 8] }
 // IID_IImageList {46EB5926-582E-4017-9FDF-E8998DAA0950}
@@ -439,7 +447,7 @@ fn scan_packaged_apps() -> Vec<AppInfo> {
             let icon = item.cast::<IShellItemImageFactory>().ok().and_then(|f| {
                 let size = SIZE { cx: PACKAGED_ICON_PX, cy: PACKAGED_ICON_PX };
                 let hbm = f.GetImage(size, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK).ok()?;
-                let png = hbitmap_to_png(hbm.0 as isize);
+                let png = hbitmap_to_png(hbm.0 as isize, None);
                 DeleteObject(hbm.0 as isize); // GetImage 的 HBITMAP 归调用方所有
                 png
             });
@@ -494,7 +502,7 @@ pub fn extract_icon_base64(path: &str) -> Option<String> {
             let clean = ImageList_GetIcon(himl, shfi.iIcon, ILD_NORMAL);
             if clean != 0 {
                 if shfi.hIcon != 0 { DestroyIcon(shfi.hIcon); }
-                let result = hicon_to_png(clean);
+                let result = hicon_to_png(clean, None);
                 DestroyIcon(clean);
                 if result.is_some() { return result; }
             }
@@ -502,13 +510,14 @@ pub fn extract_icon_base64(path: &str) -> Option<String> {
 
         // Fallback：用 Shell 给的 hIcon（.lnk 带 overlay 箭头，聊胜于无）
         if shfi.hIcon == 0 { return None; }
-        let result = hicon_to_png(shfi.hIcon);
+        let result = hicon_to_png(shfi.hIcon, None);
         DestroyIcon(shfi.hIcon);
         result
     }
 }
 
-/// 提取 256px 大图标（预览面板用）。失败返回 None，前端回退到既有 32px 图标 / 矢量字形。
+/// 提取大图标（预览面板用）：从 JUMBO 256px 取、缩到 PREVIEW_ICON_MAX(192px) 再返回（续136 省内存）。
+/// 失败返回 None，前端回退到既有 32px 图标 / 矢量字形。
 /// 与 `extract_icon_base64` **并存而非替换**：列表里几十个 32px 图标够用且省得多，
 /// 只有预览这一处需要大图。
 pub fn extract_large_icon_base64(path: &str) -> Option<String> {
@@ -527,7 +536,7 @@ pub fn extract_large_icon_base64(path: &str) -> Option<String> {
 
         let hicon = ImageList_GetIcon(himl, shfi.iIcon, ILD_NORMAL);
         if hicon == 0 { return None; }
-        let result = hicon_to_png(hicon);
+        let result = hicon_to_png(hicon, Some(PREVIEW_ICON_MAX));
         DestroyIcon(hicon); // 系统列表本身不释放（进程级共享），只销毁取出的副本
         result
     }
@@ -542,13 +551,13 @@ pub fn get_large_icon(path: String) -> Option<String> {
     icon
 }
 
-fn hicon_to_png(hicon: isize) -> Option<String> {
+fn hicon_to_png(hicon: isize, max_dim: Option<u32>) -> Option<String> {
     unsafe {
         let mut ii: ICONINFO = std::mem::zeroed();
         if GetIconInfo(hicon, &mut ii) == 0 { return None; }
         if ii.hbmColor == 0 { DeleteObject(ii.hbmMask); return None; }
 
-        let result = hbitmap_to_png(ii.hbmColor);
+        let result = hbitmap_to_png(ii.hbmColor, max_dim);
         DeleteObject(ii.hbmColor);
         DeleteObject(ii.hbmMask);
         result
@@ -559,7 +568,9 @@ fn hicon_to_png(hicon: isize) -> Option<String> {
 /// **不接管 hbm 所有权**，调用方负责 DeleteObject。
 /// 续125 从 hicon_to_png 中段抽出：UWP 磁贴图标由 IShellItemImageFactory::GetImage 直接给 HBITMAP，
 /// 没有 HICON 这一层，两条路复用同一段位图解码。
-fn hbitmap_to_png(hbm: isize) -> Option<String> {
+/// `max_dim=Some(m)`：位图任一边超过 m 时缩到 m 内再编码（续136，仅大图标预览路径用；
+/// 小图标/UWP 磁贴传 None 保持原样）。
+fn hbitmap_to_png(hbm: isize, max_dim: Option<u32>) -> Option<String> {
     unsafe {
         let hdc = CreateCompatibleDC(0);
         if hdc == 0 { return None; }
@@ -604,6 +615,20 @@ fn hbitmap_to_png(hbm: isize) -> Option<String> {
                     rgba.push(pixels[o]);
                     rgba.push(pixels[o + 3]);
                 }
+            }
+        }
+        // 续136：大图标路径把过采样的 JUMBO 256px 缩到 max_dim 再编码，省 renderer 解码内存与 base64 体积。
+        // Lanczos3 高质量降采样（一次调用/预览，非热路径，画质优先）。from_raw 失败（长度不符，极罕见）
+        // → None，前端回退 32px 图标，不 panic。
+        if let Some(m) = max_dim {
+            let (w, h) = (width as u32, height as u32);
+            if w.max(h) > m {
+                let src = image::RgbaImage::from_raw(w, h, rgba)?;
+                let scale = m as f64 / w.max(h) as f64;
+                let nw = ((w as f64 * scale).round() as u32).max(1);
+                let nh = ((h as f64 * scale).round() as u32).max(1);
+                let dst = image::imageops::resize(&src, nw, nh, image::imageops::FilterType::Lanczos3);
+                return encode_png_base64(nw, nh, dst.as_raw());
             }
         }
         encode_png_base64(width as u32, height as u32, &rgba)
