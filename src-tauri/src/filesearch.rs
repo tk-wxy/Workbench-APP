@@ -126,6 +126,22 @@ static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::
 /// 当前搜索引擎：0=内置自建索引，1=Everything。
 static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
 
+/// 文件「使用学习」记录（续132）：路径（归一化小写）→ 打开次数 / 最后打开时间。
+///
+/// 为什么必须存在 Rust 侧、独立于 FILE_INDEX：文件排序与截断都在 Rust（前端只拿到
+/// 截断后的前 N 条），高频但名次靠后的文件若不在 Rust 侧加分就永远回不来。
+/// 又因为索引每 30 分钟整表重建，使用记录必须**独立持久化**、不随索引蒸发。
+/// 应用侧的等价物是前端 store 的 `app-frequency`（usageScore），文件这条对应它。
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct FileUse {
+    pub count: u32,
+    /// 最后一次打开的 Unix 秒。
+    pub last_used: u64,
+}
+static FILE_USAGE: OnceLock<Mutex<HashMap<String, FileUse>>> = OnceLock::new();
+/// 使用记录的落盘路径（file-usage.json），init_file_usage 时设定。
+static FILE_USAGE_PATH: OnceLock<PathBuf> = OnceLock::new();
+
 const ENGINE_BUILTIN: u8 = 0;
 const ENGINE_EVERYTHING: u8 = 1;
 
@@ -187,6 +203,24 @@ const SUBSEQ_CAP: i32 = 1_000;
 /// 层内位置罚分上限（查询词出现得越靠后扣得越多）。层的实际跨度 = 这个值。
 const POS_PENALTY_MAX: i32 = 500;
 
+// ── 子序列紧凑度门槛（续133）──────────────────────────────────────────
+//
+// 起因（用户实测截图）：搜 "wen dang"（拼音）出来一堆 `Windows Notify Messaging.wav`
+// `bw-gopher-inverted-aligned.ccitt_group3` 之类纯噪声——子序列此前**只看字母是否按序
+// 出现、从不看跨度**，短 token 在长文件名里几乎必然「散乱命中」（w…e…n 散落在 24 个
+// 字符里）。现在给命中加一道紧凑度门槛：首尾命中之间插入的非命中字符数（= 空隙 gaps，
+// 恒等于「跨度 − 查询长度」）超过预算就判**不命中**，把散乱匹配从结果里彻底剔除。
+//
+// 预算随查询变长而放宽：`gaps ≤ qlen × FACTOR + BASE`。
+//   短查询（qlen=3）→ 预算 8：挡住 "wen"(gaps≈20) 这类噪声，放行 "cfg"→config(gaps=3)、
+//                     跨 3 词的首字母缩写（gaps≤8）等真实模糊输入。
+//   长查询（qlen=60，测试构造的 "a_a_a…"）→ 预算 122：gaps=59 照常放行（既有测试钉死）。
+// 门槛内再按 gaps 轻度罚分，让「较松但达标」的匹配排在紧凑匹配之后（层内次序，不跨层）。
+const SUBSEQ_GAP_FACTOR: i32 = 2;
+const SUBSEQ_GAP_BASE: i32 = 2;
+/// 每个空隙字符的罚分（仅用于子序列层内排序，不影响是否命中）。
+const SUBSEQ_GAP_PENALTY: i32 = 6;
+
 /// 短名加分上限（续121 从 60 提到 300，且函数形从线性改为反比例）。
 ///
 /// 为什么换形状：旧的 `MAX - min(len, MAX)` 是每字符扣 1 分的线性衰减，
@@ -223,11 +257,28 @@ fn path_depth(path: &str) -> u8 {
     path.bytes().filter(|b| *b == b'\\' || *b == b'/').count().min(255) as u8
 }
 
+/// 文件「使用学习」加分上限（续132）。
+///
+/// 动机：文件此前唯一的时间维度是 `mtime`（新鲜度），而**改过 ≠ 用户关心它**
+/// ——下载的安装包 mtime 很新却不会再点，反之天天打开的老配置文件 mtime 很旧。
+/// 「用户真的亲手打开过」是比修改时间强得多的意图信号，此前排序完全没用上。
+///
+/// 取值 400：在四个条目加分里最强（extra/short 各 300、depth 200、recency 120），
+/// 与「亲手打开」这个信号的强度相称；同时使 ENTRY_BONUS_BUDGET = 1320 仍 < 最小带间隙
+/// 1500（余量 180），故**不破坏分层不变量**——强匹配永远压过弱匹配，使用加分只翻转同层并列。
+/// 检算见 tests::layer_invariant_budget_holds。
+const OPEN_BONUS_MAX: i32 = 400;
+/// 使用打分的半衰期（30 天），与应用侧 usageScore 的 USAGE_HALFLIFE_S 对齐。
+const USAGE_HALFLIFE_SECS: f64 = 30.0 * 24.0 * 3600.0;
+/// 使用记录条数软上限（续132）：超过则淘汰衰减分最低的一条，防长会话/长期使用下无限膨胀。
+/// 每条约 = 路径字符串 + 12 B，2000 条量级微小；淘汰只在 record 且越限时扫一次。
+const MAX_USAGE_ENTRIES: usize = 2000;
+
 /// 条目级加分的合计上限。**必须小于相邻带的最小间隙**。
 /// 只有测试引用它，但它是预算的声明本身，故不放进 #[cfg(test)]。
 #[allow(dead_code)]
 const ENTRY_BONUS_BUDGET: i32 =
-    EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX + PATH_DEPTH_BONUS_MAX;
+    EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX + PATH_DEPTH_BONUS_MAX + OPEN_BONUS_MAX;
 
 /// 修改时间 → 新鲜度加分（续117）。
 ///
@@ -263,6 +314,135 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+// ── 文件使用学习（open_bonus，续132）──────────────────────────────────
+//
+// 记录侧：所有「打开文件/文件夹」都经 lib.rs 的 open_file 命令这一个漏斗
+// （activateEnh / openLauncherItem / stage 三条路都走它），故只在那里调
+// record_file_open 就自动全覆盖，前端零改动。reveal_in_explorer（打开所在目录）
+// **不记**——那是定位而非打开，意图不同。
+// 打分侧：open_bonus 在 builtin_search / rerank_everything 的**调用点**叠加到
+// entry_score 之上（entry_score 保持纯函数：只吃 IndexEntry 的固有属性，
+// 不碰 FILE_USAGE 这种运行时可变外部状态，测试才能自由构造条目验证排序）。
+
+/// 使用记录的键：路径归一化（正斜杠→反斜杠）+ 小写。
+/// 记录端（open_file 传入的路径）与打分端（索引里的路径）必须用同一口径，
+/// 否则同一个文件两处算出不同 key、加分永远命中不了。
+fn usage_key(path: &str) -> String {
+    path.replace('/', "\\").to_lowercase()
+}
+
+/// 衰减后的使用分：count × 0.5^(距上次打开 / 半衰期)，与应用侧 usageScore 同式。
+fn usage_decayed(u: &FileUse, now: u64) -> f64 {
+    if u.count == 0 {
+        return 0.0;
+    }
+    let age = now.saturating_sub(u.last_used) as f64;
+    u.count as f64 * 0.5f64.powf(age / USAGE_HALFLIFE_SECS)
+}
+
+/// 使用记录 → 加分（续132）。用**阶梯**而非连续函数，理由同 recency_bonus：
+/// 连续值会让同一查询重打一遍顺序抖动，档位化后同档内仍按相关度决胜。
+///
+/// 档位（以衰减分 s 为轴）：
+///   s < 0.25 → 0    单次打开且久未再碰（>2 个半衰期≈60 天）已淡出，不再占加分
+///   s < 1.0  → 100  例：单次打开约 30 天前
+///   s < 2.0  → 200  例：单次打开于近期（今日打开一次 s=1.0）
+///   s < 4.0  → 300  多次打开 / 近期反复打开
+///   否则     → 400  高频打开
+fn open_bonus(u: Option<&FileUse>, now: u64) -> i32 {
+    let Some(u) = u else { return 0 };
+    let s = usage_decayed(u, now);
+    if s < 0.25 {
+        0
+    } else if s < 1.0 {
+        OPEN_BONUS_MAX / 4
+    } else if s < 2.0 {
+        OPEN_BONUS_MAX / 2
+    } else if s < 4.0 {
+        OPEN_BONUS_MAX * 3 / 4
+    } else {
+        OPEN_BONUS_MAX
+    }
+}
+
+/// 记录一次文件/文件夹打开（续132）。lib.rs 的 open_file 命令调用。
+/// 内存 bump 同步（下一次查询立刻反映），落盘异步（detached 线程，快照入参），
+/// 与 save_clip_history 同款「不在命令路径上做磁盘 I/O」纪律。
+pub fn record_file_open(path: &str) {
+    let key = usage_key(path);
+    if key.is_empty() {
+        return;
+    }
+    let lock = FILE_USAGE.get_or_init(|| Mutex::new(HashMap::new()));
+    let snapshot = {
+        let Ok(mut map) = lock.lock() else { return };
+        let now = now_unix();
+        let e = map.entry(key).or_insert(FileUse { count: 0, last_used: now });
+        e.count = e.count.saturating_add(1);
+        e.last_used = now;
+        // 越限则淘汰衰减分最低的一条（刚 bump 的这条分数最高，不会被自己淘汰）。
+        if map.len() > MAX_USAGE_ENTRIES {
+            if let Some(victim) = map
+                .iter()
+                .min_by(|a, b| {
+                    usage_decayed(a.1, now)
+                        .partial_cmp(&usage_decayed(b.1, now))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(k, _)| k.clone())
+            {
+                map.remove(&victim);
+            }
+        }
+        map.clone()
+    };
+    std::thread::spawn(move || save_file_usage(snapshot));
+}
+
+/// 把使用记录快照原子写盘（tmp→rename）。接快照入参、自身不持锁；失败只 eprintln。
+fn save_file_usage(snapshot: HashMap<String, FileUse>) {
+    let Some(path) = FILE_USAGE_PATH.get() else { return };
+    let data = match serde_json::to_string(&serde_json::json!({"version": 1, "items": snapshot})) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("[fileusage] serialize error: {e}");
+            return;
+        }
+    };
+    let tmp = path.with_extension("json.tmp");
+    if let Err(e) = std::fs::write(&tmp, &data) {
+        eprintln!("[fileusage] write tmp error: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        eprintln!("[fileusage] rename error: {e}");
+    }
+}
+
+/// 初始化使用学习：设定落盘路径并从磁盘装载（lib.rs setup 调用）。
+/// 文件不存在 = 无历史，静默空表启动；解析失败静默空表（下次写入覆盖）。
+pub fn init_file_usage(data_dir: &std::path::Path) {
+    let path = data_dir.join("file-usage.json");
+    let mut map: HashMap<String, FileUse> = HashMap::new();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            if v["version"].as_u64() == Some(1) {
+                if let Some(obj) = v["items"].as_object() {
+                    for (k, val) in obj {
+                        if let Ok(u) = serde_json::from_value::<FileUse>(val.clone()) {
+                            map.insert(k.clone(), u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let n = map.len();
+    let _ = FILE_USAGE_PATH.set(path);
+    let _ = FILE_USAGE.set(Mutex::new(map));
+    eprintln!("[fileusage] loaded {n} record(s)");
 }
 
 
@@ -554,15 +734,27 @@ fn is_boundary(c: char) -> bool {
 }
 
 // 子序列模糊打分：t 的字符按序出现在 name 中即算命中；连续命中、词首命中额外加分。上限 SUBSEQ_CAP。
+// 续133：加**紧凑度门槛**——首尾命中之间的空隙超预算即判不命中（散乱匹配剔除），见 SUBSEQ_GAP_*。
 fn subseq_score(t: &str, name: &str) -> Option<i32> {
+    let qlen = t.chars().count() as i32;
     let mut chars = t.chars();
     let mut cur = chars.next()?;
     let mut score = 0i32;
     let mut consec = 0i32;
     let mut prev_match = false;
     let mut prev_char = ' ';
-    for c in name.chars() {
+    let mut first_idx = -1i32; // 第一个命中的下标（-1 = 尚未命中）
+    let mut last_idx = 0i32; // 上一个命中的下标
+    let mut gaps = 0i32; // 命中之间跳过的非命中字符总数（== 首尾跨度 − 查询长度）
+    for (i, c) in name.chars().enumerate() {
+        let idx = i as i32; // 当前字符在 name 中的下标
         if c == cur {
+            if first_idx < 0 {
+                first_idx = idx;
+            } else {
+                gaps += idx - last_idx - 1; // 与上一个命中之间的空隙（用旧 last_idx）
+            }
+            last_idx = idx;
             score += 10;
             if prev_match {
                 consec += 1;
@@ -576,7 +768,16 @@ fn subseq_score(t: &str, name: &str) -> Option<i32> {
             prev_match = true;
             match chars.next() {
                 Some(n) => cur = n,
-                None => return Some(score.min(SUBSEQ_CAP)), // t 全部匹配完
+                None => {
+                    // t 全部命中：先过紧凑度门槛，超预算判不命中（散乱噪声剔除，续133）。
+                    let budget = qlen * SUBSEQ_GAP_FACTOR + SUBSEQ_GAP_BASE;
+                    if gaps > budget {
+                        return None;
+                    }
+                    // 达标：按空隙轻度罚分（层内次序，松的排在紧凑的之后），至少 1 分仍纳入。
+                    score -= gaps * SUBSEQ_GAP_PENALTY;
+                    return Some(score.clamp(1, SUBSEQ_CAP));
+                }
             }
         } else {
             prev_match = false;
@@ -655,9 +856,16 @@ fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
     };
     // 新鲜度加分用的当前时间只取一次（循环里每条都调 SystemTime::now 是浪费）
     let now = now_unix();
+    // 使用学习加分（续132）：锁一次 FILE_USAGE、整段循环持有。
+    // 锁序 FILE_INDEX → FILE_USAGE 固定，record_file_open 只取 FILE_USAGE，无环。
+    // open_bonus 只对**已命中 token** 的条目查表（path.to_lowercase 仅少数命中项付费）。
+    let usage = FILE_USAGE.get().and_then(|l| l.lock().ok());
     let mut scored: Vec<(i32, &IndexEntry)> = Vec::new();
     for e in guard.iter() {
-        if let Some(total) = entry_score(&tokens, e, now) {
+        if let Some(mut total) = entry_score(&tokens, e, now) {
+            if let Some(u) = &usage {
+                total += open_bonus(u.get(&usage_key(&e.path)), now);
+            }
             scored.push((total, e));
         }
     }
@@ -698,6 +906,9 @@ fn rerank_everything(mut results: Vec<FileSearchResult>, query: &str) -> Vec<Fil
     // **要让两个引擎的检索对象保持一致**。
     results.retain(|r| !is_noise_path(&r.path));
     let now = now_unix();
+    // 使用学习加分（续132）：使用记录按路径存，与引擎无关，故 Everything 侧同样适用
+    // （不加额外目录加分是因为 EXTRA_DIRS 概念对全盘搜索对不上，而「亲手打开过」对得上）。
+    let usage = FILE_USAGE.get().and_then(|l| l.lock().ok());
     let score_of = |r: &FileSearchResult| -> i32 {
         let name_lower = r.name.to_lowercase();
         let mut total = 0i32;
@@ -712,6 +923,9 @@ fn rerank_everything(mut results: Vec<FileSearchResult>, query: &str) -> Vec<Fil
         total += short_name_bonus(r.name.len());
         total += recency_bonus(r.mtime, now);
         total += path_depth_bonus(path_depth(&r.path)); // 续122（Everything 侧从路径现算）
+        if let Some(u) = &usage {
+            total += open_bonus(u.get(&usage_key(&r.path)), now); // 续132
+        }
         total
     };
     // 用 sort_by_cached_key：score_of 内部要 to_lowercase，别让它在每次比较时重算。
@@ -1206,6 +1420,34 @@ mod tests {
         );
     }
 
+    /// 子序列紧凑度门槛（续133）：散乱命中判不命中、紧凑命中保留、松的排在紧凑的之后。
+    /// 复现用户实测那张截图里的真实噪声（搜 "wen dang" 命中一堆无关英文名）。
+    #[test]
+    fn subseq_compactness_gate_rejects_scattered() {
+        // 用户截图里的真实噪声：短 token 散落在长名里 → 现在应判**不命中**。
+        assert_eq!(
+            token_score("wen", "windows notify messaging.wav"),
+            None,
+            "w…e…n 散落在 24 个字符里应被紧凑度门槛剔除"
+        );
+        assert_eq!(
+            token_score("dang", "bw-gopher-inverted-aligned.ccitt_group3"),
+            None,
+            "d…a…n…g 散乱命中应被剔除"
+        );
+        // 真实的模糊输入必须仍然命中（门槛只杀散乱、不误伤紧凑）：
+        assert!(token_score("cfg", "config.toml").is_some(), "cfg→config 是紧凑模糊，应保留");
+        assert!(token_score("wbnch", "workbench").is_some(), "wbnch→workbench 应保留");
+        // 子串命中不受影响（走的是另一条路，根本不进 subseq）：
+        assert!(token_score("win", "windows").is_some(), "子串命中与门槛无关");
+        // 层内次序：更紧凑的子序列得分更高。
+        let tight = token_score("abc", "abc_x").unwrap(); // 连续命中
+        let loose = token_score("abc", "a_b_c").unwrap(); // 每个之间有空隙
+        assert!(tight > loose, "紧凑匹配({tight}) 应高于松散匹配({loose})");
+        // 达标的松散匹配至少 1 分（被纳入、只是排在后面），不因空隙罚分被踢出。
+        assert!(loose >= 1, "达标的松散匹配应 ≥1 分并纳入结果");
+    }
+
     /// 续117 的核心：新鲜度**只允许改变同层内的顺序**。
     /// 若「昨天改过的*模糊匹配*」压过「一年前的*名字里直接含有*」，
     /// 在用户看来搜索就是坏的。这里用真实的打分函数验证预算检算
@@ -1291,6 +1533,49 @@ mod tests {
                 > entry_score(&["report"], &unknown, now).unwrap(),
             "mtime 未知时 EXTRA_DIR_BONUS 仍应生效"
         );
+    }
+
+    /// 使用学习加分的形状（续132）：无记录=0、恒不超上限、频次/近期越高分越高、
+    /// 单次打开随时间淡出。open_bonus 是纯函数，可直接构造 FileUse 验证。
+    #[test]
+    fn open_bonus_shape() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        // 无记录 → 0
+        assert_eq!(open_bonus(None, now), 0, "没有使用记录不应加分");
+        // 恒落在 [0, OPEN_BONUS_MAX]
+        for (count, age_days) in [(1u32, 0u64), (1, 30), (1, 90), (3, 0), (10, 0), (10, 180)] {
+            let u = FileUse { count, last_used: now - age_days * DAY };
+            let b = open_bonus(Some(&u), now);
+            assert!((0..=OPEN_BONUS_MAX).contains(&b), "越界: count={count} age={age_days}d → {b}");
+        }
+        // 今日打开一次 → 有实打实的加分（s=1.0 落入 200 档）
+        let today_once = FileUse { count: 1, last_used: now };
+        assert_eq!(open_bonus(Some(&today_once), now), OPEN_BONUS_MAX / 2, "今日打开一次应给中档");
+        // 高频打开 → 满档
+        let frequent = FileUse { count: 10, last_used: now };
+        assert_eq!(open_bonus(Some(&frequent), now), OPEN_BONUS_MAX, "高频打开应给满档");
+        // 单次打开、久未再碰（90 天 > 2 个半衰期）→ 淡出为 0，不再长期占加分
+        let stale_once = FileUse { count: 1, last_used: now - 90 * DAY };
+        assert_eq!(open_bonus(Some(&stale_once), now), 0, "久未再碰的单次打开应淡出");
+        // 频次越高、越近，分越高（单调性抽样）
+        assert!(open_bonus(Some(&frequent), now) >= open_bonus(Some(&today_once), now));
+        assert!(open_bonus(Some(&today_once), now) >= open_bonus(Some(&stale_once), now));
+    }
+
+    /// 使用加分能在**同名同层**下翻转并列（这正是续132 的目的）——把它叠到 entry_score
+    /// 之上，模拟 builtin_search 调用点的算式，验证「亲手打开过的那个」排到前面。
+    #[test]
+    fn open_bonus_breaks_ties_among_same_name() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let opened = ent("config.toml", now - 2 * DAY, false);
+        let never = ent("config.toml", now - 2 * DAY, false); // mtime 相同，唯一差别是使用记录
+        let u = FileUse { count: 5, last_used: now }; // 衰减分 5.0 ≥ 4 → 满档
+        let a = entry_score(&["config"], &opened, now).unwrap() + open_bonus(Some(&u), now);
+        let b = entry_score(&["config"], &never, now).unwrap() + open_bonus(None, now);
+        assert!(a > b, "亲手打开过的同名文件应排在前（{a} vs {b}）");
+        assert_eq!(a - b, OPEN_BONUS_MAX, "差值应恰为使用加分（其余因素完全相同）");
     }
 
     fn res(name: &str, mtime: u64) -> FileSearchResult {
