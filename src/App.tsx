@@ -974,7 +974,18 @@ export default function App() {
   /// 命中时不仅省掉 IPC，还能在第一帧就画出高清图（连那次淡入都不会发生）。
   const largeIconRef = useRef(new Map<string, string | null>());
   useEffect(() => {
-    if (!enhOpen) { setPreviewMeta(null); return; }
+    if (!enhOpen) {
+      setPreviewMeta(null);
+      // 续137：关闭增强搜索时释放预览大图标/缩略图缓存（续136 ②′ 落地）。
+      // 这两张表攒的是本流程里最大的**已解码图片**——192px 大图标（均 ~44KB/张，largeIconRef LRU 100）
+      // 与图片文件缩略图（previewCacheRef LRU 60）；用得越久攒得越满，且**关掉后仍占着 JS 堆
+      // 并撑着 Chromium 的解码位图缓存**，正是「用增强搜索后内存一直下不来」的那部分。
+      // 关闭时清空，内存回到基线；重开只对**当前选中项**按需重取（异步 + PREVIEW_DEBOUNCE_MS 防抖，
+      // 不碰列表、不产生 UI 卡顿——等价于每次全新打开的既有行为）。列表图标另走 fsResults，每次查询本就重取，不受影响。
+      previewCacheRef.current.clear();
+      largeIconRef.current.clear();
+      return;
+    }
     const r = enhResults[enhSelIdx] ?? enhResults[0];
     const key = r ? enhKey(r) : "";
     const path = r ? enhPath(r) : "";
