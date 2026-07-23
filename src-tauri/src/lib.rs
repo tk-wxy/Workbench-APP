@@ -491,6 +491,23 @@ fn set_hotkey(combo: String, app: AppHandle) -> Result<(), String> {
 //     不漏给前台应用（IME 切换 / 编辑器补全）；show/hide 完全由本轮询驱动。
 //     show/hide 复刻 §8 路径配方（emit→show→延迟 set_focus / 纯 hide+emit）。
 // ════════════════════════════════════════════════════════════════════
+
+/// 松开沿动作：给定按住时长与"按下瞬间是否已可见"，判定该隐藏还是保持。
+/// 从 `start_hotkey_monitor` 的松开沿分支**逐字提纯**出来的唯一决策点——纯算术、无副作用，
+/// 便于单测钉死长短按 + toggle 语义（见文件尾 mod tests）。改这里等于改热键手感，务必让测试仍绿。
+#[derive(Debug, PartialEq, Eq)]
+enum ReleaseAction { Hide, Keep }
+
+fn hotkey_release_action(held_ms: u128, visible_at_press: bool, tap_max_ms: u128) -> ReleaseAction {
+    if held_ms > tap_max_ms {
+        ReleaseAction::Hide            // 长按 = momentary：松开即关（无论按下时开/关）
+    } else if visible_at_press {
+        ReleaseAction::Hide            // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
+    } else {
+        ReleaseAction::Keep           // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open）
+    }
+}
+
 fn start_hotkey_monitor(app: AppHandle) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState; // combo VK 列表改读 HOTKEY_VK_KEYS
 
@@ -602,16 +619,11 @@ fn start_hotkey_monitor(app: AppHandle) {
                     show(&app, &window);
                 }
             } else if !combo && prev_combo {
-                // ── 松开沿：按住时长决定语义 ──
+                // ── 松开沿：按住时长决定语义（决策提纯到 hotkey_release_action，见其单测）──
                 let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
-                if held > HOTKEY_TAP_MAX_MS {
-                    // 长按 = momentary：松开即关（无论按下时开/关）
-                    hide(&app, &window);
-                } else if visible_at_press {
-                    // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
-                    hide(&app, &window);
-                } else {
-                    // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open），无需动作
+                match hotkey_release_action(held, visible_at_press, HOTKEY_TAP_MAX_MS) {
+                    ReleaseAction::Hide => hide(&app, &window),
+                    ReleaseAction::Keep => { /* toggle open：按下沿已 show，保持显示，无需动作 */ }
                 }
             }
 
@@ -782,4 +794,38 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动 Workbench App 时出错");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 长短按 + toggle 状态机（hotkey_release_action）。松开沿的三条语义分支纯逻辑可测，
+    // 是本项目最高危区里少见的可脱离硬件验证的一块——见 DECISIONS §2 / CLAUDE 铁律【全局热键】。
+    const TAP: u128 = 250; // = HOTKEY_TAP_MAX_MS，用字面量避免测试悄悄跟着常量漂移
+
+    #[test]
+    fn long_press_always_hides() {
+        // 长按 = momentary：松开即关，无论按下瞬间开/关
+        assert_eq!(hotkey_release_action(251, false, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(251, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(9999, false, TAP), ReleaseAction::Hide);
+    }
+
+    #[test]
+    fn short_press_toggles_on_visibility_at_press() {
+        // 短按（held ≤ 阈值）：按下时是关的 → 保持（按下沿已开）；按下时已开 → 关闭
+        assert_eq!(hotkey_release_action(100, false, TAP), ReleaseAction::Keep);
+        assert_eq!(hotkey_release_action(100, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(0, false, TAP), ReleaseAction::Keep);
+    }
+
+    #[test]
+    fn threshold_is_strict_greater_than() {
+        // 恰好等于阈值算短按（held > tap_max 才是长按）——边界一偏，250ms 附近手感就反了
+        assert_eq!(hotkey_release_action(250, false, TAP), ReleaseAction::Keep); // 短按 open
+        assert_eq!(hotkey_release_action(250, true, TAP), ReleaseAction::Hide);  // 短按 close
+        assert_eq!(hotkey_release_action(249, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(251, false, TAP), ReleaseAction::Hide); // 刚过阈值 = 长按 close
+    }
 }

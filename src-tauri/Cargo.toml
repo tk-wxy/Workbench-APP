@@ -7,7 +7,9 @@ edition = "2021"
 
 [lib]
 name = "workbench_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面 Windows 只需 rlib（main.rs 链接本 lib）；staticlib/cdylib 是移动端模板残留，
+# 每次构建都会多链两份用不到的产物，故移除。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -46,9 +48,26 @@ flate2 = "1.1"
 tauri-plugin-store = "2"
 enigo = "0.2"
 arboard = "3"
-image = "0.25"
+# 只解码用户现实会遇到的图片格式 + 只用 PNG 编码。默认全特性会拖入
+# AVIF(ravif/rav1e)/EXR/HDR/DDS/QOI/PNM/TGA 等一批用不到的重解码器（详见构建体积分析）；
+# 裁到下列集合覆盖 Windows 用户所有常见图片，冷门格式退化为「读不出尺寸」的优雅降级而非崩溃。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
 # 汉字→拼音（增强搜索的拼音匹配，续131）。
 # `plain` = 无声调：匹配用不上声调，带声调的输出还是非 ASCII、反而没法拿来做子序列匹配。
 # `heteronym` = 多音字全读音：没它「音乐」只会派生出首选读音 yinle，
 # 用户搜 yinyue / 网易云音乐搜 wyyyy 全都落空（实测踩到）。
 pinyin = { version = "0.11.0", default-features = false, features = ["heteronym", "plain"] }
+
+# release 构建优化：对齐 ~5MB 包体目标。lto=fat + 单 codegen unit 换更小体积 + 更强内联；
+# opt-level="z" 优先体积（本应用无计算密集热路径，热键/焦点轮询开销在系统调用不在算术）；
+# strip 去符号表。
+# panic="abort"（续139 档 B，用户定夺）：首个 panic 直接终止进程，故后台线程**永不**在持锁时
+# 留下毒化的 Mutex → 32 处 `.lock().unwrap()` 结构上不可能再 poison-panic（M4 级联静默死被根除）。
+# 失败模式从「某子系统悄悄降级、应用貌似还活着」变为「崩溃、可重启」——对可随时重启的 overlay
+# 工具反而更好（可见 + 可恢复 > 隐形持续降级）。dev/test 构建仍走 unwind，`cargo test` 不受影响。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

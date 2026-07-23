@@ -5,6 +5,7 @@ import { IMG_EXTS, fmtSize, ago, agoSec, dirOf, fmtDateTime, fileCategory, catTo
 import { groupFiles } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
 import { matchName, type PinyinTable, type PinyinVariant } from "./lib/pinyin";
+import { tokenFromCode, parseComboStr, matchComboEvent, comboLabel } from "./lib/hotkey";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
          IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
          IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip } from "./icons";
@@ -226,49 +227,6 @@ async function preloadImg(src: string | null): Promise<void> {
 
 const enhPath = (r: EnhResult) =>
   r.kind === "app" ? r.app.path : r.kind === "fs" ? r.path : (r.item.items?.[0]?.path ?? "");
-
-// ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
-const HOTKEY_MAIN_TOKENS = new Set<string>([
-  ..."abcdefghijklmnopqrstuvwxyz".split(""),
-  ..."0123456789".split(""),
-  ...Array.from({length:12},(_,i)=>`f${i+1}`),
-  "space","tab","up","down","left","right",
-]);
-// 浏览器 KeyboardEvent.code → token（KeyA→a / Digit1→1 / F12→f12 / Space→space / Arrow*→方向）
-const tokenFromCode = (code: string): string | null => {
-  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
-  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();
-  if (code === "Space") return "space";
-  if (code === "Tab") return "tab";
-  if (code === "ArrowUp") return "up";
-  if (code === "ArrowDown") return "down";
-  if (code === "ArrowLeft") return "left";
-  if (code === "ArrowRight") return "right";
-  return null;
-};
-// 解析 combo 串 → {ctrl,shift,alt,main} 或 null（非法）。规则同 Rust parse_combo：禁 Win + 裸 Alt+Space/Alt+F4，恰 1 主键。
-const parseComboStr = (combo: string): {ctrl:boolean;shift:boolean;alt:boolean;main:string} | null => {
-  const toks = combo.toLowerCase().split("+").map(s=>s.trim()).filter(Boolean);
-  if (toks.some(t => ["win","super","meta","windows"].includes(t))) return null;
-  const ctrl = toks.some(t => t==="ctrl"||t==="control");
-  const shift = toks.includes("shift");
-  const alt = toks.some(t => t==="alt"||t==="option");
-  const mains = toks.filter(t => !["ctrl","control","shift","alt","option"].includes(t));
-  if (mains.length !== 1 || !HOTKEY_MAIN_TOKENS.has(mains[0])) return null;
-  if (alt && !ctrl && !shift && (mains[0]==="space"||mains[0]==="f4"||mains[0]==="tab")) return null; // OS 占用（系统菜单/关窗/窗口切换）
-  return {ctrl,shift,alt,main:mains[0]};
-};
-// keydown 事件是否精确匹配 combo（修饰键全等 + 主键一致；Win 键按下则不匹配）
-const matchComboEvent = (e: KeyboardEvent, combo: string): boolean => {
-  const p = parseComboStr(combo);
-  if (!p) return false;
-  if (e.ctrlKey!==p.ctrl || e.shiftKey!==p.shift || e.altKey!==p.alt || e.metaKey) return false;
-  return tokenFromCode(e.code) === p.main;
-};
-// combo 串 → 展示文案（ctrl→Ctrl / 方向→箭头）
-const comboLabel = (combo: string): string =>
-  combo.split("+").map(t=>t==="ctrl"?"Ctrl":t==="shift"?"Shift":t==="alt"?"Alt":t==="space"?"Space":t==="tab"?"Tab":t==="up"?"↑":t==="down"?"↓":t==="left"?"←":t==="right"?"→":t.toUpperCase()).join("+");
 
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
@@ -1229,6 +1187,18 @@ export default function App() {
         } catch { /* 失败：保留 pending 标记不再重试，显示图标兜底 */ }
       })();
     }
+    // 淘汰（H5）：条目删除/清空后，其 base64 缩略图与 pending 标记不再需要——否则整会话只增不减。
+    // 存活集 = 当前仍在中转/启动台的图片 path；两者恰是上面算出的 paths。用函数式更新只删非存活键，
+    // 无陈旧键时返回原引用不触发重渲。pending 一并清，路径日后再出现时可重新取图。
+    const live = new Set(paths);
+    for (const k of stageThumbPendingRef.current) if (!live.has(k)) stageThumbPendingRef.current.delete(k);
+    setStageThumbs(prev => {
+      const stale = Object.keys(prev).filter(k => !live.has(k));
+      if (!stale.length) return prev;
+      const next = { ...prev };
+      for (const k of stale) delete next[k];
+      return next;
+    });
   }, [stage, launcher]);
   // 续100：中转区失踪扫描。收集所有 file 条目路径 → Rust 批量 exists() → 记下失踪集合。
   // 复用既有 stageRef（行 216，已随渲染更新）供 hotkey-show 闭包读最新 stage；scanStageMissing 无依赖、稳定。

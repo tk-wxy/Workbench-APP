@@ -43,7 +43,6 @@ export const EN_DICT: Record<string, string> = {
   "添加到启动台": "Add to Launcher",
   "换区": "Switch section",
   // 增强搜索预览面板（续115；续116 整理了信息项）
-  "位置": "Location",
   "大小": "Size",
   // stat strip 的标签是 9px 小字宽——「修改时间」会折行，故用短形式
   "修改": "Modified",
@@ -114,6 +113,8 @@ export const EN_DICT: Record<string, string> = {
   "删除全部（{n} 项）": "Delete all ({n} items)",
   "取消选择": "Deselect",
   "删除该项目": "Delete item",
+  "点击固定：取走 / 拖出后仍保留在中转区": "Click to pin: stays in Stage after take / drag-out",
+  "已固定：取走 / 拖出后保留（点击取消）": "Pinned: kept after take / drag-out (click to unpin)",
 
   // ── 剪贴板历史 ──
   "剪贴板历史": "Clipboard History",
@@ -126,12 +127,10 @@ export const EN_DICT: Record<string, string> = {
 
   // ── 增强搜索 ──
   "搜索应用、中转、剪贴板…": "Search apps, stage, clipboard…",
-  "搜索应用、中转文件…": "Search apps, staged files…",
   "界面搜索": "Page Search",
   "增强搜索": "Enhanced Search",
   "Everything 未运行，已回退内置搜索": "Everything isn't running; fell back to built-in search",
   "文件索引建立中…": "Building file index…",
-  "文件 / 文件夹": "File / Folder",
   "加入中转区": "Add to Stage",
   "加入启动台": "Add to Launcher",
   "输入以搜索": "Type to search",
