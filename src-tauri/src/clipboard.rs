@@ -165,7 +165,8 @@ fn build_clip_entry_inner(openable: bool) -> Result<Option<serde_json::Value>, (
     let mut cb = arboard::Clipboard::new().map_err(|_| ())?;
     if let Ok(text) = cb.get_text() {
         if !text.is_empty() {
-            println!("[clipbg] text: {}", text.chars().take(30).collect::<String>());
+            // 脱敏：只记长度，不打印内容——复制的文本可能是密码管理器口令等敏感串。
+            println!("[clipbg] text len={}", text.chars().count());
             return Ok(Some(serde_json::json!({"type":"text","content":text,"time":now_ms()})));
         }
         return Ok(None);
@@ -717,6 +718,7 @@ extern "system" {
     fn GlobalAlloc(uFlags: u32, dwBytes: usize) -> isize;
     fn GlobalLock(hMem: isize) -> *mut u8;
     fn GlobalUnlock(hMem: isize) -> i32;
+    fn GlobalFree(hMem: isize) -> isize; // 写入失败时回收未交给系统的 HGLOBAL，防泄漏
 }
 
 const CF_HDROP: u32 = 15;
@@ -766,12 +768,17 @@ fn write_cf_hdrop(paths: &[String]) -> Result<(), String> {
         let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
         if h == 0 { return Err("GlobalAlloc 失败".into()); }
         let ptr = GlobalLock(h);
+        if ptr.is_null() { GlobalFree(h); return Err("GlobalLock 失败".into()); }
         std::ptr::copy_nonoverlapping(raw.as_ptr(), ptr, raw.len());
         GlobalUnlock(h);
-        OpenClipboard(0);
+        // OpenClipboard 失败（被占用）→ 我们仍持有 h，必须 GlobalFree 否则泄漏；且绝不能静默返回 Ok
+        //（那正是「三态契约」要防的写入侧静默丢失——写没成却报成功，上层推进 seq、条目凭空消失）。
+        if OpenClipboard(0) == 0 { GlobalFree(h); return Err("OpenClipboard 失败（剪贴板被占用）".into()); }
         EmptyClipboard();
-        SetClipboardData(CF_HDROP, h);
+        // SetClipboardData 成功后系统接管 h（不可再 Free）；失败则所有权仍在我们手里，需 Free。
+        let set_ok = SetClipboardData(CF_HDROP, h) != 0;
         CloseClipboard();
+        if !set_ok { GlobalFree(h); return Err("SetClipboardData 失败".into()); }
     }
     Ok(())
 }
@@ -783,10 +790,8 @@ pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<
     use enigo::Keyboard;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
+    // 脱敏：只记条数，不逐条打印完整文件路径（可能泄露目录结构/文件名）。
     println!("[filepaste] paths count={}", paths.len());
-    for (i, p) in paths.iter().enumerate() {
-        println!("[filepaste]   [{}] \"{}\"", i, p);
-    }
 
     // Bug A 修复：场景判断提到写剪贴板之前，桌面直接落地不碰剪贴板
     if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }

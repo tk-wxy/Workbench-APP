@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-version-sync.mjs && node scripts/test-enh-sections.mjs && node scripts/test-format.mjs && node scripts/test-pinyin.mjs && node scripts/check-css.mjs && tsc && vite build",
-    "test": "node scripts/test-enh-sections.mjs && node scripts/test-format.mjs && node scripts/test-pinyin.mjs && node scripts/check-css.mjs",
+    "build": "node scripts/check-version-sync.mjs && node scripts/test-enh-sections.mjs && node scripts/test-format.mjs && node scripts/test-fuzzy.mjs && node scripts/test-pinyin.mjs && node scripts/test-hotkey.mjs && node scripts/check-i18n.mjs && node scripts/check-css.mjs && tsc && vite build",
+    "test": "node scripts/test-enh-sections.mjs && node scripts/test-format.mjs && node scripts/test-fuzzy.mjs && node scripts/test-pinyin.mjs && node scripts/test-hotkey.mjs && node scripts/check-i18n.mjs && node scripts/check-css.mjs",
     "css:check": "node scripts/check-css.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
@@ -17,7 +17,6 @@
     "@tauri-apps/plugin-autostart": "^2.0.0",
     "@tauri-apps/plugin-global-shortcut": "^2.0.0",
     "@tauri-apps/plugin-store": "^2.4.3",
-    "framer-motion": "^12.40.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
