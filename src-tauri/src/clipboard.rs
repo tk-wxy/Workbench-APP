@@ -838,7 +838,7 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
         let raw = SHGetKnownFolderPath(&FOLDERID_Desktop, Default::default(), None)
             .map_err(|e| format!("SHGetKnownFolderPath: {e:?}"))?;
         let s = raw.to_string().map_err(|_| "桌面路径转换失败")?;
-        let _ = CoTaskMemFree(Some(raw.0 as *mut _));
+        CoTaskMemFree(Some(raw.0 as *mut _)); // 释放 SHGetKnownFolderPath 分配的缓冲（返回 unit）
         s
     };
     let mut dest: Vec<u16> = desktop_path.encode_utf16().collect();
@@ -1324,7 +1324,7 @@ fn start_clip_image_janitor() {
 
 fn base64_encode(data: &[u8]) -> String {
     const C: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut r = String::with_capacity((data.len()+2)/3*4);
+    let mut r = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
         let b0=c[0]; let b1=if c.len()>1{c[1]}else{0}; let b2=if c.len()>2{c[2]}else{0};
         let n=(b0 as u32)<<16|(b1 as u32)<<8|b2 as u32;
