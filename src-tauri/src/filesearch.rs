@@ -551,6 +551,7 @@ const NOISE_DIRS: &[&str] = &[
 /// 目前收录：
 /// - Go 模块下载缓存 `…\go\pkg\mod\…`：纯依赖源码、无搜索价值。实测 `note` 查询前 9 条
 ///   全是它（`go\pkg\mod\…\sumdb\note`），把记事本 notepad.exe 挤到第 10（续138 真机探针）。
+///
 /// 加序列会让**两个引擎都搜不到**匹配子树，添加需谨慎（同 NOISE_DIRS 的告诫）。
 const NOISE_PATH_SEQS: &[&[&str]] = &[&["go", "pkg", "mod"]];
 
@@ -1241,10 +1242,7 @@ mod tests {
         // ② 驱动器根已加入，且分配到的是浅深度
         let drives: Vec<_> = dirs.iter().filter(|(_, _, d)| *d == DRIVE_ROOT_DEPTH).collect();
         assert!(!drives.is_empty(), "一个驱动器根都没加进来: {dirs:?}");
-        assert!(
-            DRIVE_ROOT_DEPTH < MAX_WALK_DEPTH,
-            "驱动器根不比 home 浅就失去意义了"
-        );
+        const { assert!(DRIVE_ROOT_DEPTH < MAX_WALK_DEPTH, "驱动器根不比 home 浅就失去意义了") };
 
         // ③ 关闭开关确实生效（测试隔离的生命线）
         std::env::set_var("WORKBENCH_SCAN_DRIVES", "0");

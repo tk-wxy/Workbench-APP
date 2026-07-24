@@ -1,3 +1,7 @@
+// FFI 结构体逐字镜像 Win32 名（SHFILEINFOW/ICONINFO/BITMAPINFOHEADER/BITMAP/GUID…），
+// 改成驼峰反而对不上 API 文档；acronym 全大写在此是正确的，crate 级放行该 lint。
+#![allow(clippy::upper_case_acronyms)]
+
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
 mod dragout; // 中转区拖出（DoDragDrop：IDataObject + IDropSource，独立 STA 线程）
@@ -498,6 +502,9 @@ fn set_hotkey(combo: String, app: AppHandle) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 enum ReleaseAction { Hide, Keep }
 
+// 两个分支都返 Hide 但语义不同（长按 momentary vs 短按 toggle-close），故意分开各自成句、
+// 各带注释——热键手感代码不「顺手合并」（见 CLAUDE.md 铁律）。clippy 的合并建议在此拒绝。
+#[allow(clippy::if_same_then_else)]
 fn hotkey_release_action(held_ms: u128, visible_at_press: bool, tap_max_ms: u128) -> ReleaseAction {
     if held_ms > tap_max_ms {
         ReleaseAction::Hide            // 长按 = momentary：松开即关（无论按下时开/关）
