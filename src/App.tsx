@@ -138,7 +138,7 @@ function HighlightText({ text, ranges }: { text: string; ranges: [number, number
   let cursor = 0;
   for (const [start, end] of ranges) {
     if (start > cursor) parts.push(text.slice(cursor, start));
-    parts.push(<span key={start} style={{ color: "var(--accent, #60a5fa)", fontWeight: 600 }}>{text.slice(start, end + 1)}</span>);
+    parts.push(<span key={start} style={{ color: "var(--accent)", fontWeight: 600 }}>{text.slice(start, end + 1)}</span>);
     cursor = end + 1;
   }
   if (cursor < text.length) parts.push(text.slice(cursor));
@@ -181,7 +181,7 @@ const TOAST_MS = 1600;
 type AddResult = "added" | "duplicate" | "full";
 // 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
-interface LaunchAnim { icon: string | null; name: string; fileGlyph?: FileGlyphArgs; rect: { top: number; left: number; width: number; height: number }; }
+// 续142b：克隆改 cloneNode(源图标容器)，尺寸/底色由克隆自身携带、精确贴合，不再靠 React 重渲 + 猜百分比（旧 75% → 比磁贴小一圈、点击瞬间"缩一下"）。
 
 // 传给 FileGlyph 的最小参数（剪贴板 / 中转 / 启动动画共用）
 type FileGlyphArgs = { cat?: FileCat; ext?: string; isDir?: boolean; isImage?: boolean };
@@ -251,7 +251,6 @@ export default function App() {
   const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
   const [imgCacheCleared, setImgCacheCleared] = useState(false); // 设置面板「清空缓存」✓ 反馈
   const [thumbCacheCleared, setThumbCacheCleared] = useState(false); // 中转区缩略图缓存「清空」✓ 反馈（续99f）
-  const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
   const [stageMax, setStageMax] = useState(STAGE_MAX_DEFAULT); // 中转区上限（纯前端，无需 Rust 同步）
@@ -271,6 +270,10 @@ export default function App() {
   const loadedRef = useRef(false);
   const appsRef = useRef<AppInfo[]>(apps); appsRef.current = apps; // 供 [visible] 兜底扫描闭包读最新 apps（apps-ready 是否已填充）
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
+  // 启动放大暂留期间被点的那个图标：即时隐藏它，让顶层克隆独自弹出，否则原图标随覆盖层慢淡出 → 与克隆同框（"两个图标"）。复位时还原。
+  const launchSrcElRef = useRef<HTMLElement|null>(null);
+  // 顶层启动克隆节点（cloneNode 生成，挂在 dragLayer）：复位/下次启动前移除，防残留。
+  const launchCloneNodeRef = useRef<HTMLElement|null>(null);
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const launcherRef = useRef<LauncherItem[]>(launcher); launcherRef.current = launcher; // 给 []-注册监听用（S3b 拖入落点会用到，先备好）
   const storeRef = useRef<any>(null); storeRef.current = store;
@@ -449,7 +452,7 @@ export default function App() {
       try {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
+        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
         const un3 = await listen("clipboard-update", (event: any) => {
           const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
           setClipboard(prev => {
@@ -1267,6 +1270,21 @@ export default function App() {
   }, [launcher, search]);
 
   // ── 操作函数 ──
+  // 启动放大暂留：深拷贝源图标容器（.app-tile-icon / .enh-result-icon）到顶层 dragLayer，按源 rect 定位，
+  // 自播 scale+淡出（.launch-clone）。克隆自带精确尺寸与底色 → 任何上下文像素级贴合、无缩放跳变。
+  // 调用前源图标应仍可见（克隆保真），调用后再隐藏源。复位/下次启动前由 launchCloneNodeRef 移除。
+  const spawnLaunchClone = useCallback((iconEl: HTMLElement, r: DOMRect) => {
+    launchCloneNodeRef.current?.remove(); // 防上一枚残留（正常已由 hotkey-hide 清）
+    const clone = iconEl.cloneNode(true) as HTMLElement;
+    clone.style.margin = "0"; clone.style.opacity = ""; // 保证克隆可见（源随后才置 opacity:0）
+    const wrap = document.createElement("div");
+    wrap.className = "launch-clone";
+    wrap.style.top = `${r.top}px`; wrap.style.left = `${r.left}px`;
+    wrap.style.width = `${r.width}px`; wrap.style.height = `${r.height}px`;
+    wrap.appendChild(clone);
+    (dragLayerRef.current ?? document.body).appendChild(wrap);
+    launchCloneNodeRef.current = wrap;
+  }, []);
   const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
     if (launchingRef.current) return; // 防连点：动画进行中忽略后续触发
     recordUse(app.path);
@@ -1278,10 +1296,11 @@ export default function App() {
     // 放大暂留：克隆图标到顶层浮层做 scale+淡出，覆盖层整体淡出露桌面，LAUNCH_ANIM_MS 后再 Rust hide
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
-    setLaunchAnim({ icon: app.icon, name: app.name, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）
+    iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
     setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [recordUse]);
+  }, [recordUse, spawnLaunchClone]);
   // 增强搜索激活：app 复用 launchApp（含放大动画+淡出+hide，不在此 setEnhOpen，让整层随 overlay dismiss 一起淡出，hotkey-hide 复位）；
   // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
   const copyAndPasteRef = useRef<((item: Pasteable) => void) | null>(null); // copyAndPaste 定义在后，activateEnh 经此 ref 调用
@@ -1309,12 +1328,11 @@ export default function App() {
     if (reduce || !iconEl) { hideWorkbench(); return; }
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
-    // 克隆内容与磁贴一致：有真实系统图标用图标，否则回退 FileGlyph
-    const fileGlyph: FileGlyphArgs = it.kind === "folder" ? { isDir: true } : { ext: it.ext ?? "" };
-    setLaunchAnim({ icon: it.icon ?? null, name: it.name, fileGlyph, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）——磁贴图标含真实系统图标/缩略图/FileGlyph，cloneNode 一律精确保真
+    iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
     setDismissing(true);
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [launchApp]);
+  }, [launchApp, spawnLaunchClone]);
 
   // ── 启动台排序拖拽（续75 打磨：Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起）──
   // 核心原则：ghost 位置 / 让路 transform 全走 DOM 直操作，零 React 渲染，彻底保证跟手。
@@ -2994,15 +3012,8 @@ export default function App() {
         放进去会相对它定位而非视口。key={toast.id} 让同一句提示连发也能重挂节点、重启 CSS 动画。
         pointer-events:none（见 CSS）：提示绝不能挡住下面的卡片点击。 */}
     {toast && <div key={toast.id} className="toast" style={{animationDuration:`${TOAST_MS}ms`}} role="status" aria-live="polite">{toast.msg}</div>}
-    {/* 启动放大暂留：顶层克隆，#overlay 的兄弟节点（避开 backdrop-filter 的定位上下文与宫格 overflow 裁剪），按点击瞬间坐标定位、自播 scale+淡出 */}
-    {launchAnim && (
-      <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
-        {launchAnim.icon ? <img src={launchAnim.icon} alt=""/>
-          : launchAnim.fileGlyph ? <FileGlyph {...launchAnim.fileGlyph} size={34}/>
-          : <span>{launchAnim.name[0]}</span>}
-      </div>
-    )}
-    {/* 顶层拖拽预览层：承载 DOM clone ghost，集中管理层级，避免散挂 body 后再靠单个节点抢 z-index */}
+    {/* 启动放大暂留克隆改为命令式 cloneNode（见 spawnLaunchClone），挂进下方 dragLayer，不再走 React 渲染 */}
+    {/* 顶层拖拽预览层：承载 DOM clone ghost + 启动克隆，集中管理层级，避免散挂 body 后再靠单个节点抢 z-index */}
     <div className="drag-layer" ref={dragLayerRef}/>
     {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
     {ctxMenu && (
