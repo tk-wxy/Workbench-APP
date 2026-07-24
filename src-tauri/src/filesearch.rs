@@ -537,6 +537,7 @@ fn should_skip_dir(name: &str) -> bool {
 /// 往这里加名字会让**两个引擎都搜不到那些内容**，添加需谨慎。
 const NOISE_DIRS: &[&str] = &[
     "node_modules",
+    "site-packages", // 续141：Python 依赖包（与 node_modules 同类，纯依赖源码无搜索价值）
     "$recycle.bin",
     "appdata",
     "target",
@@ -1256,6 +1257,7 @@ mod tests {
         assert!(is_noise_path("C:\\Windows\\WinSxS\\amd64_microsoft-windows-cng_31bf.txt"));
         assert!(is_noise_path("C:/Windows/winsxs/x"), "正斜杠分隔也要认");
         assert!(is_noise_path("D:\\proj\\node_modules\\react\\index.js"));
+        assert!(is_noise_path("C:\\py\\venv\\Lib\\site-packages\\numpy\\core.py"), "Python 依赖包");
         assert!(is_noise_path("C:\\Users\\me\\AppData\\Local\\x.log"));
         // 正常路径不能被滤掉——这里误伤就会变成「本该有的文件搜不到」
         assert!(!is_noise_path("C:\\Windows\\System32\\cmd.exe"));
