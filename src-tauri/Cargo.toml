@@ -1,6 +1,6 @@
 [package]
 name = "workbench-app"
-version = "0.17.6"
+version = "0.17.7"
 description = "Windows Desktop Workbench Utility"
 authors = ["you"]
 edition = "2021"
