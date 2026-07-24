@@ -546,11 +546,29 @@ const NOISE_DIRS: &[&str] = &[
     "winsxs", // 续121：Everything 全盘搜索里最大的噪声来源
 ];
 
-/// 路径的任一组成部分命中噪声目录即为 true（续121，用于筛 Everything 结果）。
+/// 路径**连续段序列**噪声（续139，与单名 `NOISE_DIRS` 互补）。
+/// 有些噪声只能由连续多段识别——单看名字太宽泛会误伤用户目录（"mod"/"pkg" 到处都是）。
+/// 目前收录：
+/// - Go 模块下载缓存 `…\go\pkg\mod\…`：纯依赖源码、无搜索价值。实测 `note` 查询前 9 条
+///   全是它（`go\pkg\mod\…\sumdb\note`），把记事本 notepad.exe 挤到第 10（续138 真机探针）。
+/// 加序列会让**两个引擎都搜不到**匹配子树，添加需谨慎（同 NOISE_DIRS 的告诫）。
+const NOISE_PATH_SEQS: &[&[&str]] = &[&["go", "pkg", "mod"]];
+
+/// 路径是否**任意位置连续包含**某条噪声段序列。内置 walk 用它在遇到序列末段的目录时整棵剪掉；
+/// Everything 结果侧用它兜底过滤（同 `is_noise_path`）。
+fn path_has_noise_pattern(path: &str) -> bool {
+    let segs: Vec<String> = path.split(['\\', '/']).map(|s| s.to_lowercase()).collect();
+    NOISE_PATH_SEQS.iter().any(|seq| {
+        segs.windows(seq.len()).any(|w| w.iter().zip(seq.iter()).all(|(a, b)| a == b))
+    })
+}
+
+/// 路径的任一组成部分命中噪声目录名、或含噪声段序列即为 true（续121 + 续139，用于筛 Everything 结果）。
 /// 内置引擎在建索引时已排除，无需调用。
 fn is_noise_path(path: &str) -> bool {
     path.split(['\\', '/'])
         .any(|seg| NOISE_DIRS.contains(&seg.to_lowercase().as_str()))
+        || path_has_noise_pattern(path)
 }
 
 /// 给 Everything 查询追加噪声排除句（续121）。
@@ -571,6 +589,11 @@ fn everything_query_with_exclusions(query: &str) -> String {
     let mut q = String::from(query.trim());
     for d in NOISE_DIRS {
         q.push_str(&format!(" !path:\"\\{d}\\\""));
+    }
+    // 路径序列噪声（续139）：拼成 `!path:"\go\pkg\mod\"`，让 Everything 自己排除（同单名逻辑，
+    // 事后过滤保不住候选数，见本函数上方注释）。
+    for seq in NOISE_PATH_SEQS {
+        q.push_str(&format!(" !path:\"\\{}\\\"", seq.join("\\")));
     }
     q
 }
@@ -617,6 +640,10 @@ fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
                 }
                 // 目录命中跳过名单则剪枝整个子树
                 if e.file_name().to_str().map(should_skip_dir).unwrap_or(false) {
+                    return false;
+                }
+                // 路径序列噪声（如 Go 模块缓存 go\pkg\mod）——遇到序列末段目录即整棵剪掉（续139）
+                if path_has_noise_pattern(&e.path().to_string_lossy()) {
                     return false;
                 }
                 // 若正是先前遍历过的根，则整棵子树跳过（续123）
@@ -1238,6 +1265,21 @@ mod tests {
         // 不能因子串误伤（只是名字里含 "target" 是另一回事）
         assert!(!is_noise_path("D:\\dev\\my-target-app\\main.rs"));
         assert!(is_noise_path("D:\\dev\\rustproj\\target\\debug\\x.exe"), "作为完整路径段则应滤掉");
+    }
+
+    /// 路径序列噪声（续139）：Go 模块缓存 go\pkg\mod。单名名单抓不到、必须按连续段识别。
+    #[test]
+    fn go_module_cache_pruned() {
+        // 实测 `note` 前 9 全是它——必须滤掉
+        assert!(path_has_noise_pattern("C:\\Users\\me\\go\\pkg\\mod\\golang.org\\x\\sys@v0.30.0\\note"));
+        assert!(path_has_noise_pattern("C:/Users/me/go/pkg/mod/cache/download"), "正斜杠也认");
+        assert!(is_noise_path("C:\\Users\\me\\go\\pkg\\mod\\x\\y.go"), "并入 is_noise_path 供 Everything 兜底");
+        // 不能误伤：Go 源码工作区 go\src、或只含单段 go/pkg/mod 之一的正常路径
+        assert!(!path_has_noise_pattern("C:\\Users\\me\\go\\src\\myproject\\main.go"), "go\\src 是用户代码，不能滤");
+        assert!(!path_has_noise_pattern("D:\\dev\\pkg\\mod.rs"), "pkg 后跟文件 mod.rs，非 go\\pkg\\mod 序列");
+        assert!(!path_has_noise_pattern("D:\\projects\\mod\\pkg\\go"), "段序颠倒不算");
+        // Everything 查询排除句应包含该序列
+        assert!(everything_query_with_exclusions("note").contains("!path:\"\\go\\pkg\\mod\\\""));
     }
 
     /// **用于串行化那些会碰进程级状态（环境变量 / FILE_INDEX / EXTRA_DIRS）的测试。**
@@ -2237,6 +2279,151 @@ mod tests {
             icons.len(),
             t1.elapsed()
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // 缺陷发掘探针（换算法前的问题坐实，续138）。全部 #[ignore]，手动跑：
+    //   cargo test --lib probe_ -- --ignored --nocapture
+    // 直接调用**真正的** token_score / subseq_score / entry_score，不 mock 打分。
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// builtin_search 的排序逻辑（去掉 open_bonus 全局依赖）——对一组条目打分、排序、打印。
+    fn rank_and_print(title: &str, query: &str, entries: &[IndexEntry], now: u64) {
+        let q = query.to_lowercase();
+        let tokens: Vec<&str> = q.split_whitespace().collect();
+        let mut scored: Vec<(i32, &IndexEntry)> = entries
+            .iter()
+            .filter_map(|e| entry_score(&tokens, e, now).map(|s| (s, e)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name().len().cmp(&b.1.name().len())));
+        println!(
+            "\n── [{title}] 查询 \"{query}\" —— 命中 {}/{} 条 ──",
+            scored.len(),
+            entries.len()
+        );
+        for (rank, (score, e)) in scored.iter().enumerate() {
+            println!("   #{:<2} score={:<6} {}", rank + 1, score, e.name());
+        }
+        let missed: Vec<&str> = entries
+            .iter()
+            .filter(|e| {
+                entry_score(&tokens, e, now).is_none()
+            })
+            .map(|e| e.name())
+            .collect();
+        if !missed.is_empty() {
+            println!("   ✗ 被淘汰（未命中）: {missed:?}");
+        }
+    }
+
+    /// B1 + A2：短子串裸奔（长噪声进高分带） vs 词缩写被字符距离 gate 误杀。
+    #[test]
+    #[ignore]
+    fn probe_precision_short_token() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let set = vec![
+            ent("app.exe", now, false),                            // 完全一致 → L_EXACT
+            ent("MyApp.ini", now, false),                          // 中段子串 → L_SUBSTR
+            ent("quarterly-wrapper-config-backup.xml", now, false),// wr[app]er 字面子串 → L_SUBSTR
+            ent("Advanced Photo Processor.exe", now, false),       // 词缩写 app（直觉命中）
+            ent("App Store Helper.log", now, false),               // 前缀 → L_PREFIX
+        ];
+        rank_and_print("B1/A2 短 token", "app", &set, now);
+        println!("\n   —— A2：词缩写被 gate 判定（subseq 直接看跨度）——");
+        for (q, name) in [
+            ("app", "advanced photo processor.exe"),
+            ("vsc", "visual studio code"),
+            ("psd", "photoshop design.psd"),
+            ("cfg", "config.toml"), // 紧凑，应保留作对照
+        ] {
+            println!("   subseq(\"{q}\", \"{name}\") = {:?}", subseq_score(q, name));
+        }
+    }
+
+    /// B2：同一带内「匹配质量」几乎不表达，名次由名字长短（旁证）决定而非匹配贴合度。
+    #[test]
+    #[ignore]
+    fn probe_precision_quality_not_expressed() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        // 两个都是「中段子串」（prev 为字母，非词首）→ 同落 L_SUBSTR。
+        let tight = ent("xreport.md", now, false); // report 占名字 6/7，贴合极好
+        let loose = ent("areportbackuparchive2018final.md", now, false); // report 占 6/29，贴合很差
+        let a = entry_score(&["report"], &tight, now).unwrap();
+        let b = entry_score(&["report"], &loose, now).unwrap();
+        println!("\n── [B2 质量不表达] 查询 \"report\" ──");
+        println!("   贴合好 6/7:  score={a}  {}", tight.name());
+        println!("   贴合差 6/29: score={b}  {}", loose.name());
+        println!("   两者同带 L_SUBSTR={L_SUBSTR}，差值 {} 全来自短名加分，与「匹配多贴合」无关", a - b);
+    }
+
+    /// A1：中文文件 + 拼音查询 = 完全搜不到；对照 pinyin_util::derive 证明「本可命中」。
+    #[test]
+    #[ignore]
+    fn probe_recall_chinese_pinyin() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        println!("\n── [A1 中文无拼音] ──");
+        for (q, name) in [("huiyi", "会议纪要.docx"), ("hyjy", "会议纪要.docx"), ("yinyue", "网易云音乐歌单.txt")] {
+            let e = IndexEntry::new(format!("C:\\x\\{name}"), name, "", false, false, now);
+            println!("   token_score(\"{q}\", \"{name}\") = {:?}  ← 文件路径的结局", token_score(q, &e.name_lower));
+        }
+        // 对照：拼音派生本可命中
+        for name in ["会议纪要", "网易云音乐歌单"] {
+            let vs = crate::pinyin_util::derive(name);
+            let inits: Vec<String> = vs.iter().map(|v| v.initials.clone()).collect();
+            let fulls: Vec<String> = vs.iter().map(|v| v.full.clone()).collect();
+            println!("   derive(\"{name}\") 首字母={inits:?} 全拼={fulls:?}  ← 接上就能搜到", );
+        }
+    }
+
+    /// A3 + A4：路径上下文被忽略；多 token 全或无（一个 token 错整条丢）。
+    #[test]
+    #[ignore]
+    fn probe_recall_path_and_and() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        println!("\n── [A3 路径被忽略] 查询 \"workbench report\" ──");
+        let e = IndexEntry::new(
+            "D:\\dev\\workbench-app\\report.md".into(),
+            "report.md", "md", false, false, now,
+        );
+        println!(
+            "   entry_score = {:?}  （文件在 workbench-app\\ 里，却因 basename 无 'workbench' 被淘汰）",
+            entry_score(&["workbench", "report"], &e, now)
+        );
+        println!("\n── [A4 多 token 全或无] 查询 \"report 2024\" ──");
+        let f = ent("report-2023.md", now, false);
+        println!(
+            "   entry_score = {:?}  （'report' 完美命中，只因 '2024'≠'2023' 整条丢，无部分 credit）",
+            entry_score(&["report", "2024"], &f, now)
+        );
+    }
+
+    /// 真机索引上的真实垃圾（最有说服力）：建真实索引，对几个短查询打印 top 15。
+    /// 只用 entry_score（不含 open_bonus 使用学习，与真实排序略有出入，已注明）。
+    ///   cargo test --lib probe_real_index -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn probe_real_index() {
+        let now = now_unix();
+        let started = Instant::now();
+        let idx = build_index(&scan_dirs());
+        println!("\n真实索引 {} 条 / {:?}（不含 open_bonus 使用学习）", idx.len(), started.elapsed());
+        for query in ["app", "con", "date", "config", "note", "wen dang"] {
+            let q = query.to_lowercase();
+            let tokens: Vec<&str> = q.split_whitespace().collect();
+            let mut scored: Vec<(i32, &IndexEntry)> = idx
+                .iter()
+                .filter_map(|e| entry_score(&tokens, e, now).map(|s| (s, e)))
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name().len().cmp(&b.1.name().len())));
+            println!("\n── \"{query}\" —— 命中 {} 条，top 15 ──", scored.len());
+            for (rank, (score, e)) in scored.iter().take(15).enumerate() {
+                println!("   #{:<2} {:<6} {}", rank + 1, score, e.path);
+            }
+        }
     }
 }
 
