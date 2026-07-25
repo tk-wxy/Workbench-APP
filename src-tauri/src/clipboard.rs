@@ -1358,7 +1358,7 @@ fn base64_encode(data: &[u8]) -> String {
     r
 }
 
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let mut buf=Vec::with_capacity(s.len()*3/4); let mut a=0u32; let mut b=0u32;
     for c in s.chars() {
         let v=match c{'A'..='Z'=>c as u32-65,'a'..='z'=>c as u32-71,'0'..='9'=>c as u32+4,'+'=>62,'/'=>63,'='=>break,_=>continue};

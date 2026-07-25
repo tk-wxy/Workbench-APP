@@ -813,6 +813,201 @@ fn sweep_stage_thumb_cache() {
     eprintln!("[thumb_sweep] 总量封顶：{total} → {remaining} bytes（上限 {STAGE_THUMB_CACHE_MAX_BYTES}）");
 }
 
+// ── 启动台资产落盘：图标外置 + 两目录孤儿回收（续146）──────────────────
+//
+// 背景：`launcher-items` 每条内嵌 base64 图标（≈5.5KB/条），73 条就把 store JSON 撑到 400KB
+// ——占整个 store 的 98%。而 plugin-store 的 save() 是**整文件重写**，于是每次拖动中转条目、
+// 点固定、改排序都在重写这 400KB，且随收藏数线性变差（200 条上限 → ~1.1MB/次）。
+// 修法：图标落成 launcher_icons/ 下的 PNG，JSON 只留文件名；内存态仍带 data URL，渲染层零改动。
+//
+/// 图标目录：内容寻址（crc32(base64) 命名）→ 同一图标只存一份、重复保存幂等。
+static LAUNCHER_ICON_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// 图片目录：续143「中转图片项拖进启动台」物化出来的 PNG。**这些是数据本身、不可重建**
+/// （截图的唯一副本），删掉即死链——故只做「确证未被引用」的孤儿回收，绝不按容量淘汰。
+static LAUNCHER_IMAGE_DIR: OnceLock<PathBuf> = OnceLock::new();
+/// store JSON 所在目录（sweep 要从中读「被引用集」）
+static LAUNCHER_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+const LAUNCHER_SWEEP_INITIAL_MS: u64 = 12_000;      // 起手延迟错开 setup（晚于 thumb 的 8s）
+const LAUNCHER_SWEEP_MS: u64 = 30 * 60 * 1000;      // 之后每 30 分钟一轮
+/// **新文件保护期**：Rust 写完图标/图片后，前端要过一小会儿才把文件名写进 store。
+/// 这段窗口里文件「看起来没人引用」——保护期内一律不删，否则刚加的收藏图标当场被扫掉。
+const LAUNCHER_SWEEP_GRACE_MS: u64 = 30 * 60 * 1000;
+
+/// 批量把启动台条目的 base64 图标落成 PNG，返回各自文件名；某条失败则该位置返回 None
+/// （调用方据此保留内嵌 icon —— 宁可 JSON 大一点，也不能把图标弄丢）。
+#[tauri::command]
+pub fn save_launcher_icons(icons: Vec<String>) -> Vec<Option<String>> {
+    let Some(dir) = LAUNCHER_ICON_DIR.get() else {
+        return icons.iter().map(|_| None).collect();
+    };
+    icons
+        .iter()
+        .map(|data_url| {
+            // 入参是 data URL（`data:image/png;base64,xxx`）；容错也接受裸 base64
+            let b64 = match data_url.find(',') {
+                Some(i) => &data_url[i + 1..],
+                None => data_url.as_str(),
+            };
+            if b64.is_empty() {
+                return None;
+            }
+            let name = format!("{:08x}.png", crc32(b"LICO", b64.as_bytes()));
+            let path = dir.join(&name);
+            // 内容寻址 → 已存在即同一张图，跳过解码与写盘（幂等，重复 save 近乎零成本）
+            if path.exists() {
+                return Some(name);
+            }
+            let bytes = crate::clipboard::base64_decode(b64)?;
+            if bytes.is_empty() {
+                return None;
+            }
+            std::fs::write(&path, &bytes).ok()?;
+            Some(name)
+        })
+        .collect()
+}
+
+/// 读回 launcher_icons/ 全部图标：文件名 → data URL。前端启动时一次性调用，把 icon 补回内存条目。
+/// 单次 IPC 传全量（≈400KB/73 条）——与原先「store JSON 里读同样多 base64」等价，不是新增开销，
+/// 且发生在启动路径、不在任何交互热路径上。
+#[tauri::command]
+pub fn load_launcher_icons() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Some(dir) = LAUNCHER_ICON_DIR.get() else { return map; };
+    let Ok(entries) = std::fs::read_dir(dir) else { return map; };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+        if let Ok(bytes) = std::fs::read(&p) {
+            map.insert(
+                name.to_string(),
+                format!("data:image/png;base64,{}", base64_encode(&bytes)),
+            );
+        }
+    }
+    map
+}
+
+/// 初始化启动台资产目录 + 起孤儿回收线程。setup 时调用一次。
+pub(crate) fn init_launcher_assets(data_dir: &std::path::Path) {
+    let icon_dir = data_dir.join("launcher_icons");
+    let image_dir = data_dir.join("launcher_images");
+    let _ = std::fs::create_dir_all(&icon_dir);
+    let _ = std::fs::create_dir_all(&image_dir);
+    let _ = LAUNCHER_ICON_DIR.set(icon_dir);
+    let _ = LAUNCHER_IMAGE_DIR.set(image_dir);
+    let _ = LAUNCHER_DATA_DIR.set(data_dir.to_path_buf());
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(LAUNCHER_SWEEP_INITIAL_MS));
+        loop {
+            sweep_launcher_assets();
+            std::thread::sleep(std::time::Duration::from_millis(LAUNCHER_SWEEP_MS));
+        }
+    });
+}
+
+/// 从 store JSON 收集「被引用集」：图标文件名 + launcher_images 下被引用的图片文件名。
+/// 返回 None = **读不出可信的引用集**（文件缺失/解析失败/没有 launcher-items 数组），
+/// 调用方必须据此**整轮跳过清理**——这是 clip_images「空集合误删全部」那条教训的同款守卫。
+///
+/// 图片侧同时扫 `launcher-items` 与 `stage-items` 两个 key：物化出来的 PNG 可能被用户又拖进中转站，
+/// 只看启动台会把仍在用的图片当孤儿删掉。
+fn collect_launcher_refs() -> Option<(std::collections::HashSet<String>, std::collections::HashSet<String>)> {
+    collect_launcher_refs_at(LAUNCHER_DATA_DIR.get()?)
+}
+
+/// `collect_launcher_refs` 的可测形态（把 OnceLock 依赖抽成入参）。
+fn collect_launcher_refs_at(dir: &std::path::Path) -> Option<(std::collections::HashSet<String>, std::collections::HashSet<String>)> {
+    let text = std::fs::read_to_string(dir.join("workbench-data.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let launcher = v.get("launcher-items")?.as_array()?;
+    let mut icons = std::collections::HashSet::new();
+    let mut images = std::collections::HashSet::new();
+    let mut note_image = |p: &str| {
+        // 只认落在 launcher_images/ 里的路径；其它路径（用户自己的文件）与本回收无关
+        let lower = p.replace('/', "\\").to_lowercase();
+        if lower.contains("\\launcher_images\\") {
+            if let Some(name) = lower.rsplit('\\').next() {
+                images.insert(name.to_string());
+            }
+        }
+    };
+    for it in launcher {
+        if let Some(f) = it.get("iconFile").and_then(|x| x.as_str()) {
+            icons.insert(f.to_string());
+        }
+        if let Some(p) = it.get("path").and_then(|x| x.as_str()) {
+            note_image(p);
+        }
+    }
+    // 中转条目也可能引用物化图片（items[].path）
+    if let Some(stage) = v.get("stage-items").and_then(|x| x.as_array()) {
+        for s in stage {
+            if let Some(items) = s.get("items").and_then(|x| x.as_array()) {
+                for i in items {
+                    if let Some(p) = i.get("path").and_then(|x| x.as_str()) {
+                        note_image(p);
+                    }
+                }
+            }
+        }
+    }
+    Some((icons, images))
+}
+
+/// 启动台资产孤儿回收：删掉 launcher_icons/ 与 launcher_images/ 里**确证无人引用**的文件。
+/// 三道守卫（少一道都可能删掉用户数据）：
+/// ① 引用集读不出来 → 整轮跳过（绝不在「不知道谁在用」时删）；
+/// ② 保护期内（mtime 距今 < GRACE）的新文件跳过 → 封住「Rust 已写盘、前端尚未落库」的窗口；
+/// ③ 只按文件名精确匹配引用集，不做前缀/模糊判断。
+/// 全程 best-effort，任何 fs 错误跳过、绝不 panic。
+fn sweep_launcher_assets() {
+    let Some((icons, images)) = collect_launcher_refs() else {
+        eprintln!("[launcher_sweep] 引用集读取失败 → 本轮跳过（不做任何删除）");
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut removed = 0usize;
+    for (dir, refs, what) in [
+        (LAUNCHER_ICON_DIR.get(), &icons, "icon"),
+        (LAUNCHER_IMAGE_DIR.get(), &images, "image"),
+    ] {
+        let Some(dir) = dir else { continue; };
+        let Ok(entries) = std::fs::read_dir(dir) else { continue; };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+            // 图片侧引用集是小写（路径大小写不敏感），图标侧是 Rust 自己生成的小写十六进制名
+            if refs.contains(&name.to_lowercase()) || refs.contains(name) {
+                continue;
+            }
+            let fresh = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| now.duration_since(t).ok())
+                .map(|d| d.as_millis() < LAUNCHER_SWEEP_GRACE_MS as u128)
+                .unwrap_or(true); // 拿不到 mtime → 当作「新文件」保守跳过
+            if fresh {
+                continue;
+            }
+            if std::fs::remove_file(&p).is_ok() {
+                removed += 1;
+                eprintln!("[launcher_sweep] 删除孤儿 {what}：{name}");
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("[launcher_sweep] 本轮回收 {removed} 个孤儿文件");
+    }
+}
+
 // ── 应用启动（ShellExecuteW，支持 .lnk 和 .exe）──────────
 
 #[tauri::command]
@@ -1077,6 +1272,52 @@ mod tests {
             avg as f64 / (total_small / n).max(1) as f64,
             avg as f64 * 300.0 / 1024.0 / 1024.0
         );
+    }
+
+    /// 续146 孤儿回收的**安全闸**：引用集读不出来时必须返回 None（调用方据此整轮跳过）。
+    /// 这条一旦破（比如「读失败就当空集合」），sweep 会把 launcher_icons/ 与 launcher_images/
+    /// 里的文件全删光——后者是截图物化出来的**唯一副本**，删掉就是不可逆的数据丢失。
+    /// 同款教训见 clip_images 的「首次 sweep 必须在 load_clip_history 之后」。
+    #[test]
+    fn launcher_refs_bail_out_instead_of_returning_empty_set() {
+        let dir = std::env::temp_dir().join(format!(
+            "wb_lref_test_{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("workbench-data.json");
+
+        // ① store 文件不存在 → None（首次启动/目录被清）
+        assert!(collect_launcher_refs_at(&dir).is_none(), "文件缺失必须 bail，不能当空引用集");
+        // ② JSON 损坏 → None
+        std::fs::write(&store, "{ not json").unwrap();
+        assert!(collect_launcher_refs_at(&dir).is_none(), "解析失败必须 bail");
+        // ③ 没有 launcher-items 键 → None（前端还没写过 = 状态未知，不是「没人引用」）
+        std::fs::write(&store, r#"{"theme":"dark"}"#).unwrap();
+        assert!(collect_launcher_refs_at(&dir).is_none(), "键缺失必须 bail");
+        // ④ 空数组是**可信**的空引用集 → Some（用户确实清空了启动台，此时该回收）
+        std::fs::write(&store, r#"{"launcher-items":[]}"#).unwrap();
+        let (icons, images) = collect_launcher_refs_at(&dir).expect("空数组是可信状态，应返回 Some");
+        assert!(icons.is_empty() && images.is_empty());
+
+        // ⑤ 正常读取：图标名 + launcher_images 下的图片名；非该目录的路径不得混入
+        std::fs::write(&store, r#"{"launcher-items":[
+            {"id":1,"iconFile":"a1b2c3d4.png","path":"C:\\Users\\me\\notepad.exe"},
+            {"id":2,"path":"C:\\Users\\me\\AppData\\Roaming\\com.workbench.app\\launcher_images\\clip_123.png"}
+        ]}"#).unwrap();
+        let (icons, images) = collect_launcher_refs_at(&dir).unwrap();
+        assert!(icons.contains("a1b2c3d4.png"));
+        assert_eq!(images.len(), 1, "只有 launcher_images/ 下的路径算引用");
+        assert!(images.contains("clip_123.png"));
+
+        // ⑥ 中转条目也要算进引用集：物化图片被拖回中转站后，只看启动台会把它当孤儿删掉
+        std::fs::write(&store, r#"{"launcher-items":[],"stage-items":[
+            {"id":9,"items":[{"path":"D:\\x\\launcher_images\\clip_777.png"}]}
+        ]}"#).unwrap();
+        let (_, images) = collect_launcher_refs_at(&dir).unwrap();
+        assert!(images.contains("clip_777.png"), "stage-items 引用的物化图片不得被当孤儿");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 续119 新增的 3 个字段也必须以 camelCase 输出。

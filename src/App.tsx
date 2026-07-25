@@ -95,11 +95,17 @@ interface LauncherItem {
   id: number;
   kind: "app" | "file" | "folder";
   name: string;
-  icon?: string | null;   // app 图标 base64（来自 AppInfo.icon）；file/folder 无，用 emoji
+  /** 图标 data URL。**内存态字段**——渲染只读它；落盘前被 dehydrateLauncher 摘掉，换成 iconFile（续146） */
+  icon?: string | null;
+  /** 图标在 launcher_icons/ 下的文件名。**落盘态字段**——载入时经 load_launcher_icons 换回 icon（续146） */
+  iconFile?: string;
   path: string;           // app=launch_app 的 path；file/folder=open_file 的 path
   ext?: string;           // file 显示图标用
 }
 const LAUNCHER_MAX = 200;
+/// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
+/// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
+const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
 const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
 
@@ -405,7 +411,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ const loaded=savedStage.slice(0,stageMaxLoaded); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ const loaded=savedStage.slice(0,stageMaxLoaded); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ let items=savedLauncher.slice(0,LAUNCHER_MAX); /* 续146 补水：iconFile → data URL（老条目仍内嵌 icon，原样可用，由下方迁移 effect 搬走） */ if(items.some(it=>it.iconFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const iconMap=await invoke<Record<string,string>>("load_launcher_icons"); /* 文件还在→补回 icon；文件已不在（手动删/异常清理）→ 连 iconFile 一起摘掉：否则该条目「有 iconFile 却永远补不出 icon」，图标回填每次启动白跑一轮、且因 dehydrate 认旧 iconFile 而永远存不下来 */ items=items.map(it=>{ if(!it.iconFile) return it; const hit=iconMap[it.iconFile]; if(hit) return {...it,icon:hit}; const {iconFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 iconFile，下次启动再试 */} } items.forEach(it=>{ if(it.iconFile) launcherIconFileRef.current.set(it.id,it.iconFile); }); setLauncher(items); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); /* 续146：清掉已删功能残留的死 key（plugin-store 不回收未知 key，会一直躺在 JSON 里） */ let pruned=false; for(const k of DEAD_STORE_KEYS){ try{ if(await s.delete(k)) pruned=true; }catch{} } if(pruned){ try{ await s.save(); }catch{} } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -413,7 +419,36 @@ export default function App() {
   const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
   const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
-  const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
+  // 续146：id → launcher_icons/ 文件名。存在 ref 而非 state——它只服务于「下次落盘不必重复 invoke」，
+  // 不影响任何渲染；放进 state 会引来「落盘回填与用户新操作互相覆盖」的竞态。
+  const launcherIconFileRef = useRef<Map<number,string>>(new Map());
+  // 续146 脱水：把内嵌的 base64 图标落成 launcher_icons/ 下的 PNG，返回**只含文件名**的持久化形态。
+  // 原先每条内嵌 ≈5.5KB base64、73 条把 store 撑到 400KB（占 98%），而 plugin-store 是整文件重写
+  // → 每次中转/启动台改动都重写这 400KB。脱水后 store ≈12KB。
+  // 失败降级：某条落盘失败就保留它的内嵌 icon（宁可 JSON 大，也绝不把图标弄丢）。
+  const dehydrateLauncher = useCallback(async (list:LauncherItem[]):Promise<LauncherItem[]> => {
+    const known = launcherIconFileRef.current;
+    const pending = list.map((it,i)=>({it,i})).filter(({it})=> it.icon && !it.iconFile && !known.has(it.id));
+    if (pending.length) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const files = await invoke<(string|null)[]>("save_launcher_icons", { icons: pending.map(({it})=>it.icon!) });
+        pending.forEach(({it},k)=>{ const f=files[k]; if(f) known.set(it.id,f); });
+      } catch {}
+    }
+    return list.map(it => {
+      const iconFile = it.iconFile ?? known.get(it.id);
+      if (!iconFile) return it;                    // 落盘失败/本就无图标 → 原样带 icon 落盘
+      const { icon:_omit, ...rest } = it;          // 有文件名了才摘 icon
+      return { ...rest, iconFile };
+    });
+  }, []);
+  const saveLauncher = useCallback(async (list:LauncherItem[]) => {
+    setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
+    if(!store) return;
+    await store.set("launcher-items", await dehydrateLauncher(list));
+    await store.save();
+  }, [store, dehydrateLauncher]);
   // 启动台文件/文件夹图标回填：历史存的旧条目 icon 为 null（走 Solar 兜底），这里补取系统默认图标（与桌面一致）。
   // tried 集合防止对提取失败（返回 null）的路径反复 invoke；每个缺图路径只尝试一次。
   const launcherIconTriedRef = useRef<Set<string>>(new Set());
@@ -439,6 +474,17 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [launcher, saveLauncher]);
+
+  // 续146 一次性迁移：老条目的图标还内嵌在 store JSON 里（400KB），搬进 launcher_icons/。
+  // 不塞进上面的 store 载入 effect——那里 saveLauncher 尚未初始化（同 copyAndPasteRef 那次 TDZ 教训）。
+  // 只跑一次：迁移本身会触发 saveLauncher → launcher 变化 → 本 effect 重入，靠 ref 闸住。
+  const launcherMigratedRef = useRef(false);
+  useEffect(() => {
+    if (launcherMigratedRef.current || !store || !launcher.length) return;
+    if (!launcher.some(it => it.icon && !it.iconFile && !launcherIconFileRef.current.has(it.id))) return;
+    launcherMigratedRef.current = true;
+    saveLauncher(launcher);
+  }, [launcher, store, saveLauncher]);
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
   const changeStagePersist = useCallback(async (v:boolean) => { setStagePersist(v); if(store){ await store.set("stage-persist",v); await store.save(); } }, [store]);

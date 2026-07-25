@@ -734,6 +734,7 @@ pub fn run() {
             apps::scan_start_menu, apps::refresh_apps,
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
+            apps::save_launcher_icons, apps::load_launcher_icons,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
@@ -778,6 +779,7 @@ pub fn run() {
             clipboard::init(app.handle(), &data_dir);
             filesearch::init_file_usage(&data_dir); // 文件使用学习：装载持久化的打开记录（续132）
             apps::init_thumb_cache(&data_dir); // 中转区图片缩略图落盘缓存（续99c：重启秒开）
+            apps::init_launcher_assets(&data_dir); // 启动台图标外置 + 两目录孤儿回收（续146）
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             everything::init(app.handle()); // 可选 Everything：登记资源目录供加载 SDK DLL
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
