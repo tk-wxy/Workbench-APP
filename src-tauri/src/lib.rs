@@ -741,6 +741,7 @@ pub fn run() {
             clipboard::copy_text_to_clipboard, clipboard::copy_image_to_clipboard, clipboard::copy_files_to_clipboard,
             clipboard::get_clip_cache_max, clipboard::set_clip_cache_max,
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
+            clipboard::save_image_as_launcher_file,
             filesearch::search_files, filesearch::get_index_status,
             filesearch::set_search_engine, filesearch::set_search_dirs,
             pinyin_util::to_pinyin_batch,

@@ -1344,6 +1344,44 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// 续143：把中转区图片项物化成**持久** PNG 文件、返回路径——供「拖图片项到启动台」加入收藏。
+/// 与 dragout::image_to_file 的区别：那份产 temp 文件（OLE 拖出后即弃），启动台收藏是长期项，不能指向
+/// 会被清理的 temp、也不能指向 janitor 管上限的 clip_images/（会被从旧删到上限以下）。故写到独立的
+/// app_data/launcher_images/（无 janitor、随收藏长存）。取图优先 orig_path 全图（大图），否则 base64 content。
+#[tauri::command]
+pub(crate) fn save_image_as_launcher_file(
+    app: AppHandle,
+    base64: Option<String>,
+    orig_path: Option<String>,
+) -> Result<String, String> {
+    let bytes: Vec<u8> = match orig_path.as_deref() {
+        Some(op) if std::path::Path::new(op).exists() => {
+            std::fs::read(op).map_err(|e| format!("读原图失败: {e}"))?
+        }
+        _ => {
+            let raw = base64.as_deref().ok_or("图片无内容")?;
+            // 去 data-url 前缀（content 形如 "data:image/png;base64,...."），否则前缀会被解码成垃圾字节
+            let stripped = match raw.find(',') {
+                Some(i) if raw[..i].contains("base64") => &raw[i + 1..],
+                _ => raw,
+            };
+            base64_decode(stripped).ok_or("base64 解码失败")?
+        }
+    };
+    if bytes.is_empty() {
+        return Err("图片数据为空".into());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app_data_dir 不可用: {e}"))?
+        .join("launcher_images");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("建目录失败: {e}"))?;
+    let path = dir.join(format!("clip_{}.png", now_ms()));
+    std::fs::write(&path, &bytes).map_err(|e| format!("写文件失败: {e}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 // ── 启动入口（封装 setup 时序，顺序不可变）──────────────────────
 /// 剪贴板子系统初始化：路径 → load_clip_history → start_clipboard_monitor → janitor。
 /// 顺序绝对不能变：① 路径必须最先（load/save 依赖 OnceLock）；② load 必须在 monitor 之前

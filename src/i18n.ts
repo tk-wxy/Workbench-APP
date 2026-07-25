@@ -41,6 +41,9 @@ export const EN_DICT: Record<string, string> = {
   // ── 启动器 ──
   "启动器": "Launcher",
   "添加到启动台": "Add to Launcher",
+  "文本项无法加入启动台": "Text items can't be added to the Launcher",
+  "图片加入启动台失败": "Failed to add image to the Launcher",
+  "截图": "Screenshot",
   "换区": "Switch section",
   // 增强搜索预览面板（续115；续116 整理了信息项）
   "大小": "Size",
