@@ -86,7 +86,6 @@ const ENH_DEBOUNCE_EVERYTHING_MS = 150;
 const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
 const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
 const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
-const STAGE_REORDER_ESCAPE_PX = 6; // 中转区内重排：光标离开 .drop-area 边界超过此距离才升级为真实拖出（防边缘抖动误触发）
 const STAGE_MOAT_PX = 6; // 中转卡片"边缘缓冲带"：非多选态下、从卡片外沿此宽度内按下拖动→判为框选而非拖出（紧凑布局下框选难起手的补偿，续108）
 
 
@@ -316,6 +315,9 @@ export default function App() {
   const [lassoState, setLassoState] = useState<LassoState>({ active: false, origin: { x: 0, y: 0 }, current: { x: 0, y: 0 } });
   const lassoStateRef = useRef(lassoState); lassoStateRef.current = lassoState; // 供 move/up 闭包读最新值（仿 stageSelRef 渲染时同步）
   const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
+  // 续143：框选激活时快照一次卡片 rect（框选期间卡片不移动，进入多选态只是 header 内换按钮、不改卡片布局），
+  // move 只对缓存矩形求交，避免逐帧 querySelectorAll+getBoundingClientRect 的强制同步布局（仿 reorder 的 rects 快照）。
+  const lassoRectsRef = useRef<{ id: number; left: number; top: number; right: number; bottom: number }[]>([]);
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
   // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
   const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" | "lasso" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
@@ -325,8 +327,9 @@ export default function App() {
   //   clip 来源"拖出后剪贴板不变"，不走任何删条目/copyAndPaste 逻辑（中转站的 draggedIds 与其无关）。
   const dragOutSourceRef = useRef<"stage" | "clip">("stage");
   const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
-  // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动、光标仍在 .drop-area 内时走此逻辑；
-  // 光标离开区域边界 → 升级为原生 OLE 拖出（沿用既有 start_drag_out 链路，见 beginNativeDragOut）。
+  // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动全程走此逻辑，ghost 跟手 + FLIP 排序。
+  // 续143：界面开着时**永不自动升级为原生拖出**（已删旧的「光标离开 .drop-area 边界即升级」逻辑）——
+  // 去外部的唯一触发是拖动中按热键手动隐藏界面（stage-drag-hotkey → beginNativeDragOut，见 start_drag_out 链路）。
   const stageReorderRef = useRef<{
     active: boolean; tiles: HTMLElement[]; rects: { left: number; top: number; width: number; height: number }[];
     ghostEl: HTMLElement | null; srcEl: HTMLElement | null; srcIdx: number; insertIdx: number;
@@ -1396,15 +1399,18 @@ export default function App() {
         launcherDragActiveRef.current = true;
         suppressLaunchClickRef.current = true;
         ghostEl = srcEl.cloneNode(true) as HTMLElement;
-        ghostEl.classList.remove("selected", "launcher-dragging-src");
+        ghostEl.classList.remove("selected", "launcher-dragging-src", "launcher-shift"); // 续143：摘掉继承的 launcher-shift（transition:transform 200ms → 逐帧 transform 位移被动画化 → 滞后不跟手）
         ghostEl.classList.add("launcher-drag-ghost");
         ghostEl.querySelectorAll("img").forEach(img => { img.draggable = false; });
         const ghostHost = dragLayerRef.current ?? document.body;
         const inDragLayer = ghostHost === dragLayerRef.current;
+        // 续143：位移走 transform:translate3d 而非 left/top（后者逐帧 layout → 掉帧）；scale 并入同一 transform。同剪贴板 ghost。
         Object.assign(ghostEl.style, {
           position: inDragLayer ? "absolute" : "fixed",
-          left: `${me.clientX - grabOffsetX}px`,
-          top: `${me.clientY - grabOffsetY}px`,
+          left: "0",
+          top: "0",
+          transition: "none", // 续143：拖动期间瞬时跟手（落定时 onUp 再设 180ms）
+          transform: `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`,
           width: `${srcStartRect.width}px`,
           height: `${srcStartRect.height}px`,
           zIndex: inDragLayer ? "" : "100003",
@@ -1417,10 +1423,9 @@ export default function App() {
         srcEl.classList.add("launcher-dragging-src");
         document.getElementById("overlay")?.classList.add("launcher-reordering");
       }
-      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 DOM style，零 React 渲染
+      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 transform，零 React 渲染、零 layout（续143）
       if (ghostEl) {
-        ghostEl.style.left = (me.clientX - grabOffsetX) + "px";
-        ghostEl.style.top = (me.clientY - grabOffsetY) + "px";
+        ghostEl.style.transform = `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`;
       }
       const ins = calcInsert(me.clientX, me.clientY);
       if (ins !== launcherDragInsertRef.current) {
@@ -1446,9 +1451,8 @@ export default function App() {
       const landing = rects[target] ?? rects[srcIdx];
       launcherLandingRef.current = true;
       if (ghostEl && landing) {
-        ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
-        ghostEl.style.left = landing.left + "px";
-        ghostEl.style.top = landing.top + "px";
+        ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
+        ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.05)`;
       }
 
       // 180ms 回落结束后统一 commit：清 transform/class → 清 ghost → 重排持久化
@@ -1655,20 +1659,28 @@ export default function App() {
   }, [endClipDrag]);
   // ── 中转区框选多选（续70）──
   // 实时计算选区矩形与各条目 DOM 的相交，命中者写入 stageSel；与显式多选共用同一套状态。
+  // 续143：框选激活时调用一次——快照当前所有卡片的 id + rect（按当前 stageLayout 选对应选择器）。
+  const snapshotLassoRects = useCallback(() => {
+    const arr: { id: number; left: number; top: number; right: number; bottom: number }[] = [];
+    dropAreaRef.current?.querySelectorAll<HTMLElement>(stageLayout==="grid"?".stage-card":".stage-item").forEach(el => {
+      const id = Number(el.dataset.stageId);
+      if (Number.isNaN(id)) return;
+      const rc = el.getBoundingClientRect();
+      arr.push({ id, left: rc.left, top: rc.top, right: rc.right, bottom: rc.bottom });
+    });
+    lassoRectsRef.current = arr;
+  }, [stageLayout]);
   const computeLassoSelection = useCallback((origin:{x:number;y:number}, current:{x:number;y:number}) => {
     const l = Math.min(origin.x, current.x), r = Math.max(origin.x, current.x);
     const t = Math.min(origin.y, current.y), b = Math.max(origin.y, current.y);
     const sel = new Set<number>();
-    // 列表/方格两种布局分别查不同选择器（move 时按当前 stageLayout 决定）
-    dropAreaRef.current?.querySelectorAll<HTMLElement>(stageLayout==="grid"?".stage-card":".stage-item").forEach(el => {
-      const rc = el.getBoundingClientRect();
-      if (rc.left <= r && rc.right >= l && rc.top <= b && rc.bottom >= t) { // 矩形相交
-        const id = Number(el.dataset.stageId);
-        if (!Number.isNaN(id)) sel.add(id);
-      }
-    });
-    setStageSel(sel);
-  }, [stageLayout]);
+    // 续143：只对激活时的快照矩形求交，move 期间零 DOM 查询、零布局读取
+    for (const rc of lassoRectsRef.current) {
+      if (rc.left <= r && rc.right >= l && rc.top <= b && rc.bottom >= t) sel.add(rc.id); // 矩形相交
+    }
+    // 续143：选区未变则返回同一引用 → 跳过 React 重渲（框选 move 大量帧里选区其实不常变）
+    setStageSel(prev => (prev.size === sel.size && [...sel].every(id => prev.has(id))) ? prev : sel);
+  }, []);
   const handleLassoPointerDown = useCallback((e: React.PointerEvent) => {
     lassoArmedRef.current = false;
     if (e.button !== 0) return; // 仅左键
@@ -1690,12 +1702,13 @@ export default function App() {
       dropAreaRef.current?.classList.add("lasso-active"); // user-select:none + crosshair
       setLassoState({ ...ls, active: true, current: cur });
       setStageMultiselect(true);
+      snapshotLassoRects(); // 续143：激活时快照卡片 rect，之后 move 只对缓存求交
       computeLassoSelection(ls.origin, cur);
       return;
     }
     setLassoState({ ...ls, current: cur }); // 触发重渲染刷新选区矩形
     computeLassoSelection(ls.origin, cur);
-  }, [computeLassoSelection]);
+  }, [computeLassoSelection, snapshotLassoRects]);
   const handleLassoPointerUp = useCallback((e: React.PointerEvent) => {
     if (!lassoArmedRef.current) return;
     lassoArmedRef.current = false;
@@ -1717,8 +1730,9 @@ export default function App() {
     if (stageSelRef.current.size === 0) setStageMultiselect(false);
   }, []);
   // ── 中转条目拖出（续71）+ 区内重排（续88）──
-  // 条目上按下→拖动超阈值：光标仍在 .drop-area 内→区内重排（FLIP，仿启动台）；光标离开区域→升级为
-  // 原生 OLE 拖出（emit drag-out-begin，Rust 侧 STA 线程跑 DoDragDrop，hide overlay 后接管鼠标）。
+  // 条目上按下→拖动超阈值→区内重排（FLIP，仿启动台），单项拖动全程只排序、界面开着时永不自动升级为原生拖出
+  // （续143 删除旧的「光标离开 .drop-area 边界即升级」逻辑）。去外部靠拖动中按热键手动隐藏界面→ stage-drag-hotkey
+  // 升级为原生 OLE 拖出（Rust 侧 STA 线程跑 DoDragDrop，hide overlay 后接管鼠标），在目标处松手投放。
   // 与框选互斥：down 在条目上时 .drop-area 的 lasso 不布防（closest 排除）；与左键取走互斥：未超阈值=普通点击。
   // 区内重排仅限单项拖动（多选拖多项 / 搜索过滤态 索引对不上）：两种情形直接走原生拖出，行为与重排功能加入前一致。
   // 续88 bug 修复：重排阶段窗口全程可见、尚未进入 Rust 的 DRAG_IN_PROGRESS——必须另行告知 Rust 侧
@@ -1756,15 +1770,19 @@ export default function App() {
     const grabOffsetX = clientX - srcStartRect.left, grabOffsetY = clientY - srcStartRect.top;
     tiles.forEach(t => t.classList.add("stage-shift"));
     const ghostEl = srcEl.cloneNode(true) as HTMLElement;
-    ghostEl.classList.remove("selected");
+    ghostEl.classList.remove("selected", "stage-shift"); // 续143：摘掉克隆时继承来的 stage-shift（它带 transition:transform 200ms，会让逐帧 transform 位移被动画化 → 滞后不跟手）
     ghostEl.classList.add("stage-drag-ghost");
     ghostEl.querySelectorAll("img").forEach(img => { (img as HTMLImageElement).draggable = false; });
     const ghostHost = dragLayerRef.current ?? document.body;
     const inDragLayer = ghostHost === dragLayerRef.current;
+    // 续143：位移走 transform:translate3d 而非 left/top（left/top 逐帧触发 layout → 掉帧；transform 只走合成器）。
+    // 固定 left/top=0，位置全交给 translate3d；scale 并入同一 transform（合成器一次处理）。同剪贴板 ghost（续109）。
     Object.assign(ghostEl.style, {
       position: inDragLayer ? "absolute" : "fixed",
-      left: `${clientX - grabOffsetX}px`,
-      top: `${clientY - grabOffsetY}px`,
+      left: "0",
+      top: "0",
+      transition: "none", // 续143：拖动期间瞬时跟手（落定时 commitStageReorder 再设 180ms）
+      transform: `translate3d(${clientX - grabOffsetX}px,${clientY - grabOffsetY}px,0) scale(1.04)`,
       width: `${srcStartRect.width}px`,
       height: `${srcStartRect.height}px`,
       zIndex: inDragLayer ? "" : "100003",
@@ -1782,8 +1800,7 @@ export default function App() {
   const updateStageReorder = useCallback((clientX: number, clientY: number) => {
     const st = stageReorderRef.current;
     if (!st.active || !st.ghostEl) return;
-    st.ghostEl.style.left = (clientX - st.grabOffsetX) + "px";
-    st.ghostEl.style.top = (clientY - st.grabOffsetY) + "px";
+    st.ghostEl.style.transform = `translate3d(${clientX - st.grabOffsetX}px,${clientY - st.grabOffsetY}px,0) scale(1.04)`; // 续143：合成器位移，零 layout
     // 按固定槽位快照判断插入点：同启动台 calcInsert（cy 落在某行 → 按 cx 半区决定插入本格前/继续找下一格）
     let ins = st.rects.length;
     for (let i = 0; i < st.rects.length; i++) {
@@ -1829,9 +1846,8 @@ export default function App() {
     const target = st.insertIdx > srcIdx ? st.insertIdx - 1 : st.insertIdx;
     const landing = st.rects[target] ?? st.rects[srcIdx];
     if (ghostEl && landing) {
-      ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
-      ghostEl.style.left = landing.left + "px";
-      ghostEl.style.top = landing.top + "px";
+      ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
+      ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.04)`;
     }
     stageReorderRef.current = { ...st, active: false };
     setStageReorderActiveNative(false); // 重排结束（落定动画只是视觉收尾，与 Rust 让路无关，可立即清）
@@ -1848,6 +1864,32 @@ export default function App() {
       if (!unchanged) saveStage(list); // 位置不变则跳过 I/O
     }, 180);
   }, [saveStage, setStageReorderActiveNative]);
+  // 续143：单项重排松手落点在启动台 → 加入启动台（恢复旧「拖中转项目到启动台」功能——旧靠越界升级为原生 OLE
+  // 落到启动台再由 files-dropped 处理，续143 删了越界升级故改在此 JS 落点侧处理）。仅文件/文件夹项（有 path）可入；
+  // 忠实旧 OLE 行为的 move 语义：加入成功（added/duplicate）后，非持久 + 非固定则从中转移除。清 reorder 现场不回弹。
+  const dropStageItemToLauncher = useCallback(async (item: StageItem) => {
+    let path: string | undefined, name: string, ext: string | undefined, isDir = false, icon: string | null = null;
+    if (item.type === "file" && item.items?.[0]?.path) {
+      path = item.items[0].path; name = item.name ?? item.items[0].name; ext = item.ext; isDir = !!item.isDir; icon = item.items[0].icon ?? null;
+    } else if (item.type === "image") {
+      // 图片项无实体路径：物化成持久 PNG 文件再加入（恢复旧「拖截图到启动台」；旧靠 OLE 产 temp 文件、会被清理→死链，今写持久 launcher_images/）
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        path = await invoke<string>("save_image_as_launcher_file", { base64: item.content ?? null, origPath: item.orig_path ?? null });
+      } catch { showToast(t("图片加入启动台失败")); return; }
+      name = t("截图"); ext = "png";
+    } else { return; } // 文本等无实体，不该走到这
+    if (!path) return;
+    const res = await addFsToLauncher({ path, name, ext, isDir, icon });
+    toastAddResult(res, "launcher", name);
+    launcherDropRef.current?.classList.add("drop-flash");
+    setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
+    if ((res === "added" || res === "duplicate") && !stagePersistRef.current && !item.pinned) { // move 语义：非持久/非固定则从中转移除
+      const next = stageRef.current.filter(s => s.id !== item.id);
+      setStage(next);
+      if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+    }
+  }, [addFsToLauncher, toastAddResult, showToast, t]);
   const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
     if ((e.target as HTMLElement).closest("button")) return; // 悬浮操作按钮区不触发拖出
@@ -1886,6 +1928,7 @@ export default function App() {
         setLassoState({ active: true, origin: dr.origin, current: { x: e.clientX, y: e.clientY } });
         dropAreaRef.current?.classList.add("lasso-active");
         setStageMultiselect(true);
+        snapshotLassoRects(); // 续143：激活时快照卡片 rect，之后 move 只对缓存求交
         computeLassoSelection(dr.origin, { x: e.clientX, y: e.clientY });
         return;
       }
@@ -1910,21 +1953,33 @@ export default function App() {
       return;
     }
     if (dr.mode === "reorder") {
-      const rect = dropAreaRef.current?.getBoundingClientRect();
-      const outside = !rect || e.clientX < rect.left - STAGE_REORDER_ESCAPE_PX || e.clientX > rect.right + STAGE_REORDER_ESCAPE_PX
-        || e.clientY < rect.top - STAGE_REORDER_ESCAPE_PX || e.clientY > rect.bottom + STAGE_REORDER_ESCAPE_PX;
-      if (outside) { // 光标离开中转区：放弃重排、升级为原生拖出（单项，重排只处理单项拖动）
-        cancelStageReorder();
-        dr.mode = "native";
-        beginNativeDragOut([itemId]);
-        return;
-      }
+      // 续143：单项重排在界面开着时**永不自动升级为原生拖出**——光标可拖到中转区外（启动台/剪贴板/快捷入口等
+      // overlay 任意处），ghost 全程跟手、只做排序，拖回区内无缝续排。去外部的唯一触发是「拖动中按热键手动关界面
+      // → stage-drag-hotkey 升级为原生拖出 → 在目标处松手」（见上方 un10 监听器）。已删旧的「越界即升级」逻辑
+      // （原按 .drop-area 边界 + STAGE_REORDER_ESCAPE_PX 判定）：不小心蹭出边界再拖回会被误判成拖去外部而中止重排。
       updateStageReorder(e.clientX, e.clientY);
     }
-  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder, computeLassoSelection]);
+  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder, computeLassoSelection, snapshotLassoRects]);
   const handleStagePointerUp = useCallback((e: React.PointerEvent) => {
     try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
-    if (dragOutRef.current.mode === "reorder") commitStageReorder();
+    if (dragOutRef.current.mode === "reorder") {
+      // 续143：松手落点在启动台 → 加入启动台（而非提交排序回弹）。仅文件/文件夹项可入；非文件项或落在别处则正常提交排序。
+      // 命中用**整个启动台面板 .app-panel** 的矩形（.app-grid 在条目少时很小，落在面板空白处会判不中 → 回弹）。
+      const panel = (launcherDropRef.current?.closest(".app-panel") as HTMLElement | null) ?? launcherDropRef.current;
+      const lr = panel?.getBoundingClientRect();
+      const inLauncher = !!lr && e.clientX >= lr.left && e.clientX <= lr.right && e.clientY >= lr.top && e.clientY <= lr.bottom;
+      const item = dragOutRef.current.itemId != null ? stageRef.current.find(s => s.id === dragOutRef.current.itemId) : undefined;
+      const canLaunch = !!item && ((item.type === "file" && !!item.items?.[0]?.path) || item.type === "image"); // 文件/文件夹有实体路径；图片可物化成 PNG；文本无可启动实体
+      if (inLauncher && canLaunch) {
+        cancelStageReorder(); setStageReorderActiveNative(false); // 清 reorder 现场（无回弹，源卡回原位）；非升级终止需自清 Rust 让路标志
+        void dropStageItemToLauncher(item!);
+      } else if (inLauncher && item) { // 落在启动台但是文本项：启动台只收可打开/启动的东西，文本无实体，明确提示、不回弹
+        cancelStageReorder(); setStageReorderActiveNative(false);
+        showToast(t("文本项无法加入启动台"));
+      } else {
+        commitStageReorder();
+      }
+    }
     else if (dragOutRef.current.mode === "lasso") { // 卡片起手的框选收尾（镜像 handleLassoPointerUp 激活态）：清 class；框中为空则退出多选
       dropAreaRef.current?.classList.remove("lasso-active");
       setLassoState(s => ({ ...s, active: false }));
@@ -1932,7 +1987,7 @@ export default function App() {
     }
     dragOutRef.current.pressing = false; // 未超阈值=普通点击，交给 onClick（取走/选中）
     dragOutRef.current.mode = "idle";
-  }, [commitStageReorder]);
+  }, [commitStageReorder, cancelStageReorder, setStageReorderActiveNative, dropStageItemToLauncher, showToast, t]);
   // 安全网（续88）：capture 被外部原因（而非我们自己的 pointerup/releasePointerCapture）中途撤销时兜底清场。
   // 典型触发场景：重排阶段窗口本应由 light-dismiss/热键 monitor 让路（见 dragout.rs stage_reorder_active），
   // 但如果因未预见的原因窗口仍被意外隐藏，浏览器会静默丢弃 capture 而不发 pointerup——不兜底就会永久

@@ -199,10 +199,13 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 /* 拖拽期间只禁止文字选中，不强制抓手光标（WebView2 下 grabbing 会带来卡顿感） */
 .launcher-reordering,.launcher-reordering *{user-select:none!important;-webkit-user-select:none!important;}
 /* ghost 跟手卡片：fixed 悬浮副本，保持按下时的抓取偏移，像原卡片被拿起来 */
-.launcher-drag-ghost{position:absolute;pointer-events:none;box-sizing:border-box;transform:scale(1.05);transform-origin:center;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;background:color-mix(in srgb,var(--fill-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:none;opacity:0.72;will-change:left,top,transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
+/* 续143：跟手用 transform:translate3d（JS 每帧写 translate3d+scale），故 left/top 固定 0、will-change 只列 transform。 */
+.launcher-drag-ghost{position:absolute;left:0;top:0;pointer-events:none;box-sizing:border-box;transform:scale(1.05);transform-origin:center;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;background:color-mix(in srgb,var(--fill-2) 70%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);box-shadow:none;opacity:0.72;will-change:transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
 .launcher-drag-ghost .app-tile-icon{background:var(--fill-1);}
 .launcher-drag-ghost .app-tile-label{color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,0.35);}
-@keyframes launcher-ghost-pop{from{opacity:0;transform:scale(.92);}to{opacity:.72;transform:scale(1.05);}}
+/* 续143：opacity-only 入场——绝不在此动 transform。CSS 动画优先级高于 inline style，若 keyframe 含 transform，
+   会在起手 140ms 内盖掉 JS 逐帧写的 translate3d → ghost 头 140ms 不跟手。缺省 to 用元素自身 opacity（.72/.85 各自）。 */
+@keyframes launcher-ghost-pop{from{opacity:0;}}
 
 /* ── 中：文件中转区 + 快捷入口 ── */
 /* 横向 padding 下放给各子元素：让 .stage-section-header（自带 16px 横向 padding）直接贴面板边，
@@ -310,7 +313,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card.stage-dragging-src,.stage-item.stage-dragging-src{opacity:0;pointer-events:none;}
 .stage-card.stage-shift,.stage-item.stage-shift{transition:transform 200ms cubic-bezier(.2,.8,.2,1);will-change:transform;}
 .stage-reordering,.stage-reordering *{user-select:none!important;-webkit-user-select:none!important;}
-.stage-drag-ghost{position:absolute;pointer-events:none;box-sizing:border-box;transform:scale(1.04);box-shadow:0 6px 18px rgba(0,0,0,0.35);opacity:0.85;will-change:left,top;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
+/* 续143：跟手用 transform:translate3d（JS 每帧写 translate3d+scale），故 left/top 固定 0、will-change 只列 transform。 */
+.stage-drag-ghost{position:absolute;left:0;top:0;pointer-events:none;box-sizing:border-box;transform:scale(1.04);box-shadow:0 6px 18px rgba(0,0,0,0.35);opacity:0.85;will-change:transform;animation:launcher-ghost-pop 140ms cubic-bezier(.2,.8,.2,1);}
 
 /* 快捷入口芯片 */
 .shortcut-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 8px;}
