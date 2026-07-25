@@ -54,6 +54,13 @@ const MAX_ORIG_DIM: u32 = 4096;
 const CLIP_IMAGE_CACHE_MAX_BYTES: u64 = 500 * 1024 * 1024;
 /// 原图缓存 janitor 周期清理间隔（10 分钟）
 const CLIP_IMAGE_SWEEP_MS: u64 = 10 * 60 * 1000;
+/// 正在后台写盘的原图张数（续146d）。原图编码耗时可观（全屏截图实测约 0.7s，未优化构建下 3.3s），
+/// 而条目早已带着 orig_path 落盘——进程若在此刻退出，原图永久丢失、拖出/粘贴静默退化成缩略图。
+/// 退出前用它等一等（见 wait_pending_image_writes）。
+pub(crate) static PENDING_IMAGE_WRITES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// 退出时最多等多久（毫秒）——够写完一两张全屏截图，又不至于让退出显得卡死。
+const PENDING_WRITE_WAIT_MAX_MS: u64 = 3000;
 /// 原图缓存 janitor 起手延迟（5s）：错开 setup 同步 load_clip_history，防空 referenced 集误删全部
 const CLIP_IMAGE_SWEEP_INITIAL_MS: u64 = 5000;
 /// 图片去重的 aHash 汉明距离阈值
@@ -116,6 +123,7 @@ fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
     if let Some(ref p) = orig_path { entry["orig_path"] = serde_json::json!(p); }
     // 大图 detached 落盘原图（本路径无图片去重、entry 必入缓存 → 不产孤儿；spawn 即返回、不阻塞）
     if let Some(orig_img) = large_img_opt {
+        PENDING_IMAGE_WRITES.fetch_add(1, Ordering::Relaxed); // 续146d：先记账再 spawn，退出时可等
         std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, time));
     }
     println!("[clipbg] image {w}×{h} cached, large={is_large} (build_clip_entry path)");
@@ -459,6 +467,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 // 全部锁已释放：大图 detached 写盘（不阻塞本循环，防加宽采样塌缩窗口）
                 if let Some(orig_img) = large_img_opt {
                     let t = time;
+                    PENDING_IMAGE_WRITES.fetch_add(1, Ordering::Relaxed); // 续146d：先记账再 spawn
                     std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, t));
                 }
                 let _ = app_handle.emit("clipboard-update", entry);
@@ -583,6 +592,14 @@ fn save_clip_history(snapshot: Vec<serde_json::Value>) {
 /// 把原图 PNG 写到 clip_images/{time}.png（原子写 tmp→rename）。
 /// 在 detached 线程内调用，不持任何锁。>MAX_ORIG_DIM 时等比缩放后存。失败仅 eprintln。
 fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) {
+    // 计数守卫：编码/写盘中途任何 early-return 都要减回去，否则退出时会白等满超时
+    struct WriteGuard;
+    impl Drop for WriteGuard {
+        fn drop(&mut self) {
+            PENDING_IMAGE_WRITES.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+    let _wg = WriteGuard;
     let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
     let path = dir.join(format!("{time}.png"));
     let save_img = if w > MAX_ORIG_DIM || h > MAX_ORIG_DIM {
@@ -606,6 +623,24 @@ fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) 
         eprintln!("[clip_img] rename 失败 time={time}: {e}");
     } else {
         eprintln!("[clip_img] 原图已落盘 {time}.png ({w}×{h})");
+    }
+}
+
+/// 退出前等待后台原图写盘收尾（最多 PENDING_WRITE_WAIT_MAX_MS）。
+/// 只等、不阻断：超时就照常退出（丢一张原图 ≠ 值得卡住退出）。
+/// **救不了强杀**（`tauri dev` 重建时进程被直接终止），那种情况下原图仍会丢——属已知边界。
+pub(crate) fn wait_pending_image_writes() {
+    let t = std::time::Instant::now();
+    loop {
+        let n = PENDING_IMAGE_WRITES.load(Ordering::Relaxed);
+        if n == 0 {
+            return;
+        }
+        if t.elapsed().as_millis() >= PENDING_WRITE_WAIT_MAX_MS as u128 {
+            eprintln!("[clip_img] 退出前仍有 {n} 张原图未写完，超时放弃等待");
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
     }
 }
 
@@ -1653,5 +1688,39 @@ mod tests {
         signal_clip_event();
         assert!(wait_clip_event(&mut seen, 2000));
         assert_eq!(seen, current_clip_event_gen(), "代数未追平，下轮会空转");
+    }
+}
+
+#[cfg(test)]
+mod probe_png {
+    /// 探针（续146d）：量原图 PNG 编码耗时——它决定「orig_path 已落盘、文件却还没写完」这个
+    /// 危险窗口有多宽。窗口内进程退出 → 原图永久丢失，拖出/粘贴静默退化成 1024px 缩略图。
+    /// 跑：`cargo test --lib probe_png -- --ignored --nocapture`
+    ///
+    /// 实测（本机，全屏截图 3192×1970）：
+    /// - 依赖未优化：**3328 ms**
+    /// - png/miniz_oxide/flate2/image 开 opt-level=3（现设置）：**689 ms**，4.8×
+    ///
+    /// **`CompressionType::Fast` 已实测证伪、别再试**：耗时与体积与默认完全相同（3367ms/7237KB
+    /// vs 3195ms/7237KB），该参数在当前 image 版本下对本路径无效。真正的杠杆只有优化级别。
+    #[test]
+    #[ignore]
+    fn png_encode_cost_by_size() {
+        for (w, h) in [(1095u32, 631u32), (1512, 839), (3192, 1970)] {
+            // 造带图案的图：纯色会被压到接近 0，测不出真实代价
+            let mut buf = image::RgbaImage::new(w, h);
+            for (x, y, p) in buf.enumerate_pixels_mut() {
+                *p = image::Rgba([(x % 251) as u8, (y % 241) as u8, ((x ^ y) % 239) as u8, 255]);
+            }
+            let img = image::DynamicImage::ImageRgba8(buf);
+            let t = std::time::Instant::now();
+            let mut cur = std::io::Cursor::new(Vec::<u8>::new());
+            img.write_to(&mut cur, image::ImageFormat::Png).unwrap();
+            println!(
+                "{w}×{h}: 编码 {} ms, 产出 {} KB",
+                t.elapsed().as_millis(),
+                cur.into_inner().len() / 1024
+            );
+        }
     }
 }

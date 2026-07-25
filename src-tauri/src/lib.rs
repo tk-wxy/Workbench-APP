@@ -735,7 +735,7 @@ pub fn run() {
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
             apps::save_launcher_icons, apps::load_launcher_icons,
-            apps::save_stage_images, apps::load_stage_images,
+            apps::save_stage_images, apps::load_stage_images, apps::get_stage_image_thumb,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
@@ -795,7 +795,10 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "toggle" => tray_toggle(app),
-                        "quit" => app.exit(0),
+                        "quit" => {
+                            clipboard::wait_pending_image_writes(); // 续146d：别把正在写的原图丢了
+                            app.exit(0)
+                        }
                         _ => {}
                     }
                 })

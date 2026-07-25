@@ -108,6 +108,9 @@ const LAUNCHER_MAX = 200;
 /// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
 /// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
 const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
+/// stageThumbs 里给「中转 image 条目缩略图」用的键前缀（值是 stage_images/ 下的文件名，不是路径）。
+/// 与真实路径键共用同一张表，是为了复用它已有的 pending 去重与淘汰逻辑（续146c）。
+const STAGE_IMG_KEY = "simg:";
 const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
 
@@ -1276,14 +1279,22 @@ export default function App() {
     const launcherPaths = launcher
       .filter(it => it.kind === "file" && !!it.ext && IMG_EXTS.includes(it.ext.toLowerCase()))
       .map(it => it.path);
-    const paths = [...stagePaths, ...launcherPaths];
+    // 续146c：image 类条目（内容在 stage_images/）也走缩略图——卡片 72px 却渲染 1024px 原图
+    // （≈2.3MB 解码位图/张）是拖动掉帧/关闭迟缓的主因。键用 `simg:` 前缀与真实路径区分，
+    // 但**照样并入 paths**，好让下面那套 pending 去重与淘汰逻辑原样适用（无需第二套簿记）。
+    const stageImgKeys = stage
+      .filter(s => s.type === "image" && s.contentFile)
+      .map(s => STAGE_IMG_KEY + s.contentFile!);
+    const paths = [...stagePaths, ...launcherPaths, ...stageImgKeys];
     for (const p of paths) {
       if (stageThumbPendingRef.current.has(p)) continue;
       stageThumbPendingRef.current.add(p);
       (async () => {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          const url = await invoke<string>("get_stage_thumbnail", { path: p });
+          const url = p.startsWith(STAGE_IMG_KEY)
+            ? await invoke<string>("get_stage_image_thumb", { file: p.slice(STAGE_IMG_KEY.length) })
+            : await invoke<string>("get_stage_thumbnail", { path: p });
           setStageThumbs(prev => ({ ...prev, [p]: url }));
         } catch { /* 失败：保留 pending 标记不再重试，显示图标兜底 */ }
       })();
@@ -1656,7 +1667,12 @@ export default function App() {
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
   const addToStage = useCallback(async (c:ClipItem) => {
     const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
-    if (exists) return;
+    // 续146c：原先重复项**静默 return**，用户看到的就是「拖过去没反应」，无从分辨是重复还是坏了。
+    if (exists) {
+      const nm = c.type==="text" ? (c.content||"").trim().slice(0,20) : c.type==="image" ? t("图片") : (c.items?.[0]?.name || t("文件"));
+      showToast(t("已在{where}中：{name}", { where: t("中转站"), name: nm })); // 复用既有词条，不新增 key
+      return;
+    }
     let item = clipToStage(c);
     if (c.type==="file" && (c.count??0)<=1 && c.items?.[0]?.path && item.items?.[0]) {
       try {
@@ -1666,7 +1682,7 @@ export default function App() {
       } catch {}
     }
     saveStage([item, ...stage].slice(0,stageMax));
-  }, [stage,saveStage,stageMax]);
+  }, [stage,saveStage,stageMax,showToast,t]);
   // 清拖拽现场（**不投放**）：卸载 ghost + 复位光标/高亮。
   // 凡非「正常松手」的收尾都必须走这里——热键关页 / Esc / pointercancel / 丢 capture。
   // 续109 bug 根因：hotkey-hide 复位了重排/框选/多选等全部现场，唯独漏了剪贴板拖拽 →
@@ -2254,19 +2270,20 @@ export default function App() {
   copyAndPasteRef.current = copyAndPaste; // 供 activateEnh（定义在前）对剪贴板结果取走粘贴，避开 TDZ
   // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
   const copyToClipboard = useCallback(async (item:ClipItem) => {
-    try {
-      await writeItemToClipboard(item);
-      setCopiedTime(item.time);
-      setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
-    } catch {}
+    setCopiedTime(item.time); // 续146c：同 copyStageToClipboard，✓ 先亮再干活（图片项的写入耗时可观）
+    setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
+    try { await writeItemToClipboard(item); }
+    catch { setCopiedTime(t=>t===item.time?null:t); }
   }, []);
   // 中转条目「复制到剪贴板」：同上，独立 ✓ 反馈（按 id）
+  // 续146c：✓ **先亮再干活**。原先 await 完写剪贴板才置 ✓——图片项要把 ~300KB base64 送过 IPC、
+  // Rust 再解码写剪贴板，于是「点了没反应」（文本项因为快才显得正常）。✓ 反馈的语义是「你这一下点到了」，
+  // 不是「剪贴板已写完」，故乐观置位；真失败时立刻撤掉 ✓，不会骗人。
   const copyStageToClipboard = useCallback(async (s:StageItem) => {
-    try {
-      await writeItemToClipboard(s);
-      setCopiedStageId(s.id);
-      setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
-    } catch {}
+    setCopiedStageId(s.id);
+    setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
+    try { await writeItemToClipboard(s); }
+    catch { setCopiedStageId(x=>x===s.id?null:x); }
   }, []);
 
   // 中转区单击 handler
@@ -2683,7 +2700,12 @@ export default function App() {
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         {dotEl}
-                        {s.content
+                        {/* 续146c：优先用 160px 缩略图；原图（content，1024px）只在取走/复制/拖出时用，
+                            绝不再直接塞进 <img>——72px 的卡片渲染 1024px 图 = 每张 ≈2.3MB 解码位图（续99b 同款坑）。
+                            缩略图未就绪/生成失败时才回退原图，保证不出现空白卡。 */}
+                        {(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile])
+                          ? <img className="cover" draggable={false} src={stageThumbs[STAGE_IMG_KEY + s.contentFile]} alt=""/>
+                          : s.content
                           ? <img className="cover" draggable={false} src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
                           : <FileGlyph isImage size={34}/>}
                       </div>
@@ -2728,7 +2750,7 @@ export default function App() {
                   return (
                   <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）")))}>
                     {s.type==="image"
-                      ?<img className="stage-thumb" draggable={false} src={s.content} alt=""/>
+                      ?<img className="stage-thumb" draggable={false} src={(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content} alt=""/> /* 续146c：同方格视图，优先 160px 缩略图 */
                       :s.type==="file" && s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path]
                         ?<img className="stage-thumb" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/> /* 续99e：列表视图图片文件缩略图，与方格视图一致（复用同一 stageThumbs 缓存）*/
                         :s.type==="file" && s.items?.[0]?.icon
