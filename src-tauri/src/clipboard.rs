@@ -501,8 +501,25 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
     });
 }
 
+/// setup 阶段**同步**读 store JSON（平凡顶层 KV）取 `clip-cache-max`。任何失败/越界 → None，
+/// 调用方保留 CLIP_CACHE_MAX_DEFAULT。与 lib.rs `read_combo_from_store`（热键）同款做法。
+///
+/// **为什么必须同步直读文件、而不能等前端 invoke**（续145 数据丢失根因，别改回去）：
+/// 前端 store 要等 WebView 起来才 load，`set_clip_cache_max` 因此**晚于 setup 几百毫秒**到达；
+/// 而 `load_clip_history` 在 setup 就跑，那时 CLIP_CACHE_MAX_RUNTIME 还是默认 20 →
+/// 把 100 条历史截成 20 条 → 随后**任何一次落盘**（前端那次 set_clip_cache_max 自己就会落盘，
+/// 或任意一次复制）把 20 条写回磁盘 → 每次重启永久丢 80 条，且零报错。
+fn read_clip_cache_max_from_store(data_dir: &std::path::Path) -> Option<usize> {
+    let text = std::fs::read_to_string(data_dir.join("workbench-data.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let n = v.get("clip-cache-max")?.as_u64()? as usize;
+    // 与 set_clip_cache_max 的 clamp 同界；越界视为脏值 → None（保留默认，绝不拿脏值去截历史）
+    (10..=100).contains(&n).then_some(n)
+}
+
 /// 启动时从磁盘读取历史填充 CLIP_CACHE。必须在 start_clipboard_monitor 之前调用。
 /// 文件不存在 → 无历史，静默跳过。解析失败 → 备份损坏文件，以空历史启动。
+/// ⚠ 末尾按 CLIP_CACHE_MAX_RUNTIME 截断 → **调用前必须已落地真实上限**（见 init 步骤 2）。
 fn load_clip_history() {
     let Some(path) = CLIP_HISTORY_PATH.get() else { return; };
     let data = match std::fs::read_to_string(path) {
@@ -533,8 +550,14 @@ fn load_clip_history() {
             }
             cache.push(item);
         }
+        let read = cache.len();
         cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
-        eprintln!("[clip] loaded {} item(s) from history", cache.len());
+        // 两个数都打：截断会在下一次落盘时把磁盘历史一起削掉（不可逆），一旦 read>kept
+        // 而用户并没调低上限，就是「上限没落地」类 bug 复发（续145），日志里一眼可见。
+        eprintln!(
+            "[clip] loaded {} item(s) from history (read {}, cap {})",
+            cache.len(), read, CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -1383,9 +1406,10 @@ pub(crate) fn save_image_as_launcher_file(
 }
 
 // ── 启动入口（封装 setup 时序，顺序不可变）──────────────────────
-/// 剪贴板子系统初始化：路径 → load_clip_history → start_clipboard_monitor → janitor。
-/// 顺序绝对不能变：① 路径必须最先（load/save 依赖 OnceLock）；② load 必须在 monitor 之前
-/// （否则监听写盘会用空缓存覆盖磁盘历史）；③ janitor 靠起手 5s 软时序错开 load，防误删原图。
+/// 剪贴板子系统初始化：路径 → 上限 → load_clip_history → start_clipboard_monitor → janitor。
+/// 顺序绝对不能变：① 路径必须最先（load/save 依赖 OnceLock）；② **上限必须先于 load**
+/// （load 末尾按上限截断，用默认 20 去截会永久削掉磁盘历史，续145）；③ load 必须在 monitor 之前
+/// （否则监听写盘会用空缓存覆盖磁盘历史）；④ janitor 靠起手 5s 软时序错开 load，防误删原图。
 pub(crate) fn init(app: &AppHandle, data_dir: &std::path::Path) {
     // 1. 路径初始化（必须最先）
     let _ = std::fs::create_dir_all(data_dir);
@@ -1394,14 +1418,20 @@ pub(crate) fn init(app: &AppHandle, data_dir: &std::path::Path) {
     let _ = std::fs::create_dir_all(&image_dir);
     let _ = CLIP_HISTORY_PATH.set(history_path);
     let _ = CLIP_IMAGE_DIR.set(image_dir);
-    // 2. 读历史（必须在 monitor 之前，否则监听写盘会覆盖磁盘历史）
+    // 2. 历史上限同步落地（必须在 load 之前）：前端 set_clip_cache_max 晚几百毫秒才到，
+    //    等它就来不及了——load 已用默认 20 截过，随后任一次落盘即把磁盘历史永久削到 20。
+    if let Some(n) = read_clip_cache_max_from_store(data_dir) {
+        CLIP_CACHE_MAX_RUNTIME.store(n, Ordering::Relaxed);
+        eprintln!("[clip] 历史上限按 store 落地：{n}");
+    }
+    // 3. 读历史（必须在 monitor 之前，否则监听写盘会覆盖磁盘历史）
     load_clip_history();
-    // 3. 启动事件通知源（续129）。放在 monitor 之前只为让 monitor 一起手就有事件可等；
+    // 4. 启动事件通知源（续129）。放在 monitor 之前只为让 monitor 一起手就有事件可等；
     //    二者无强时序依赖——它失败也只是 monitor 退回 CLIP_POLL_MS 轮询。
     start_clipboard_listener();
-    // 4. 启动监听（必须在 load 之后）
+    // 5. 启动监听（必须在 load 之后）
     start_clipboard_monitor(app.clone());
-    // 5. 启动 janitor（sleep CLIP_IMAGE_SWEEP_INITIAL_MS=5s 软时序错开，保证 load 完成再 sweep）
+    // 6. 启动 janitor（sleep CLIP_IMAGE_SWEEP_INITIAL_MS=5s 软时序错开，保证 load 完成再 sweep）
     start_clip_image_janitor();
 }
 
@@ -1414,6 +1444,41 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 续145 数据丢失根因的回归钉：历史上限必须能在 setup 阶段**直接从 store 文件**读出来。
+    /// 这条一旦破（读不出 → None → 保留默认 20），`load_clip_history` 就会把用户设成 100 的
+    /// 历史截成 20，并在下一次落盘时永久写回磁盘——零报错、每次重启丢一批。
+    #[test]
+    fn clip_cache_max_read_from_store_file() {
+        let dir = std::env::temp_dir().join(format!("wb_clipmax_test_{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = dir.join("workbench-data.json");
+
+        // 正常值：读得出、原样返回（这是修复前拿不到、于是退回 20 的那个值）
+        std::fs::write(&store, r#"{"theme":"dark","clip-cache-max":100}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), Some(100));
+
+        // 下界/上界都算合法（与 set_clip_cache_max 的 clamp 同界）
+        std::fs::write(&store, r#"{"clip-cache-max":10}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), Some(10));
+
+        // 越界/类型不对/键缺失/文件损坏 → None，调用方保留默认，绝不拿脏值去截历史
+        std::fs::write(&store, r#"{"clip-cache-max":9}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None, "越界值不得被采纳");
+        std::fs::write(&store, r#"{"clip-cache-max":101}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None, "越界值不得被采纳");
+        std::fs::write(&store, r#"{"clip-cache-max":"100"}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None, "字符串不得被当数字");
+        std::fs::write(&store, r#"{"theme":"dark"}"#).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None, "键缺失 → 默认");
+        std::fs::write(&store, "{ not json").unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None, "损坏文件 → 默认");
+
+        // 文件不存在 → None（首次安装）
+        std::fs::remove_file(&store).unwrap();
+        assert_eq!(read_clip_cache_max_from_store(&dir), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 续129 事件驱动的核心不变量：**在 wait 之前就发生的变化不能被吞掉**。
