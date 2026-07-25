@@ -921,6 +921,27 @@ pub fn load_stage_images() -> std::collections::HashMap<String, String> {
     STAGE_IMAGE_DIR.get().map(|d| load_b64_pngs(d)).unwrap_or_default()
 }
 
+/// 中转站 image 条目的**小缩略图**（160px，复用 get_stage_thumbnail 的落盘缓存）。
+///
+/// 续146c：卡片只有 72px，却一直直接把 `content` 那张 **1024px 原图**塞进 `<img>`
+/// ——单张解码位图 ≈2.3MB，几张就让拖动掉帧、关闭迟缓。这正是**续99b 给 file 类条目治过的坑**
+/// （"WebView 常驻全分辨率解码位图 → 图多即卡顿"），image 类当时治不了：它没有实体文件，
+/// 而 `get_stage_thumbnail` 是按路径工作的。续146b 把 content 落成了 stage_images/ 下的 PNG，
+/// 这条路才通——于是 image 类终于能复用同一套缩略图机制。
+#[tauri::command]
+pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
+    let dir = STAGE_IMAGE_DIR.get().ok_or("stage_images 目录未初始化")?;
+    // 只收纯文件名：杜绝 `../` 之类跳出目录（入参来自前端，按不可信处理）
+    if file.is_empty() || file.contains('/') || file.contains('\\') || file.contains("..") {
+        return Err("非法文件名".into());
+    }
+    let p = dir.join(&file);
+    if !p.is_file() {
+        return Err("文件不存在".into());
+    }
+    get_stage_thumbnail(p.to_string_lossy().into_owned())
+}
+
 /// 初始化启动台/中转站资产目录 + 起孤儿回收线程。setup 时调用一次。
 pub(crate) fn init_launcher_assets(data_dir: &std::path::Path) {
     let icon_dir = data_dir.join("launcher_icons");

@@ -71,3 +71,26 @@ lto = "fat"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# 续146d：图像编解码/压缩这几个依赖单独开优化。
+# 根因：全屏截图（3192×1970）的原图 PNG 编码在未优化构建下要 ~3.3s，而这段时间里条目已带着
+# orig_path 落了盘、文件却还没写完——进程此刻退出/重启，原图就永久丢失（拖出/粘贴静默退化成
+# 1024px 缩略图）。编码在 detached 线程、不能改成同步（会加宽剪贴板采样塌缩窗口，见 CLAUDE 铁律），
+# 故只能把窗口本身压小。CompressionType::Fast 实测零收益（同耗时同体积），真正的杠杆是优化级别。
+# 只点名这几个包：其余依赖仍按各 profile 原设置（release 的 opt-level="z" 体积目标不受影响）。
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.release.package.png]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.flate2]
+opt-level = 3
+[profile.release.package.image]
+opt-level = 3
