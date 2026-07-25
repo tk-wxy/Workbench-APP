@@ -1593,7 +1593,7 @@ export default function App() {
     if (clipDragRef.current?.active) suppressClickRef.current = true;
     clipDragRef.current = null;
     document.getElementById("overlay")?.classList.remove("dragging");
-    dropAreaRef.current?.classList.remove("drag-over");
+    dropAreaRef.current?.closest(".center-panel")?.classList.remove("drag-over"); // 续144：高亮挂整栏面板
     setClipDragItem(null);
     if (clearNativeFlag) setClipDragActiveNative(false);
   }, [setClipDragActiveNative]);
@@ -1613,9 +1613,11 @@ export default function App() {
     if (!ds.active) {
       if (Math.hypot(e.clientX - ds.originX, e.clientY - ds.originY) < DRAG_THRESHOLD_PX) return;
       ds.active = true;
-      // 落点矩形在拖拽全程不变（.drop-area 为 flex:1 定尺、不随内容/滚动移动）→ 激活时快照一次，
+      // 落点矩形在拖拽全程不变（.center-panel 固定 800px、满栏高，不随内容/滚动移动）→ 激活时快照一次，
       // 避免每次 move 都 getBoundingClientRect 与 classList 写形成「写后读」强制同步布局。
-      ds.dropRect = dropAreaRef.current?.getBoundingClientRect() ?? null;
+      // 续144：从 .drop-area 改为**整栏 .center-panel**——与蓝框高亮范围一致（含标题行/快捷入口行），
+      // 否则「整栏亮蓝、只有中间能放」会让落在标题行/快捷入口行的松手静默失败。
+      ds.dropRect = (dropAreaRef.current?.closest(".center-panel") as HTMLElement | null)?.getBoundingClientRect() ?? null;
       document.getElementById("overlay")?.classList.add("dragging"); // 防泛蓝 + grabbing 光标
       setClipDragItem(ds.item); // 全程唯一一次「挂载 ghost」渲染
       // 续110：告知 Rust 剪贴板纯 JS 拖动已激活 → light-dismiss 让路、热键 monitor 改 emit clip-drag-hotkey。
@@ -1626,7 +1628,7 @@ export default function App() {
     if (g) g.style.transform = `translate3d(${e.clientX + 12}px,${e.clientY + 12}px,0)`;
     const r = ds.dropRect;
     const over = !!r && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
-    dropAreaRef.current?.classList.toggle("drag-over", over);
+    dropAreaRef.current?.closest(".center-panel")?.classList.toggle("drag-over", over); // 续144：高亮挂整栏面板
   }, [setClipDragActiveNative]);
   // 拖拽结束：仅在激活且落点命中中转区时入中转（不粘贴）；未激活则放手让 onClick 正常粘贴。
   // 落点只认中转区——落在启动台/剪贴板/空白一律无操作（拖拽的唯一功能就是进中转区）。

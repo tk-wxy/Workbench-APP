@@ -357,15 +357,22 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 /* ── 剪贴板卡片长按拖拽到中转区 ── */
 /* 拖拽期间：禁文字选中（防泛蓝）+ 抓取光标 */
 #overlay.dragging{user-select:none;-webkit-user-select:none;cursor:grabbing;}
-/* 中转区接收高亮 */
-.drop-area.drag-over{border:2px dashed var(--accent);background:var(--accent-wash);transition:background 80ms;}
 /* OLE 拖入落地闪烁确认（200ms）——仅启动台保留（.app-grid）；中转区（.drop-area）已去掉：
    卡片冒出即确认，且与缩略图生成同窗口重合会显得像闪 bug（续99d，染色测试确认 drop-flash 是唯一来源）*/
 .app-grid.drop-flash{animation:drop-flash 200ms ease-out;}
 @keyframes drop-flash{0%{background:rgba(0,120,212,0.18);}100%{background:transparent;}}
-/* 外部文件拖入窗口时：启动器和中转区双区悬停高亮（box-shadow 不破坏 overflow/layout） */
-.file-drag-active .app-panel{box-shadow:inset 0 0 0 2px var(--accent);background:var(--accent-wash);transition:box-shadow 80ms,background 80ms;}
-.file-drag-active .drop-area{box-shadow:inset 0 0 0 2px var(--accent);background:var(--accent-wash);border-radius:var(--radius);transition:box-shadow 80ms,background 80ms;}
+/* ── 拖入接收高亮：**只此一套写像**（续144）──
+   两个来源共用：① 外部文件拖入窗口（#overlay.file-drag-active，启动台+中转站同时亮，示意两个落点）；
+   ② 剪贴板条目拖到中转站（.center-panel.drag-over，命中才亮）。原先 ② 是 2px dashed border，与 ① 的
+   inset 实线不同族，已统一。
+   **必须用 inset box-shadow、别改回 border**：这两个容器默认无 border，加 2px border 会撑大盒模型 →
+   高亮出现/消失时内部内容跳 2px（原 .drop-area.drag-over 的实际症状）；inset 阴影绘制在盒内，零布局影响。
+   **范围 = 整栏面板**（.app-panel / .center-panel），不是内部滚动区（.app-grid / .drop-area）——
+   两栏对称，且含标题行/底部快捷入口行；中转站的 drop 命中矩形同样取 .center-panel（见 App.tsx
+   handleClipPointerMove），高亮范围与可落点范围一致。 */
+.file-drag-active .app-panel,
+.file-drag-active .center-panel,
+.center-panel.drag-over{box-shadow:inset 0 0 0 2px var(--accent);background:var(--accent-wash);transition:box-shadow 80ms,background 80ms;}
 /* 跟手克隆 */
 /* 每帧移动 → ① 不加 backdrop-filter（见 --ghost-bg 注释）；② 跟手用 transform 而非 left/top：
    transform 是合成器属性，逐帧写不触发布局/重绘（left/top 每帧都要重算布局再重绘）。
