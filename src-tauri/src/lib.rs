@@ -735,6 +735,7 @@ pub fn run() {
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
             apps::save_launcher_icons, apps::load_launcher_icons,
+            apps::save_stage_images, apps::load_stage_images,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,

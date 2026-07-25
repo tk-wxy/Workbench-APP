@@ -23,7 +23,9 @@ interface FileItem { path: string; name: string; ext: string; isImage: boolean; 
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
-interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
+// content：text=正文；image=base64 图片。**image 的 content 是内存态**——落盘前被 dehydrateStage
+// 摘掉换成 contentFile（stage_images/ 下的文件名），载入时补回（续146b）。消费方一律只读内存态。
+interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; contentFile?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
 type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 type TFn = ReturnType<typeof makeT>;
@@ -411,12 +413,47 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ const loaded=savedStage.slice(0,stageMaxLoaded); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ let items=savedLauncher.slice(0,LAUNCHER_MAX); /* 续146 补水：iconFile → data URL（老条目仍内嵌 icon，原样可用，由下方迁移 effect 搬走） */ if(items.some(it=>it.iconFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const iconMap=await invoke<Record<string,string>>("load_launcher_icons"); /* 文件还在→补回 icon；文件已不在（手动删/异常清理）→ 连 iconFile 一起摘掉：否则该条目「有 iconFile 却永远补不出 icon」，图标回填每次启动白跑一轮、且因 dehydrate 认旧 iconFile 而永远存不下来 */ items=items.map(it=>{ if(!it.iconFile) return it; const hit=iconMap[it.iconFile]; if(hit) return {...it,icon:hit}; const {iconFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 iconFile，下次启动再试 */} } items.forEach(it=>{ if(it.iconFile) launcherIconFileRef.current.set(it.id,it.iconFile); }); setLauncher(items); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); /* 续146：清掉已删功能残留的死 key（plugin-store 不回收未知 key，会一直躺在 JSON 里） */ let pruned=false; for(const k of DEAD_STORE_KEYS){ try{ if(await s.delete(k)) pruned=true; }catch{} } if(pruned){ try{ await s.save(); }catch{} } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ let loaded=savedStage.slice(0,stageMaxLoaded); /* 续146b 补水：contentFile → data URL（老条目仍内嵌 content，原样可用，由迁移 effect 搬走） */ if(loaded.some(it=>it.contentFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const imgMap=await invoke<Record<string,string>>("load_stage_images"); /* 文件还在→补回 content；已不在→连 contentFile 一起摘掉（同 iconFile 那条退化路径） */ loaded=loaded.map(it=>{ if(!it.contentFile) return it; const hit=imgMap[it.contentFile]; if(hit) return {...it,content:hit}; const {contentFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 contentFile，下次启动再试 */} } loaded.forEach(it=>{ if(it.contentFile) stageContentFileRef.current.set(it.id,it.contentFile); }); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ let items=savedLauncher.slice(0,LAUNCHER_MAX); /* 续146 补水：iconFile → data URL（老条目仍内嵌 icon，原样可用，由下方迁移 effect 搬走） */ if(items.some(it=>it.iconFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const iconMap=await invoke<Record<string,string>>("load_launcher_icons"); /* 文件还在→补回 icon；文件已不在（手动删/异常清理）→ 连 iconFile 一起摘掉：否则该条目「有 iconFile 却永远补不出 icon」，图标回填每次启动白跑一轮、且因 dehydrate 认旧 iconFile 而永远存不下来 */ items=items.map(it=>{ if(!it.iconFile) return it; const hit=iconMap[it.iconFile]; if(hit) return {...it,icon:hit}; const {iconFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 iconFile，下次启动再试 */} } items.forEach(it=>{ if(it.iconFile) launcherIconFileRef.current.set(it.id,it.iconFile); }); setLauncher(items); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); /* 续146：清掉已删功能残留的死 key（plugin-store 不回收未知 key，会一直躺在 JSON 里） */ let pruned=false; for(const k of DEAD_STORE_KEYS){ try{ if(await s.delete(k)) pruned=true; }catch{} } if(pruned){ try{ await s.save(); }catch{} } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
 
-  const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
+  // 续146b：id → stage_images/ 文件名（同 launcherIconFileRef，只为省掉重复 invoke，不参与渲染）
+  const stageContentFileRef = useRef<Map<number,string>>(new Map());
+  // 续146b 脱水：image 条目的 base64 `content` 落成 stage_images/ 下的 PNG，持久化形态只留 contentFile。
+  // 实测单条 image 内嵌就 319.9KB，而 plugin-store 是**整文件重写** → 每次中转拖动/固定/排序都在重写它。
+  // **只动 image**：text 的 content 就是正文（几 KB，落文件反而更糟）、file 靠 items[].path 本就无内嵌。
+  // 消费方（copyAndPaste / 拖出 / 渲染 / 去重）读的都是**内存态**，故与启动台图标同理：渲染与消费链零改动。
+  const dehydrateStage = useCallback(async (list:StageItem[]):Promise<StageItem[]> => {
+    const known = stageContentFileRef.current;
+    const pending = list.map((it,i)=>({it,i})).filter(({it})=> it.type==="image" && it.content && !it.contentFile && !known.has(it.id));
+    if (pending.length) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const files = await invoke<(string|null)[]>("save_stage_images", { images: pending.map(({it})=>it.content!) });
+        pending.forEach(({it},k)=>{ const f=files[k]; if(f) known.set(it.id,f); });
+      } catch {}
+    }
+    return list.map(it => {
+      if (it.type !== "image") return it;
+      const contentFile = it.contentFile ?? known.get(it.id);
+      if (!contentFile) return it;                 // 落盘失败 → 原样带 content 落盘（宁可大，不可丢图）
+      const { content:_omit, ...rest } = it;
+      return { ...rest, contentFile };
+    });
+  }, []);
+  // 续146b：中转条目落盘的**唯一出口**。所有写 `stage-items` 的地方都必须走它——
+  // 直接 `store.set("stage-items", list)` 会把内存态里内嵌的 base64 content 原样写回 JSON、抵消脱水
+  // （5 处监听器为避开闭包过期而用 storeRef 直写，正是这种情况，已全部改道到此）。
+  // 用 storeRef 而非 store state + 依赖恒稳的 dehydrateStage → 自身标识稳定，[]-deps 监听器可安全捕获。
+  const persistStage = useCallback(async (list:StageItem[]) => {
+    const s = storeRef.current; if(!s) return;
+    try { await s.set("stage-items", await dehydrateStage(list)); await s.save(); } catch {}
+  }, [dehydrateStage]);
+  const saveStage = useCallback(async (list:StageItem[]) => {
+    setStage(list);                                 // 先上屏（内存态保留 content）
+    await persistStage(list);
+  }, [persistStage]);
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
   const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
   // 续146：id → launcher_icons/ 文件名。存在 ref 而非 state——它只服务于「下次落盘不必重复 invoke」，
@@ -443,12 +480,15 @@ export default function App() {
       return { ...rest, iconFile };
     });
   }, []);
+  // 启动台落盘的**唯一出口**（同 persistStage 的理由：绕过它直写会把内嵌 base64 图标写回 JSON）。
+  const persistLauncher = useCallback(async (list:LauncherItem[]) => {
+    const s = storeRef.current; if(!s) return;
+    try { await s.set("launcher-items", await dehydrateLauncher(list)); await s.save(); } catch {}
+  }, [dehydrateLauncher]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => {
     setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
-    if(!store) return;
-    await store.set("launcher-items", await dehydrateLauncher(list));
-    await store.save();
-  }, [store, dehydrateLauncher]);
+    await persistLauncher(list);
+  }, [persistLauncher]);
   // 启动台文件/文件夹图标回填：历史存的旧条目 icon 为 null（走 Solar 兜底），这里补取系统默认图标（与桌面一致）。
   // tried 集合防止对提取失败（返回 null）的路径反复 invoke；每个缺图路径只尝试一次。
   const launcherIconTriedRef = useRef<Set<string>>(new Set());
@@ -485,6 +525,15 @@ export default function App() {
     launcherMigratedRef.current = true;
     saveLauncher(launcher);
   }, [launcher, store, saveLauncher]);
+
+  // 续146b 同款一次性迁移：中转站 image 条目的内嵌 content 搬进 stage_images/。
+  const stageMigratedRef = useRef(false);
+  useEffect(() => {
+    if (stageMigratedRef.current || !store || !stage.length) return;
+    if (!stage.some(it => it.type==="image" && it.content && !it.contentFile && !stageContentFileRef.current.has(it.id))) return;
+    stageMigratedRef.current = true;
+    saveStage(stage);
+  }, [stage, store, saveStage]);
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
   const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
   const changeStagePersist = useCallback(async (v:boolean) => { setStagePersist(v); if(store){ await store.set("stage-persist",v); await store.save(); } }, [store]);
@@ -551,7 +600,7 @@ export default function App() {
             }
             next = next.slice(0, LAUNCHER_MAX);
             setLauncher(next);
-            if (storeRef.current) { try { await storeRef.current.set("launcher-items", next); await storeRef.current.save(); } catch {} }
+            await persistLauncher(next); // 续146b：改道唯一出口（脱水后落盘）
             launcherDropRef.current?.classList.add("drop-flash");
             setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
           } else {
@@ -567,7 +616,7 @@ export default function App() {
             }
             next = next.slice(0, stageMaxRef.current);
             setStage(next);
-            if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+            await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
             // 续99d：中转区不再播落地闪烁（drop-flash）——卡片冒出即确认，且与缩略图生成窗口重合像闪 bug（染色确认根因）。启动台仍保留（走 .app-grid.drop-flash）。
           }
           setFileDragOver(false);
@@ -634,7 +683,7 @@ export default function App() {
             if (!stagePersistRef.current && !item.pinned) { // 续99：固定条目豁免自动移除
               const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
               setStage(next);
-              if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+              await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
             }
             setStageSel(new Set<number>());
             setStageMultiselect(false);
@@ -648,7 +697,7 @@ export default function App() {
               if (ids.size) {
                 const next = stageRef.current.filter(s => !ids.has(s.id));
                 setStage(next);
-                if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+                await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
               }
             }
             setStageSel(new Set<number>());
@@ -1279,7 +1328,7 @@ export default function App() {
         // 函数式更新读最新 stage；storeRef 落盘（复用 files-dropped 同款 idiom，避免 saveStage 的闭包过期）。
         setStage(prev => {
           const next = prev.filter(s => !removeIds.has(s.id));
-          if (storeRef.current) { storeRef.current.set("stage-items", next).then(() => storeRef.current!.save()).catch(() => {}); }
+          void persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
           return next;
         });
       }
@@ -1935,7 +1984,7 @@ export default function App() {
     if ((res === "added" || res === "duplicate") && !stagePersistRef.current && !item.pinned) { // move 语义：非持久/非固定则从中转移除
       const next = stageRef.current.filter(s => s.id !== item.id);
       setStage(next);
-      if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+      await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
     }
   }, [addFsToLauncher, toastAddResult, showToast, t]);
   const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
