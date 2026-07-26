@@ -2118,10 +2118,25 @@ export default function App() {
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:s.items![0].path})).catch(()=>{});
   }, []);
-  const deleteClipItem = useCallback(async (time:number) => {
-    setClipboard(prev => prev.filter(c => c.time !== time));
-    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("delete_clipboard_item",{time}); } catch{}
+  // 从 Rust 权威缓存（CLIP_CACHE）回拉历史覆盖前端 state（续147）。删除/清空乐观改前端后若落地失败，
+  // 用它把前端拽回权威真相，避免「前端删了、磁盘没删 → 重启复活」的静默分叉。
+  const refreshClipboard = useCallback(async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
+    setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
   }, []);
+  const deleteClipItem = useCallback(async (time:number) => {
+    setClipboard(prev => prev.filter(c => c.time !== time)); // 乐观：先从界面移除
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      await invoke("delete_clipboard_item",{time}); // 命令现返回 Result：落盘失败会 reject → 落入 catch
+    } catch {
+      // 删除未落地（IPC 失败 / 锁毒化 / 落盘失败）→ 前端已移除会与 Rust 权威缓存分叉、重启复活。
+      // 从权威缓存回同步（该条目会重新出现）+ 提示，绝不留静默分叉。
+      try { await refreshClipboard(); } catch {}
+      showToast(t("删除失败"));
+    }
+  }, [refreshClipboard, t]);
   const changeTheme = useCallback(async (t:"dark"|"light"|"system") => {
     setTheme(t);
     if(store){ await store.set("theme",t); await store.save(); }
@@ -2190,9 +2205,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [recording]);
   const clearClipboard = useCallback(async () => {
-    setClipboard([]);
-    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
-  }, []);
+    setClipboard([]); // 乐观：先清界面
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      await invoke("clear_clipboard_history"); // 命令现返回 Result：落盘失败会 reject → 落入 catch
+    } catch {
+      // 清空未落地 → 前端已空会与权威缓存分叉、重启复活。回同步（条目重现）+ 提示（续147）。
+      try { await refreshClipboard(); } catch {}
+      showToast(t("清空失败"));
+    }
+  }, [refreshClipboard, t]);
   const clearStage = useCallback(async () => { await saveStage([]); }, [saveStage]);
   const clearLauncher = useCallback(async () => { await saveLauncher([]); }, [saveLauncher]);
   // ── 搜索引擎切换 + 额外目录配置（续57）：持久化 store + 运行时 invoke 应用 ──

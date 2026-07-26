@@ -73,6 +73,8 @@ export const EN_DICT: Record<string, string> = {
   "{where}已满（{n}）": "{where} is full ({n})",
   "已复制到剪贴板": "Copied to clipboard",
   "添加失败": "Failed to add",
+  "删除失败": "Delete failed",
+  "清空失败": "Clear failed",
   "或收藏任意文件 / 文件夹：": "Or add any file / folder:",
   "浏览文件…": "Browse Files…",
   "浏览文件夹…": "Browse Folders…",

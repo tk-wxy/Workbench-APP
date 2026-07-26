@@ -63,6 +63,11 @@ pub(crate) static PENDING_IMAGE_WRITES: std::sync::atomic::AtomicUsize =
 const PENDING_WRITE_WAIT_MAX_MS: u64 = 3000;
 /// 原图缓存 janitor 起手延迟（5s）：错开 setup 同步 load_clip_history，防空 referenced 集误删全部
 const CLIP_IMAGE_SWEEP_INITIAL_MS: u64 = 5000;
+/// 原图临时文件（{time}.png.tmp）保护期（60s，续146d 竞态修复）：save_clip_image_to_disk 走 tmp→rename
+/// 原子写，中间态 .tmp 永不在 referenced 集里 → 会落进孤儿分支。若 sweep 恰插在 write 与 rename
+/// 之间就会删掉在写的 .tmp、令 rename 失败、原图丢。年轻于此的 .tmp 视为「正在写盘」跳过；
+/// 老于此的视为崩溃遗留可清（否则光跳过会永久泄漏）。写盘实测 <1s，60s 有充分余量。
+const CLIP_TMP_GRACE_MS: u64 = 60_000;
 /// 图片去重的 aHash 汉明距离阈值
 const AHASH_MAX_HAMMING: u32 = 5;
 /// 图片去重的尺寸近似阈值（px）
@@ -471,7 +476,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                     std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, t));
                 }
                 let _ = app_handle.emit("clipboard-update", entry);
-                save_clip_history(snap);
+                let _ = save_clip_history(snap); // 监听循环 best-effort：无接收方，失败下一轮自愈
 
             } else {
                 // ── 文件 / 文本分支：沿用原有逻辑（锁内重试 + 判空）─────────────────
@@ -504,7 +509,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 let snap = cache.clone();
                 drop(cache);
                 let _ = app_handle.emit("clipboard-update", entry);
-                save_clip_history(snap);
+                let _ = save_clip_history(snap); // 监听循环 best-effort：无接收方，失败下一轮自愈
             }
         }
     });
@@ -573,20 +578,21 @@ fn load_clip_history() {
 /// 把历史快照原子写到磁盘（tmp → rename）。接受快照入参，自身不持任何锁。
 /// 调用方必须保证 CLIP_CACHE 锁与 CLIPBOARD_LOCK 均已释放后再调用（防重入死锁）。
 /// 任何磁盘错误只 eprintln，不传播、不 panic，持久化降级但 app 正常运行。
-fn save_clip_history(snapshot: Vec<serde_json::Value>) {
-    let Some(path) = CLIP_HISTORY_PATH.get() else { return; };
-    let data = match serde_json::to_string(&serde_json::json!({"version":1,"items":snapshot})) {
-        Ok(d) => d,
-        Err(e) => { eprintln!("[clip] serialize error: {e}"); return; }
-    };
+/// 落盘历史。返回 `Err` 让**用户主动发起**的写（delete/clear）能把失败上报前端 → 前端从权威
+/// 缓存回同步而非静默分叉（续147：修「删除/清空失败静默 → 重启后已删条目复活」）。
+/// 监听循环等 best-effort 写用 `let _ =` 忽略（无接收方、下一次落盘自愈）。
+/// 契约不变：接快照入参、自身不持任何锁（磁盘 I/O 与 CLIPBOARD_LOCK 正交）。
+fn save_clip_history(snapshot: Vec<serde_json::Value>) -> Result<(), String> {
+    let Some(path) = CLIP_HISTORY_PATH.get() else { return Err("历史路径未初始化".into()); };
+    let data = serde_json::to_string(&serde_json::json!({"version":1,"items":snapshot}))
+        .map_err(|e| { eprintln!("[clip] serialize error: {e}"); format!("序列化失败: {e}") })?;
     let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, &data) {
-        eprintln!("[clip] write tmp error: {e}"); return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        eprintln!("[clip] rename error: {e}"); return;
-    }
+    std::fs::write(&tmp, &data)
+        .map_err(|e| { eprintln!("[clip] write tmp error: {e}"); format!("写临时文件失败: {e}") })?;
+    std::fs::rename(&tmp, path)
+        .map_err(|e| { eprintln!("[clip] rename error: {e}"); format!("落盘失败: {e}") })?;
     eprintln!("[clip] saved {} item(s) → {:?}", snapshot.len(), path);
+    Ok(())
 }
 
 /// 把原图 PNG 写到 clip_images/{time}.png（原子写 tmp→rename）。
@@ -650,24 +656,26 @@ pub(crate) fn get_clipboard_history() -> Vec<serde_json::Value> {
     CLIP_CACHE.lock().unwrap().clone()
 }
 
-/// 前端调用：按 time 字段删除缓存中的指定条目
+/// 前端调用：按 time 字段删除缓存中的指定条目。
+/// 返回 `Result` 让落盘失败能上报前端（续147）：前端乐观移除后若这里 Err，会从权威缓存回同步，
+/// 不再「前端删了、磁盘没删 → 重启复活」。
 #[tauri::command]
-pub(crate) fn delete_clipboard_item(time: i64) {
+pub(crate) fn delete_clipboard_item(time: i64) -> Result<(), String> {
     let snap = {
         let mut cache = CLIP_CACHE.lock().unwrap();
         cache.retain(|e| e["time"].as_i64().unwrap_or(0) != time);
         cache.clone()
     }; // CLIP_CACHE 锁在此释放
-    save_clip_history(snap);
+    save_clip_history(snap)
 }
 
-/// 前端调用：清空全部剪贴板历史缓存
+/// 前端调用：清空全部剪贴板历史缓存。返回 `Result` 同 delete（续147）。
 #[tauri::command]
-pub(crate) fn clear_clipboard_history() {
+pub(crate) fn clear_clipboard_history() -> Result<(), String> {
     {
         CLIP_CACHE.lock().unwrap().clear();
     } // CLIP_CACHE 锁在此释放
-    save_clip_history(vec![]);
+    save_clip_history(vec![])
 }
 
 /// 前端调用：返回当前运行时缓存上限
@@ -687,7 +695,7 @@ pub(crate) fn set_clip_cache_max(n: usize) {
         cache.truncate(n);
         cache.clone()
     }; // CLIP_CACHE 锁在此释放，落盘 I/O 不持任何锁
-    save_clip_history(snap);
+    let _ = save_clip_history(snap); // best-effort：前端设定后已重拉历史，此处失败非致命
 }
 
 /// hide 后等待 OS 把前台交还给目标窗口（替代旧「盲等固定 150ms」）。
@@ -1304,6 +1312,13 @@ fn parse_clip_image_time(name: &str) -> Option<i64> {
 /// 铁律：**绝不取 CLIPBOARD_LOCK**（磁盘 I/O 与 Win32 剪贴板锁正交）；CLIP_CACHE 锁仅
 /// snapshot-and-release 收集被引用文件名后立即释放、锁块内零 fs 调用，绝不持锁跨文件操作。
 /// 全程 best-effort：任何 fs/锁错误 log + 跳过，绝不 panic、绝不阻塞。
+/// 续146d：判定一个未被引用的 `.tmp` 文件是否应保留（正在写盘、别当孤儿删）。
+/// 非 `.tmp` 恒 false（正常孤儿逻辑照走）；`.tmp` 年轻于保护期则保留；年龄读不出 → 保守判「可删」
+/// （与本次修复前的旧行为一致，不因 mtime 偶发读失败而永久泄漏）。抽出纯函数只为可确定性测试。
+fn tmp_write_in_flight(name: &str, age_ms: Option<u128>) -> bool {
+    name.ends_with(".tmp") && age_ms.is_some_and(|a| a < CLIP_TMP_GRACE_MS as u128)
+}
+
 fn sweep_clip_image_cache() {
     let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
     if !dir.exists() { return; }
@@ -1333,6 +1348,13 @@ fn sweep_clip_image_cache() {
         if !path.is_file() { continue; }
         let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue; };
         if !referenced.contains(&name) {
+            // 续146d：在写的 .tmp（{time}.png.tmp）也永不在 referenced 里，但删它会打断 tmp→rename。
+            // 年轻的 .tmp = 正在写盘 → 跳过；老的 .tmp = 崩溃遗留 → 照孤儿清（防泄漏）。
+            let age_ms = entry.metadata().ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d.as_millis());
+            if tmp_write_in_flight(&name, age_ms) { continue; }
             if std::fs::remove_file(&path).is_ok() { orphans += 1; }
             continue;
         }
@@ -1479,6 +1501,22 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 续146d 竞态回归钉：janitor 孤儿判定必须放过「正在写盘」的 .tmp，又不能永久漏掉崩溃遗留的 .tmp。
+    #[test]
+    fn tmp_grace_protects_in_flight_not_stale() {
+        // .tmp 且年轻 → 正在写，保留
+        assert!(tmp_write_in_flight("1730000000000.png.tmp", Some(0)));
+        assert!(tmp_write_in_flight("1730000000000.png.tmp", Some(CLIP_TMP_GRACE_MS as u128 - 1)));
+        // .tmp 但超期 → 崩溃遗留，可清
+        assert!(!tmp_write_in_flight("1730000000000.png.tmp", Some(CLIP_TMP_GRACE_MS as u128)));
+        assert!(!tmp_write_in_flight("1730000000000.png.tmp", Some(u128::MAX)));
+        // .tmp 但 mtime 读不出 → 保守可清（同修复前旧行为，绝不因偶发读失败永久泄漏）
+        assert!(!tmp_write_in_flight("1730000000000.png.tmp", None));
+        // 非 .tmp → 恒 false，正常孤儿逻辑不受影响
+        assert!(!tmp_write_in_flight("1730000000000.png", Some(0)));
+        assert!(!tmp_write_in_flight("orphan.png", None));
     }
 
     /// 续145 数据丢失根因的回归钉：历史上限必须能在 setup 阶段**直接从 store 文件**读出来。
