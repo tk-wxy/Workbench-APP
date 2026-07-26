@@ -104,11 +104,6 @@ pub fn set_clip_drag_active(active: bool) {
 }
 
 #[tauri::command]
-pub fn get_dragout_auto_close() -> bool {
-    DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed)
-}
-
-#[tauri::command]
 pub fn set_dragout_auto_close(enabled: bool) {
     DRAGOUT_AUTO_CLOSE.store(enabled, Ordering::Relaxed);
 }

@@ -731,7 +731,7 @@ fn start_apps_worker(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            apps::scan_start_menu, apps::refresh_apps,
+            apps::scan_start_menu,
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
             apps::save_launcher_icons, apps::load_launcher_icons,
@@ -741,7 +741,7 @@ pub fn run() {
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
             clipboard::copy_text_to_clipboard, clipboard::copy_image_to_clipboard, clipboard::copy_files_to_clipboard,
-            clipboard::get_clip_cache_max, clipboard::set_clip_cache_max,
+            clipboard::set_clip_cache_max,
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
             clipboard::save_image_as_launcher_file,
             filesearch::search_files, filesearch::get_index_status,
@@ -749,7 +749,7 @@ pub fn run() {
             pinyin_util::to_pinyin_batch,
             everything::reload_everything,
             dragout::start_drag_out,
-            dragout::get_dragout_auto_close, dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
+            dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
             dragout::set_clip_drag_active,
             set_hotkey, set_tray_language
         ])
