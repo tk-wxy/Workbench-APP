@@ -25,7 +25,7 @@ Thumbs.db
 # Logs
 *.log
 
-# Internal dev docs (local only)
+# Internal dev docs / guardrail knowledge base (local only, never in git — see .xpc/manifest.md 架构不变量末条 / rules R44)
 CLAUDE.md
 claude.md
 AGENTS.md
@@ -36,3 +36,10 @@ DEVLOG.md
 debug.md
 debug2.md
 memory-audit.md
+# XPC knowledge base + entry/config files for AI agents
+.xpc/
+CONVENTIONS.md
+GEMINI.md
+augment-guidelines.md
+.clinerules/
+.cursor/
