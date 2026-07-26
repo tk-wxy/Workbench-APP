@@ -678,12 +678,6 @@ pub(crate) fn clear_clipboard_history() -> Result<(), String> {
     save_clip_history(vec![])
 }
 
-/// 前端调用：返回当前运行时缓存上限
-#[tauri::command]
-pub(crate) fn get_clip_cache_max() -> usize {
-    CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed)
-}
-
 /// 前端调用：设置剪贴板历史缓存上限（10-100，超出自动 clamp）。
 /// 立即截断现有缓存并落盘。仅取 CLIP_CACHE 锁，不进 CLIPBOARD_LOCK（无 Win32 剪贴板操作）。
 #[tauri::command]

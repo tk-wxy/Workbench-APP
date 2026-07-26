@@ -203,14 +203,6 @@ pub fn scan_start_menu_staged(on_partial: impl FnOnce(&[AppInfo])) -> Vec<AppInf
     apps
 }
 
-#[tauri::command]
-pub fn refresh_apps() -> Vec<AppInfo> {
-    let cache = APP_CACHE.get_or_init(|| Mutex::new(None));
-    let apps = do_scan(|_| {});
-    *cache.lock().unwrap() = Some(apps.clone());
-    apps
-}
-
 fn do_scan(on_partial: impl FnOnce(&[AppInfo])) -> Vec<AppInfo> {
     // SHGetFileInfoW 需要 COM（STA），必须在调用线程初始化
     let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
