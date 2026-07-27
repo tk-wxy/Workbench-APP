@@ -8,6 +8,11 @@ static APP_CACHE: OnceLock<Mutex<Option<Vec<AppInfo>>>> = OnceLock::new();
 /// 缓存目录（app_data/stage_thumbs），setup 时 init_thumb_cache 设定；未设定时降级为纯内存生成（不落盘）。
 static STAGE_THUMB_DIR: OnceLock<PathBuf> = OnceLock::new();
 const STAGE_THUMB_MAX_DIM: u32 = 160; // 卡片显示 72px，@2x DPI ≈ 144，取 160 留余量
+/// 剪贴板列表缩略图边长（性能优化步骤1）。剪贴板卡片比中转 72px 卡片宽（`.clip-image` width:100%/
+/// max-height:120px），故取高于 stage 的 160。1024→400 使解码位图/GPU 纹理面积降到 ≈1/7
+/// （1024²≈1.05M px → 400²≈160K px），这是 GPU 进程内存膨胀（80→864MB 实测）的主因。调大=更清晰更费显存。
+/// 改这个常量会自动失效旧缓存（下方缓存文件名含本值），无需手动清 stage_thumbs/。
+const CLIP_THUMB_MAX_DIM: u32 = 400;
 const STAGE_THUMB_CACHE_MAX_BYTES: u64 = 50 * 1024 * 1024; // 缓存目录总量上限 50MB，超出从最旧删
 const STAGE_THUMB_SWEEP_INITIAL_MS: u64 = 8_000;   // 起手延迟错开 setup
 const STAGE_THUMB_SWEEP_MS: u64 = 30 * 60 * 1000;  // 之后每 30 分钟 sweep 一次
@@ -932,6 +937,55 @@ pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
         return Err("文件不存在".into());
     }
     get_stage_thumbnail(p.to_string_lossy().into_owned())
+}
+
+/// 剪贴板图片条目的**小缩略图**（性能优化步骤1）。
+///
+/// 剪贴板列表卡片一直直接把 `content`（CLIP_CACHE 里 ≤1024px 的 base64 缩略图）塞进 `<img>`
+/// ——单张被 WebView 解码成 ≈4MB GPU 纹理，历史攒满图片时 GPU 进程实测涨到 800MB+。
+/// 这正是**续99b（file 类）/ 续146c（image 类中转条目）治过的同一个坑**，剪贴板是漏项。
+///
+/// 与 stage 不同：剪贴板图源是 base64（大图另有 `orig_path` 实体文件，但小图无实体文件），
+/// 故不能走按路径的 `get_stage_thumbnail`。此命令**无状态**：`content` 由前端传入（前端本就持有该字段），
+/// 不锁 CLIP_CACHE、不碰剪贴板 OS 句柄（不违反 R20）。复用 `stage_thumbs/` 磁盘缓存
+/// （键 = crc32(content)，内容不变则跨会话命中、零解码）与其容量 janitor，无需新目录/新清理线程。
+#[tauri::command]
+pub fn get_clip_thumbnail(content: String) -> Result<String, String> {
+    // 接受 data URL（`data:image/png;base64,xxx`）或裸 base64
+    let b64 = match content.find(',') {
+        Some(i) => &content[i + 1..],
+        None => content.as_str(),
+    };
+    if b64.is_empty() {
+        return Err("空内容".into());
+    }
+    // 缓存键按 content 哈希（content 对某条剪贴板项不可变）+ 缩略尺寸；与 stage 的 path+mtime 键
+    // 并存于同一目录，`_clip` 后缀避免与 stage 的 `{hash}_{mtime}.png` 命名撞车。
+    // 键含 dim：改 CLIP_THUMB_MAX_DIM 后旧尺寸缓存自动落空、按新尺寸重建。
+    let cache_file = STAGE_THUMB_DIR.get().map(|dir| {
+        let hash = crc32(b"CTHM", b64.as_bytes());
+        dir.join(format!("{:08x}_{}_clip.png", hash, CLIP_THUMB_MAX_DIM))
+    });
+    // ① 命中磁盘缓存：直接读小 PNG，零解码
+    if let Some(cf) = &cache_file {
+        if let Ok(bytes) = std::fs::read(cf) {
+            return Ok(format!("data:image/png;base64,{}", base64_encode(&bytes)));
+        }
+    }
+    // ② 未命中：解码 base64 → 缩略（保持宽高比、仅缩不放）→ PNG
+    let bytes = crate::clipboard::base64_decode(b64).ok_or("base64 解码失败")?;
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("解码失败: {}", e))?;
+    let thumb = img.thumbnail(CLIP_THUMB_MAX_DIM, CLIP_THUMB_MAX_DIM);
+    let mut png = std::io::Cursor::new(Vec::new());
+    thumb
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|e| format!("编码失败: {}", e))?;
+    let png_bytes = png.into_inner();
+    // ③ 写盘缓存（best-effort：失败仅少一次缓存、不影响本次返回）
+    if let Some(cf) = &cache_file {
+        let _ = std::fs::write(cf, &png_bytes);
+    }
+    Ok(format!("data:image/png;base64,{}", base64_encode(&png_bytes)))
 }
 
 /// 初始化启动台/中转站资产目录 + 起孤儿回收线程。setup 时调用一次。

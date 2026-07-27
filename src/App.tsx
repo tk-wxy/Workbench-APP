@@ -317,6 +317,10 @@ export default function App() {
   // 续99b：中转区图片文件缩略图缓存（path → data URL）。由 Rust get_stage_thumbnail 生成小图，避免前端直接加载原图全分辨率致内存暴涨/卡顿。仅会话内内存缓存，不落盘。
   const [stageThumbs, setStageThumbs] = useState<Record<string,string>>({});
   const stageThumbPendingRef = useRef<Set<string>>(new Set()); // 已发起/已失败的 path（失败不重试，卡片回退 emoji）
+  // 剪贴板图片缩略图（性能优化步骤1）：键=条目 time，值=~320px 小缩略图 data URL。
+  // 列表原先直接渲染 ≤1024px 的 content → 每张 ≈4MB GPU 纹理。改为渲染小缩略图后纹理面积降到 ≈1/10。
+  const [clipThumbs, setClipThumbs] = useState<Record<number,string>>({});
+  const clipThumbPendingRef = useRef<Set<number>>(new Set()); // 已发起的 time（去重，失败回退整图见下方 catch）
   // 续100：中转区 file 条目「原文件失踪」路径集。每次呼出时后台批量 exists() 扫一遍（check_stage_paths）。
   // 不用实时文件监听（分散父目录 watcher 代价高/网络盘不支持），只在呼出这个「该看的时刻」懒扫。
   // 处理按「拖出移除」同一豁免规则（见 scanStageMissing）：`!persist && !pinned` 直接移除；固定/持久化则留存并进本集合，供 ⚠️ 标记。
@@ -1328,6 +1332,35 @@ export default function App() {
       return next;
     });
   }, [stage, launcher]);
+  // 性能优化步骤1：为剪贴板图片条目懒生成小缩略图（Rust 侧解码缩图，前端只缓存小 base64）。
+  // 与中转区 stageThumbs 同构：pending ref 去重（每个 time 只发起一次），失败则回退渲染整图（见下方 catch）。
+  // 淘汰逻辑同 stageThumbs：条目被挤出历史/清空后清掉其缩略图，否则整会话只增不减。
+  useEffect(() => {
+    const imgClips = clipboard.filter(c => c.type === "image" && c.content);
+    for (const c of imgClips) {
+      if (clipThumbPendingRef.current.has(c.time)) continue;
+      clipThumbPendingRef.current.add(c.time);
+      (async () => {
+        try {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const url = await invoke<string>("get_clip_thumbnail", { content: c.content });
+          setClipThumbs(prev => ({ ...prev, [c.time]: url }));
+        } catch {
+          // 缩略失败（极少）：回退为整图 content，宁可纹理大也不让卡片空着。
+          setClipThumbs(prev => ({ ...prev, [c.time]: c.content! }));
+        }
+      })();
+    }
+    const live = new Set(imgClips.map(c => c.time));
+    for (const k of clipThumbPendingRef.current) if (!live.has(k)) clipThumbPendingRef.current.delete(k);
+    setClipThumbs(prev => {
+      const stale = Object.keys(prev).map(Number).filter(k => !live.has(k));
+      if (!stale.length) return prev;
+      const next = { ...prev };
+      for (const k of stale) delete next[k];
+      return next;
+    });
+  }, [clipboard]);
   // 续100：中转区失踪扫描。收集所有 file 条目路径 → Rust 批量 exists() → 记下失踪集合。
   // 复用既有 stageRef（行 216，已随渲染更新）供 hotkey-show 闭包读最新 stage；scanStageMissing 无依赖、稳定。
   const scanStageMissing = useCallback(async (list?: StageItem[]) => {
@@ -2841,7 +2874,9 @@ export default function App() {
                   </button>
                   <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><IconTrash/></button>
                 </div>
-                {c.type==="image"? <img className="clip-image" src={c.content} alt="" draggable={false}/>
+                {c.type==="image"? (clipThumbs[c.time]
+                    ? <img className="clip-image" src={clipThumbs[c.time]} alt="" draggable={false}/>
+                    : <div className="clip-image clip-image-ph" aria-hidden/>)
                 : c.type==="file"? <div className="file-clip-preview">
                     <span className="clip-file-icon"><FileGlyph size={20} {...fileGlyphFor(c)}/></span>
                     <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : t("{n}个文件", {n: c.count ?? 0})}</span>
