@@ -818,7 +818,72 @@ extern "system" {
 }
 
 const CF_HDROP: u32 = 15;
+const CF_DIB: u32 = 8;          // 设备无关位图（图片类目标：画图/Word/Chrome/聊天框）
+const CF_UNICODETEXT: u32 = 13; // UTF-16 文本（控制台/纯文本目标：粘贴路径字符串）
 const GMEM_MOVEABLE: u32 = 2;
+
+/// 在【已 OpenClipboard + EmptyClipboard 的】剪贴板上挂一种格式（供多格式并挂复用）。
+/// alloc HGLOBAL → 拷贝字节 → SetClipboardData；成功后系统接管句柄（不可再 Free），
+/// 失败则 GlobalFree 回收防泄漏。**绝不自行 Open/Empty/Close**——由调用方统一管理会话。
+fn set_clip_fmt(fmt: u32, bytes: &[u8]) -> Result<(), String> {
+    unsafe {
+        let h = GlobalAlloc(GMEM_MOVEABLE, bytes.len());
+        if h == 0 { return Err(format!("GlobalAlloc 失败 (fmt={fmt})")); }
+        let ptr = GlobalLock(h);
+        if ptr.is_null() { GlobalFree(h); return Err(format!("GlobalLock 失败 (fmt={fmt})")); }
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        GlobalUnlock(h);
+        if SetClipboardData(fmt, h) == 0 { GlobalFree(h); return Err(format!("SetClipboardData 失败 (fmt={fmt})")); }
+    }
+    Ok(())
+}
+
+/// 构造 CF_HDROP 的 DROPFILES 载荷字节（fWide=1 UTF-16 路径、双 \0 结尾）。纯字节、不碰剪贴板，
+/// 供 `write_cf_hdrop`（单格式写入）与 `copy_image_to_clipboard`（多格式并挂）共用。
+fn build_hdrop_bytes(paths: &[String]) -> Vec<u8> {
+    let mut raw: Vec<u8> = Vec::new();
+    raw.extend_from_slice(&20u32.to_ne_bytes()); // pFiles：路径数据偏移
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.x
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.y
+    raw.extend_from_slice(&0u32.to_ne_bytes());  // fNC
+    raw.extend_from_slice(&1u32.to_ne_bytes());  // fWide=1（必须：UTF-16 路径，否则 Explorer 解析失败）
+    for p in paths {
+        let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
+        for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
+    }
+    raw.push(0); raw.push(0); // 双 \0 结尾
+    raw
+}
+
+/// RGBA（image crate 输出：top-down、每像素 R,G,B,A）→ CF_DIB 字节：
+/// BITMAPINFOHEADER(40B, 32bpp BI_RGB) + 像素区。CF_DIB 惯例像素 **bottom-up** 排列、每像素 **BGRA**。
+/// 截图不透明(A=255)；带透明的图，A 通道由粘贴目标各自解释（多数按不透明处理，与 Windows 常态一致）。
+fn rgba_to_cf_dib(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+    let stride = (w as usize) * 4;
+    let img_size = stride * (h as usize);
+    let mut out = Vec::with_capacity(40 + img_size);
+    out.extend_from_slice(&40u32.to_le_bytes());              // biSize
+    out.extend_from_slice(&(w as i32).to_le_bytes());         // biWidth
+    out.extend_from_slice(&(h as i32).to_le_bytes());         // biHeight（正 = bottom-up）
+    out.extend_from_slice(&1u16.to_le_bytes());               // biPlanes
+    out.extend_from_slice(&32u16.to_le_bytes());              // biBitCount
+    out.extend_from_slice(&0u32.to_le_bytes());               // biCompression = BI_RGB
+    out.extend_from_slice(&(img_size as u32).to_le_bytes());  // biSizeImage
+    out.extend_from_slice(&0i32.to_le_bytes());               // biXPelsPerMeter
+    out.extend_from_slice(&0i32.to_le_bytes());               // biYPelsPerMeter
+    out.extend_from_slice(&0u32.to_le_bytes());               // biClrUsed
+    out.extend_from_slice(&0u32.to_le_bytes());               // biClrImportant
+    for y in (0..h as usize).rev() {                          // 底行在前
+        let row = &rgba[y * stride..y * stride + stride];
+        for px in row.chunks_exact(4) {
+            out.push(px[2]); // B
+            out.push(px[1]); // G
+            out.push(px[0]); // R
+            out.push(px[3]); // A
+        }
+    }
+    out
+}
 
 /// 从剪贴板读取 CF_HDROP 文件路径列表
 fn read_clipboard_files() -> Option<Vec<String>> {
@@ -848,17 +913,7 @@ fn read_clipboard_files() -> Option<Vec<String>> {
 /// 把文件路径列表以 CF_HDROP 格式写入剪贴板（DROPFILES 头 fWide=1 + UTF-16 路径、双 \0 结尾）。
 /// 纯写入——不含焦点交还/Ctrl+V/skip 信号，由调用方各自处理（paste 用计数、copy 用 seq 水位）。
 fn write_cf_hdrop(paths: &[String]) -> Result<(), String> {
-    let mut raw: Vec<u8> = Vec::new();
-    raw.extend_from_slice(&20u32.to_ne_bytes()); // pFiles：路径数据偏移
-    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.x
-    raw.extend_from_slice(&0u32.to_ne_bytes());  // pt.y
-    raw.extend_from_slice(&0u32.to_ne_bytes());  // fNC
-    raw.extend_from_slice(&1u32.to_ne_bytes());  // fWide=1（必须：UTF-16 路径，否则 Explorer 解析失败）
-    for p in paths {
-        let wide: Vec<u16> = p.encode_utf16().chain(std::iter::once(0)).collect();
-        for c in &wide { raw.extend_from_slice(&c.to_ne_bytes()); }
-    }
-    raw.push(0); raw.push(0); // 双 \0 结尾
+    let raw = build_hdrop_bytes(paths);
 
     unsafe {
         let h = GlobalAlloc(GMEM_MOVEABLE, raw.len());
@@ -1264,31 +1319,60 @@ pub(crate) fn copy_text_to_clipboard(text: String) -> Result<(), String> {
 
 #[tauri::command]
 pub(crate) fn copy_image_to_clipboard(base64: String, orig_path: Option<String>) -> Result<(), String> {
-    // 优先从原图文件读取（全分辨率）；失败降级 1024px 缩略图。
-    // 结果写为位图（CF_DIB）：只能粘进图片类目标（输入框/Word/画图）；
-    // 文件夹/桌面只收 CF_HDROP，故往那里 Ctrl+V 无反应——Windows 固有限制，非 bug。
-    // 文件 I/O 在锁外（CLIPBOARD_LOCK 只罩 set_image 临界区）。
-    let (w, h, raw) = {
-        let from_orig: Option<(u32, u32, Vec<u8>)> = orig_path.as_deref()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|bytes| image::load_from_memory(&bytes).ok())
-            .map(|img| { let r = img.to_rgba8(); let (w,h) = r.dimensions(); (w,h,r.into_raw()) });
-        if let Some(data) = from_orig {
-            data
-        } else {
-            let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
+    // 「只复制」按钮：一次性把图片以**多种剪贴板格式并挂**，让任意粘贴目标各取所需——
+    //   · CF_DIB       位图 → 画图/Word/Chrome/聊天框（内嵌图片）
+    //   · CF_HDROP     文件 → 桌面/资源管理器（粘出 PNG 文件）
+    //   · CF_UNICODETEXT 路径 → cmd/Terminal（粘出路径文本）
+    // 不隐藏窗口、不 Ctrl+V（区别于 set_clipboard_image 四分叉的「取走粘贴」），故无需检测前台。
+    // Windows 剪贴板原生支持多格式共存，目标程序按自身能力挑最合适的一种。
+    //
+    // 落一个 PNG 文件（CF_HDROP + 文本路径都指向它）：大图复用已落盘 orig_path（零重编码）；
+    // 无 orig 的小图现解 base64 写一份 workbench_clip_*.png 到 clip_images/——不被任何 orig_path
+    // 引用，由 janitor 当孤儿清理兜底（与 set_clipboard_image 的资源管理器分支同款，无脆弱定时 race）。
+    let png_path: String = match orig_path.as_deref() {
+        Some(p) if std::path::Path::new(p).exists() => p.to_string(),
+        _ if !base64.is_empty() => {
+            let b64 = if let Some(c) = base64.find(',') { &base64[c + 1..] } else { &base64 };
             let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
-            let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            (w, h, rgba.into_raw())
+            let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
+            let tmp = dir.join(format!("workbench_clip_{}.png", now_ms()));
+            std::fs::write(&tmp, &bytes).map_err(|e| format!("写临时文件: {}", e))?;
+            tmp.to_string_lossy().into_owned()
         }
+        _ => return Err("无图片数据".into()),
     };
-    let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防并发 OpenClipboard 撞 1418
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("剪贴板: {}", e))?;
-    cb.set_image(arboard::ImageData {
-        width: w as usize, height: h as usize, bytes: std::borrow::Cow::Owned(raw),
-    }).map_err(|e| format!("写入: {}", e))?;
+
+    // CF_DIB 用的 RGBA：从刚确定的 png_path 单路解码（一条来源，避免 orig/base64 两套分支）。
+    // 文件 I/O 与解码都在锁外（CLIPBOARD_LOCK 只罩下面的 Open…Close 临界区）。
+    let (w, h, raw) = {
+        let bytes = std::fs::read(&png_path).map_err(|e| format!("读图: {}", e))?;
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("图片解析: {}", e))?;
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        (w, h, rgba.into_raw())
+    };
+    let dib = rgba_to_cf_dib(w, h, &raw);
+    let hdrop = build_hdrop_bytes(std::slice::from_ref(&png_path));
+    let mut text: Vec<u8> = Vec::with_capacity((png_path.len() + 1) * 2);
+    for c in png_path.encode_utf16().chain(std::iter::once(0)) { text.extend_from_slice(&c.to_ne_bytes()); }
+
+    // 单个 Open/Empty/Set×3/Close 会话内挂全部格式（不可分次 Open——第二次 Open 需重新 Empty 会
+    // 抹掉前一次写入）。SKIP_CLIP_EVENTS + suppress 防自写内容回流历史面板（同其余 copy_* 路径）。
+    SKIP_CLIP_EVENTS.store(2, Ordering::SeqCst);
+    let _sg = SkipGuard; // 防中途 return/? 留下计数残留（吃掉真实复制）
+    {
+        let _guard = CLIPBOARD_LOCK.lock().unwrap(); // 与监听读串行，防并发 OpenClipboard 撞 1418
+        unsafe {
+            if OpenClipboard(0) == 0 { return Err("OpenClipboard 失败（剪贴板被占用）".into()); }
+            EmptyClipboard();
+        }
+        // 任一格式失败即中止：已挂上的格式其句柄已交给系统（不回收），未挂的在 set_clip_fmt 内已 Free。
+        let r = set_clip_fmt(CF_DIB, &dib)
+            .and_then(|_| set_clip_fmt(CF_HDROP, &hdrop))
+            .and_then(|_| set_clip_fmt(CF_UNICODETEXT, &text));
+        unsafe { CloseClipboard(); }
+        r?;
+    }
     suppress_clip_until_now();
     Ok(())
 }
@@ -1547,6 +1631,46 @@ mod tests {
         // 非 .tmp → 恒 false，正常孤儿逻辑不受影响
         assert!(!tmp_write_in_flight("1730000000000.png", Some(0)));
         assert!(!tmp_write_in_flight("orphan.png", None));
+    }
+
+    /// 多格式并挂（copy_image_to_clipboard）的 CF_DIB 载荷回归钉：BITMAPINFOHEADER 关键字段 +
+    /// RGBA→BGRA 换序 + bottom-up 行序。这三点任一错，粘出来就是偏色/上下颠倒/尺寸错乱。
+    #[test]
+    fn rgba_to_cf_dib_header_and_bgra_bottom_up() {
+        // 2×2，top-down RGBA；四像素取不同值以钉住换序与行序
+        let rgba: Vec<u8> = vec![
+            10, 20, 30, 255, /*(0,0)*/ 11, 21, 31, 255, /*(1,0) 顶行*/
+            12, 22, 32, 255, /*(0,1)*/ 13, 23, 33, 255, /*(1,1) 底行*/
+        ];
+        let dib = rgba_to_cf_dib(2, 2, &rgba);
+        assert_eq!(dib.len(), 40 + 16, "40B 头 + 2×2×4B 像素");
+        assert_eq!(&dib[0..4], &40u32.to_le_bytes(), "biSize");
+        assert_eq!(&dib[4..8], &2i32.to_le_bytes(), "biWidth");
+        assert_eq!(&dib[8..12], &2i32.to_le_bytes(), "biHeight 正 = bottom-up");
+        assert_eq!(&dib[12..14], &1u16.to_le_bytes(), "biPlanes");
+        assert_eq!(&dib[14..16], &32u16.to_le_bytes(), "biBitCount");
+        assert_eq!(&dib[16..20], &0u32.to_le_bytes(), "biCompression=BI_RGB");
+        assert_eq!(&dib[20..24], &16u32.to_le_bytes(), "biSizeImage");
+        // 像素：底行(y=1)在前，每像素 BGRA
+        let expected: Vec<u8> = vec![
+            32, 22, 12, 255, /*(0,1)*/ 33, 23, 13, 255, /*(1,1)*/
+            30, 20, 10, 255, /*(0,0)*/ 31, 21, 11, 255, /*(1,0)*/
+        ];
+        assert_eq!(&dib[40..], &expected[..], "BGRA 换序 + bottom-up 行序");
+    }
+
+    /// CF_HDROP 载荷回归钉：DROPFILES 头（pFiles=20 偏移、fWide=1）+ UTF-16 路径 + 双 \0 结尾。
+    #[test]
+    fn build_hdrop_bytes_dropfiles_layout() {
+        let raw = build_hdrop_bytes(std::slice::from_ref(&"C:\\a.png".to_string()));
+        assert_eq!(&raw[0..4], &20u32.to_ne_bytes(), "pFiles 偏移");
+        assert_eq!(&raw[16..20], &1u32.to_ne_bytes(), "fWide=1（UTF-16 路径）");
+        // 路径区：UTF-16「C:\a.png」+ \0，再补一个 \0 结尾 → 末尾必是 4 字节全 0（两个 u16 NUL）
+        assert_eq!(&raw[raw.len() - 4..], &[0u8, 0, 0, 0], "路径 NUL + 列表双 \\0 结尾");
+        let path16: Vec<u16> = "C:\\a.png".encode_utf16().collect();
+        let mut path_bytes = Vec::new();
+        for c in &path16 { path_bytes.extend_from_slice(&c.to_ne_bytes()); }
+        assert_eq!(&raw[20..20 + path_bytes.len()], &path_bytes[..], "UTF-16 路径正文");
     }
 
     /// 续145 数据丢失根因的回归钉：历史上限必须能在 setup 阶段**直接从 store 文件**读出来。
