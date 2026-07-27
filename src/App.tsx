@@ -27,7 +27,7 @@ interface ClipItem { type: "text" | "image" | "file"; content?: string; time: nu
 // 摘掉换成 contentFile（stage_images/ 下的文件名），载入时补回（续146b）。消费方一律只读内存态。
 interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; contentFile?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
-type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
+type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; time?: number; };
 type TFn = ReturnType<typeof makeT>;
 // 只有含汉字的名字才需要派生拼音（纯英文名走直接匹配即可）。在前端先滤一道，
 // 免得把满屏英文文件名送去 Rust 白跑一趟。
@@ -133,12 +133,19 @@ function fileEntryToStage(f: FileEntry): StageItem {
 function clipToStage(c: ClipItem): StageItem {
   return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path };
 }
+// 性能优化步骤2：剪贴板 image 条目的 content 已从前端 state 剥离（30 张 ≤1024px base64 会撑爆 JS 堆）。
+// 真正需要原文的动作（复制/粘贴/拖出/入中转）按 time 向 Rust CLIP_CACHE 现取；文本 / 已带 content（如中转条目）者原样返回。
+async function hydrateContent(item: { type: string; content?: string; time?: number }): Promise<string | undefined> {
+  if (item.content || item.type !== "image" || item.time == null) return item.content;
+  const { invoke } = await import("@tauri-apps/api/core");
+  return (await invoke<string | null>("get_clip_content", { time: item.time })) ?? undefined;
+}
 // 只写当前系统剪贴板（不粘贴、不隐藏 overlay），复用现成 copy_* 命令；剪贴板卡片与中转条目共用
 async function writeItemToClipboard(item: Pasteable) {
   const { invoke } = await import("@tauri-apps/api/core");
   if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
   else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
-  else await invoke("copy_image_to_clipboard", { base64: item.content, origPath: item.orig_path ?? null });
+  else await invoke("copy_image_to_clipboard", { base64: (await hydrateContent(item)) ?? "", origPath: item.orig_path ?? null });
 }
 
 // 时钟：自持 state + 分钟对齐 tick，memo 化后其重渲**不牵动父组件 App**（续147 修 M1）。
@@ -574,16 +581,13 @@ export default function App() {
         const { listen } = await import("@tauri-apps/api/event");
         const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
         const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
-        const un3 = await listen("clipboard-update", (event: any) => {
-          const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
-          setClipboard(prev => {
-            const filtered = prev.filter(x => {
-              if (item.type === "file" && x.type === "file") return x.items?.[0]?.path !== item.items?.[0]?.path;
-              if (item.type !== "file" && x.type !== "file") return x.content !== item.content;
-              return true; // 不同类型保留
-            });
-            return [item, ...filtered].slice(0, clipCacheMaxRef.current);
-          });
+        const un3 = await listen("clipboard-update", async () => {
+          // 性能优化步骤2：image 条目 content 已不入前端 state，无法再按 content 做乐观去重。
+          // 改为回拉 Rust 权威历史（get_clipboard_history 已剥图片 content、且 Rust 侧已按 ahash 去重 R24）。
+          // 事件仅在真实外部复制时触发（自写回流被 R21 抑制），此处一次 IPC 开销可忽略。
+          const { invoke } = await import("@tauri-apps/api/core");
+          const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
+          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
         });
         // 原生拖入（S3b）：落点在启动器区→入启动器，否则→入中转（兜底）；落地区域闪烁确认。
         // pt 是 Windows 屏幕物理像素，÷ devicePixelRatio 转 CSS px 后与 getBoundingClientRect 比对。
@@ -1259,7 +1263,7 @@ export default function App() {
     } else { // clip
       const it = r.item, p = it.items?.[0]?.path;
       if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = it.content ?? null; photo = true; }
+      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = clipThumbs[it.time] ?? null; photo = true; } /* 步骤2：clip 图 content 已剥离，预览用缩略图 */
       else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = photoExt(it.items?.[0]?.ext); if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
       // 剪贴板条目唯一有用的元信息。相对表述 + 绝对值 hover 查看（ClipItem.time 是毫秒 → 直接用 ago）
       push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
@@ -1269,7 +1273,7 @@ export default function App() {
     // hi 只在**确实比 low 更好**时才有值（两者相同则为 null，免得同一张图白叠两层）。
     const hi = big && big !== low ? big : null;
     return { r, key, title, badge, cat, group: catToGroup(cat), low, hi, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
-  }, [enhResults, enhSelIdx, previewMeta, stageThumbs, t]);
+  }, [enhResults, enhSelIdx, previewMeta, stageThumbs, clipThumbs, t]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
@@ -1336,19 +1340,17 @@ export default function App() {
   // 与中转区 stageThumbs 同构：pending ref 去重（每个 time 只发起一次），失败则回退渲染整图（见下方 catch）。
   // 淘汰逻辑同 stageThumbs：条目被挤出历史/清空后清掉其缩略图，否则整会话只增不减。
   useEffect(() => {
-    const imgClips = clipboard.filter(c => c.type === "image" && c.content);
+    const imgClips = clipboard.filter(c => c.type === "image");
     for (const c of imgClips) {
       if (clipThumbPendingRef.current.has(c.time)) continue;
       clipThumbPendingRef.current.add(c.time);
       (async () => {
         try {
           const { invoke } = await import("@tauri-apps/api/core");
-          const url = await invoke<string>("get_clip_thumbnail", { content: c.content });
+          // 步骤2：content 已不在前端，按 time 让 Rust 从 CLIP_CACHE 取原文再缩图
+          const url = await invoke<string>("get_clip_thumbnail", { time: c.time });
           setClipThumbs(prev => ({ ...prev, [c.time]: url }));
-        } catch {
-          // 缩略失败（极少）：回退为整图 content，宁可纹理大也不让卡片空着。
-          setClipThumbs(prev => ({ ...prev, [c.time]: c.content! }));
-        }
+        } catch { /* 失败：保留占位框，不再重试（content 已不在前端，无法回退整图） */ }
       })();
     }
     const live = new Set(imgClips.map(c => c.time));
@@ -1715,6 +1717,7 @@ export default function App() {
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
   const addToStage = useCallback(async (c:ClipItem) => {
+    c = { ...c, content: await hydrateContent(c) }; // 步骤2：图片 content 现取，供下方 exists 比对 + clipToStage 落库
     const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
     // 续146c：原先重复项**静默 return**，用户看到的就是「拖过去没反应」，无从分辨是重复还是坏了。
     if (exists) {
@@ -1814,7 +1817,11 @@ export default function App() {
   const beginClipDragOut = useCallback((c: ClipItem) => {
     dragOutSourceRef.current = "clip";
     droppedOnSelfRef.current = false;
-    const dragItem = { type: c.type, content: c.content ?? null, items: c.items?.map(f => f.path) ?? null, orig_path: c.orig_path ?? null };
+    // ⚠️ 此路径必须**完全同步**：start_drag_out 的 DoDragDrop 主线程模态 + CLIP_DRAG_ACTIVE 无缝交接（R13）
+    // 对 invoke 与 endClipDrag 的先后时序极敏感——插入任何 await 都会卡死呼出（已实测 100% 复现）。
+    // 步骤2：图片 content 已不在前端 state，故**不在这里现取**（那要 await），改为把 time 带给 Rust，
+    // 由 dragout.rs 按 time 从 CLIP_CACHE 自查 content（DragOutItem.resolve_content）。
+    const dragItem = { type: c.type, content: c.content ?? null, items: c.items?.map(f => f.path) ?? null, orig_path: c.orig_path ?? null, time: c.time };
     console.log("[clip-drag] → native drag-out", c.type); // 续110 诊断
     import("@tauri-apps/api/core").then(({ invoke }) => invoke("start_drag_out", { items: [dragItem], forceHide: true })).catch(() => {});
     endClipDrag(false); // 清 ghost；CLIP_DRAG_ACTIVE 不清，交给 Rust 无缝交接
@@ -2324,7 +2331,7 @@ export default function App() {
       const {invoke}=await import("@tauri-apps/api/core");
       if (item.type === "text") { try { await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
       else if (item.type === "file" && item.items) { try { await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); } }
-      else { try { await invoke("set_clipboard_image",{base64:item.content,origPath:item.orig_path??null}); } catch{ await hideWorkbench(); } }
+      else { try { await invoke("set_clipboard_image",{base64:(await hydrateContent(item)) ?? "",origPath:item.orig_path??null}); } catch{ await hideWorkbench(); } } // 步骤2：图片 content 现取
     };
     // 无障碍：跳过淡出，沿用即时粘贴
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -3281,7 +3288,7 @@ export default function App() {
         ref={el=>{ clipGhostRef.current=el; const d=clipDragRef.current; if(el&&d) el.style.transform=`translate3d(${d.x+12}px,${d.y+12}px,0)`; }}
         style={{position:"fixed",pointerEvents:"none",zIndex:100002}}>
         {clipDragItem.type==="image"
-          ? <img src={clipDragItem.content} className="clip-ghost-img" alt="" draggable={false}/>
+          ? <img src={clipThumbs[clipDragItem.time]} className="clip-ghost-img" alt="" draggable={false}/> /* 步骤2：拖拽 ghost 用缩略图（content 已剥离）*/
           : clipDragItem.type==="file"
           ? <span className="clip-ghost-file"><FileGlyph size={14} {...fileGlyphFor(clipDragItem)}/><span className="clip-ghost-name">{clipDragItem.items?.[0]?.name ?? t("文件")}</span></span>
           : <span>{String(clipDragItem.content ?? "").slice(0,40)}</span>}

@@ -738,7 +738,7 @@ pub fn run() {
             apps::save_stage_images, apps::load_stage_images, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
-            clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
+            clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::get_clip_content, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
             clipboard::copy_text_to_clipboard, clipboard::copy_image_to_clipboard, clipboard::copy_files_to_clipboard,
             clipboard::set_clip_cache_max,

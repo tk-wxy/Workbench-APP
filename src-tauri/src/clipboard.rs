@@ -653,7 +653,43 @@ pub(crate) fn wait_pending_image_writes() {
 /// 前端调用：直接返回缓存数据（毫秒级）
 #[tauri::command]
 pub(crate) fn get_clipboard_history() -> Vec<serde_json::Value> {
-    CLIP_CACHE.lock().unwrap().clone()
+    // 性能优化步骤2：image 条目**剥掉 content**（≤1024px base64，动辄每条数 MB，30 条就把渲染进程
+    // JS 堆撑到 200MB+）。前端只用缩略图显示（按 time 走 get_clip_thumbnail），真正需要原文时
+    // （复制/粘贴/拖出/入中转）按 time 走 get_clip_content 现取。其余字段（time/orig_path/w/h/ahash）保留。
+    CLIP_CACHE
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            if e["type"] == "image" {
+                let mut e = e.clone();
+                if let Some(obj) = e.as_object_mut() {
+                    obj.remove("content");
+                }
+                e
+            } else {
+                e.clone()
+            }
+        })
+        .collect()
+}
+
+/// 按 time 取某条剪贴板项的 content（图片 base64 data URL / 文本正文）。
+/// get_clipboard_history 对图片剥了 content，前端在真正需要原文的动作里按 time 现取——
+/// CLIP_CACHE 是权威、始终带完整 content。仅取 CLIP_CACHE 锁、零 Win32 剪贴板操作（不进 CLIPBOARD_LOCK）。
+pub(crate) fn clip_content_by_time(time: i64) -> Option<String> {
+    CLIP_CACHE
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|e| e["time"].as_i64() == Some(time))
+        .and_then(|e| e["content"].as_str().map(|s| s.to_string()))
+}
+
+/// 前端按需取回某条 image 的完整 content（性能优化步骤2）。找不到 = None（条目已被挤出/删除）。
+#[tauri::command]
+pub(crate) fn get_clip_content(time: i64) -> Option<String> {
+    clip_content_by_time(time)
 }
 
 /// 前端调用：按 time 字段删除缓存中的指定条目。
