@@ -124,6 +124,27 @@ function usageScore(u: AppUsage | undefined, nowS: number): number {
 
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
 
+// ── 缩略图解码并发闸（性能优化步骤3：拖入/攒图流式化削峰）──
+// 批量拖入 N 张全屏图时，若给每张裸起一个异步任务同时发起 get_*_thumbnail，Rust 会**并发**
+// 解码 N 张原图（每张解码位图 ~25MB @3192×1970），瞬时峰值随 N 线性飙到 GB 级（场景B 拖10图 1000MB+）。
+// 这里用固定并发上限的模块级任务队列把它们串流：同一时刻最多 THUMB_CONCURRENCY 张在解码，其余排队。
+// 模块级（非组件内）是刻意的——闸要跨 stageThumbs / clipThumbs 两处、跨 effect 多次运行**全局共享**，
+// 否则各自开一池、并发上限形同虚设。命中磁盘缓存的解码近乎瞬时，闸只对首次解码的冷路径起削峰作用。
+const THUMB_CONCURRENCY = 3;
+let thumbActive = 0;
+const thumbQueue: Array<() => void> = [];
+function runThumbTask(task: () => Promise<void>) {
+  const run = () => {
+    thumbActive++;
+    task().finally(() => {
+      thumbActive--;
+      const next = thumbQueue.shift();
+      if (next) next();
+    });
+  };
+  if (thumbActive < THUMB_CONCURRENCY) run(); else thumbQueue.push(run);
+}
+
 // ── 文件中转：转换 + 写剪贴板助手 ──
 const stageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // 稳定唯一 id（key/去重）
 function fileEntryToStage(f: FileEntry): StageItem {
@@ -1313,7 +1334,7 @@ export default function App() {
     for (const p of paths) {
       if (stageThumbPendingRef.current.has(p)) continue;
       stageThumbPendingRef.current.add(p);
-      (async () => {
+      runThumbTask(async () => { // 步骤3：经并发闸串流，避免批量拖入并发解码飙峰
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           const url = p.startsWith(STAGE_IMG_KEY)
@@ -1321,7 +1342,7 @@ export default function App() {
             : await invoke<string>("get_stage_thumbnail", { path: p });
           setStageThumbs(prev => ({ ...prev, [p]: url }));
         } catch { /* 失败：保留 pending 标记不再重试，显示图标兜底 */ }
-      })();
+      });
     }
     // 淘汰（H5）：条目删除/清空后，其 base64 缩略图与 pending 标记不再需要——否则整会话只增不减。
     // 存活集 = 当前仍在中转/启动台的图片 path；两者恰是上面算出的 paths。用函数式更新只删非存活键，
@@ -1344,14 +1365,14 @@ export default function App() {
     for (const c of imgClips) {
       if (clipThumbPendingRef.current.has(c.time)) continue;
       clipThumbPendingRef.current.add(c.time);
-      (async () => {
+      runThumbTask(async () => { // 步骤3：与 stageThumbs 共用同一并发闸，全局串流削峰
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           // 步骤2：content 已不在前端，按 time 让 Rust 从 CLIP_CACHE 取原文再缩图
           const url = await invoke<string>("get_clip_thumbnail", { time: c.time });
           setClipThumbs(prev => ({ ...prev, [c.time]: url }));
         } catch { /* 失败：保留占位框，不再重试（content 已不在前端，无法回退整图） */ }
-      })();
+      });
     }
     const live = new Set(imgClips.map(c => c.time));
     for (const k of clipThumbPendingRef.current) if (!live.has(k)) clipThumbPendingRef.current.delete(k);
