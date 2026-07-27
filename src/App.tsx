@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Fragment, memo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fragment, memo } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
 import { IMG_EXTS, fmtSize, ago, agoSec, dirOf, fmtDateTime, fileCategory, catToGroup, type FileCat, type FileGroup } from "./lib/format";
@@ -1306,15 +1306,20 @@ export default function App() {
   }, [pickerQuery, sortedApps, launcher]);
 
   // ── 顶栏普通搜索：三区联动过滤（与 Ctrl+K 增强搜索的 enhQuery 完全独立）──
+  // 性能优化步骤4a：三区过滤用 `deferredSearch`（React 18 useDeferredValue），输入框仍绑即时 `search`
+  // → 敲键先让输入框回显下一字符（高优先级），启动台/中转/剪贴板三列表的重过滤+重渲被延后且**可打断**，
+  // 消除「每键同步重建整棵列表」的输入掉帧。控制逻辑（键盘导航/enh 同步）仍读即时 `search`，deferred
+  // 只喂视觉列表；两者相差至多一两帧内收敛，打字停下即一致，不影响回车/方向键选中。
+  const deferredSearch = useDeferredValue(search);
   // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
   const filteredStage = useMemo(() => {
-    const q = search.trim();
+    const q = deferredSearch.trim();
     if (!q) return stage;
     return stage.filter(s => {
       const name = s.type === "text" ? (s.content || "") : s.type === "image" ? "图片" : (s.name || s.items?.[0]?.name || "文件");
       return matchItem(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
     });
-  }, [stage, search]);
+  }, [stage, deferredSearch]);
   // 续99b：为中转区图片文件懒生成缩略图（Rust 侧解码缩图，前端只缓存小 base64）。pending ref 去重：每个 path 只发起一次，失败不重试（回退 emoji）。
   useEffect(() => {
     const stagePaths = stage
@@ -1436,19 +1441,19 @@ export default function App() {
   }, [missingIds, saveStage]);
   // 剪贴板历史：同上
   const filteredClip = useMemo(() => {
-    const q = search.trim();
+    const q = deferredSearch.trim();
     if (!q) return clipboard;
     return clipboard.filter(c => {
       const name = c.type === "text" ? (c.content || "") : c.type === "image" ? "图片" : (c.items?.[0]?.name || "文件");
       return matchItem(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
     });
-  }, [clipboard, search]);
+  }, [clipboard, deferredSearch]);
   // 启动器过滤：有 search 时按名称模糊过滤，无 search 直接返回原列表（持久化/拖入/picker 行为不受影响）
   const filteredLauncher = useMemo(() => {
-    const q = search.trim();
+    const q = deferredSearch.trim();
     if (!q) return launcher;
     return launcher.filter(it => matchItem(q, it.name, []));
-  }, [launcher, search]);
+  }, [launcher, deferredSearch]);
 
   // ── 操作函数 ──
   // 启动放大暂留：深拷贝源图标容器（.app-tile-icon / .enh-result-icon）到顶层 dragLayer，按源 rect 定位，
