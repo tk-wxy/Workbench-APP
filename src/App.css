@@ -338,7 +338,11 @@ input,textarea{user-select:text;-webkit-user-select:text;}
    左(内侧，贴中转区边界)8=匹配中转区卡片右缘(~9px)→ 边界2两侧留白对称。
    注：卡片左缘(8)略比标题(16)外凸——分组列表常见样式，标题稍缩进；如需标题与卡片齐可再议。 */
 .clip-list{flex:1;overflow-y:auto;padding:4px 16px 12px 8px;display:flex;flex-direction:column;gap:8px;}
-.clip-block{position:relative;background:var(--fill-1);border-radius:var(--radius);padding:10px 12px;cursor:pointer;transition:background 80ms;display:flex;flex-direction:column;gap:4px;}
+/* content-visibility：剪贴板可达 100 条含图卡片，跳过视口外的布局/绘制（同 .enh-result，性能优化步骤2b）。
+   剪贴板列表不可拖拽重排（不量各卡 rect），故无 .app-tile/.stage-card 那种重排定位风险。
+   intrinsic-size 用 auto 前缀：首绘后记住真实高度自我校正，fallback 90px 仅用于首绘前。 */
+.clip-block{position:relative;background:var(--fill-1);border-radius:var(--radius);padding:10px 12px;cursor:pointer;transition:background 80ms;display:flex;flex-direction:column;gap:4px;
+  content-visibility:auto;contain-intrinsic-size:auto 90px;}
 .clip-block:hover{background:var(--fill-2);}
 .clip-actions{position:absolute;bottom:6px;right:6px;display:flex;gap:2px;}
 .clip-copy-btn,.clip-del-btn,.clip-pin-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
