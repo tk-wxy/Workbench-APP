@@ -946,11 +946,12 @@ pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
 /// 这正是**续99b（file 类）/ 续146c（image 类中转条目）治过的同一个坑**，剪贴板是漏项。
 ///
 /// 与 stage 不同：剪贴板图源是 base64（大图另有 `orig_path` 实体文件，但小图无实体文件），
-/// 故不能走按路径的 `get_stage_thumbnail`。此命令**无状态**：`content` 由前端传入（前端本就持有该字段），
-/// 不锁 CLIP_CACHE、不碰剪贴板 OS 句柄（不违反 R20）。复用 `stage_thumbs/` 磁盘缓存
-/// （键 = crc32(content)，内容不变则跨会话命中、零解码）与其容量 janitor，无需新目录/新清理线程。
+/// 故不能走按路径的 `get_stage_thumbnail`。**性能优化步骤2**：改为按 `time` 从 CLIP_CACHE 取 content
+/// （前端 image 条目已不再常驻 content），只取 CLIP_CACHE 锁、不碰剪贴板 OS 句柄（不违反 R20）。
+/// 复用 `stage_thumbs/` 磁盘缓存（键 = crc32(content)，内容不变则跨会话命中、零解码）与其容量 janitor。
 #[tauri::command]
-pub fn get_clip_thumbnail(content: String) -> Result<String, String> {
+pub fn get_clip_thumbnail(time: i64) -> Result<String, String> {
+    let content = crate::clipboard::clip_content_by_time(time).ok_or("条目不存在或无内容")?;
     // 接受 data URL（`data:image/png;base64,xxx`）或裸 base64
     let b64 = match content.find(',') {
         Some(i) => &content[i + 1..],

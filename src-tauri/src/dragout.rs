@@ -221,6 +221,19 @@ pub struct DragOutItem {
     pub content: Option<String>,    // 文本内容 或 base64（image）
     pub items: Option<Vec<String>>, // file 条目的路径列表
     pub orig_path: Option<String>,  // image 原图路径（可选，存在则优先用、避免降分辨率）
+    /// 剪贴板 image 条目的 time（性能优化步骤2）。前端 image 条目已不常驻 content，
+    /// 拖出路径又必须完全同步（不能 await 现取，否则卡死 R13 交接），故带 time 让 Rust 自查 CLIP_CACHE。
+    /// 中转条目的 content 前端仍常驻直接带，此项为 None。serde 对缺失的 Option 字段自动填 None。
+    pub time: Option<i64>,
+}
+
+impl DragOutItem {
+    /// image 条目的 content：前端直接带（中转项，content 常驻）或按 time 从 CLIP_CACHE 现取（剪贴板项，步骤2）。
+    fn resolve_content(&self) -> Option<String> {
+        self.content
+            .clone()
+            .or_else(|| self.time.and_then(crate::clipboard::clip_content_by_time))
+    }
 }
 
 // ── IDataObject：按需返回三种格式的 HGLOBAL ──────────────────────
@@ -395,8 +408,8 @@ fn image_to_file(it: &DragOutItem, temp_files: &mut Vec<PathBuf>) -> Option<Stri
             return Some(op.clone());
         }
     }
-    let raw = strip_data_url(it.content.as_deref()?);
-    let bytes = base64_decode(raw)?;
+    let content = it.resolve_content()?; // 步骤2：剪贴板项按 time 现取
+    let bytes = base64_decode(strip_data_url(&content))?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -409,7 +422,8 @@ fn image_to_file(it: &DragOutItem, temp_files: &mut Vec<PathBuf>) -> Option<Stri
 
 /// CF_DIB：base64 PNG → RGBA → BITMAPINFOHEADER(40, 32bpp, BI_RGB) + 自底向上 BGRA 像素。
 fn build_dib(it: &DragOutItem) -> Option<Vec<u8>> {
-    let bytes = base64_decode(strip_data_url(it.content.as_deref()?))?;
+    let content = it.resolve_content()?; // 步骤2：剪贴板项按 time 现取
+    let bytes = base64_decode(strip_data_url(&content))?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let (w, h) = (img.width(), img.height());
     let mut out = Vec::with_capacity(40 + (w * h * 4) as usize);
