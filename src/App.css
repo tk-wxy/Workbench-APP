@@ -348,6 +348,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .clip-copy-btn.copied{opacity:1;color:#4ade80;}  /* 复制成功 ✓：绿色、移开鼠标也保持可见 */
 .clip-preview{font-size:11px;color:var(--text2);line-height:1.4;word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
 .clip-image{width:100%;max-height:120px;object-fit:cover;border-radius:4px;-webkit-user-drag:none;user-select:none;}
+/* 缩略图未就绪时的占位（性能优化步骤1）：避免先渲染 1024px 整图再换小图那一瞬的大纹理 */
+.clip-image-ph{height:80px;background:var(--fill-2);}
 .file-clip-preview{display:flex;align-items:center;gap:8px;}
 .file-clip-icon{font-size:20px;flex-shrink:0;}
 .clip-file-icon{font-size:1.25rem;line-height:1;flex-shrink:0;}
