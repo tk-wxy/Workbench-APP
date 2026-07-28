@@ -750,6 +750,7 @@ pub(crate) fn init_thumb_cache(data_dir: &std::path::Path) {
     let _ = STAGE_THUMB_DIR.set(dir);
     // 后台 janitor（仿 clip_images 解耦 sweep）：起手延迟错开 setup，之后周期封顶
     std::thread::spawn(|| {
+        let _guard = crate::ThreadExitGuard("stage_thumb_janitor"); // M5-A
         std::thread::sleep(std::time::Duration::from_millis(STAGE_THUMB_SWEEP_INITIAL_MS));
         loop {
             sweep_stage_thumb_cache();
@@ -1002,6 +1003,7 @@ pub(crate) fn init_launcher_assets(data_dir: &std::path::Path) {
     let _ = STAGE_IMAGE_DIR.set(stage_dir);
     let _ = LAUNCHER_DATA_DIR.set(data_dir.to_path_buf());
     std::thread::spawn(|| {
+        let _guard = crate::ThreadExitGuard("launcher_janitor"); // M5-A
         std::thread::sleep(std::time::Duration::from_millis(LAUNCHER_SWEEP_INITIAL_MS));
         loop {
             sweep_launcher_assets();

@@ -600,6 +600,7 @@ export default function App() {
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
     let cleanup: (() => void)[] = [];
+    let disposed = false; // H1：StrictMode 双跑/组件卸载后 async listen 才注册完时，收尾处发现此标志即自卸，防监听残留翻倍
     let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
     let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
     // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
@@ -783,9 +784,10 @@ export default function App() {
           beginClipDragOut(ds.item);
         });
         cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10, un11];
+        if (disposed) { cleanup.forEach(fn => fn()); cleanup = []; } // H1：同步 cleanup 已先跑（StrictMode 首 mount）→ 这批刚注册的监听立即卸掉
       } catch (e) { console.error("listen error:", e); }
     })();
-    return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); };
+    return () => { disposed = true; cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──

@@ -272,6 +272,7 @@ fn start_clipboard_listener() {
         HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSW,
     };
     std::thread::spawn(|| unsafe {
+        let _guard = crate::ThreadExitGuard("clip_listener"); // M5-A
         let hinst = match GetModuleHandleW(None) {
             Ok(h) => h,
             Err(e) => {
@@ -331,6 +332,7 @@ fn start_clipboard_listener() {
 fn start_clipboard_monitor(app_handle: AppHandle) {
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     std::thread::spawn(move || {
+        let _guard = crate::ThreadExitGuard("clip_monitor"); // M5-A
         let mut last_seq = unsafe { GetClipboardSequenceNumber() };
         // 事件代数基线：必须在进循环前取，之后每轮由 wait_clip_event 更新。
         let mut seen_gen = current_clip_event_gen();
@@ -1505,6 +1507,7 @@ fn sweep_clip_image_cache() {
 fn start_clip_image_janitor() {
     if CLIP_IMAGE_DIR.get().is_none() { return; } // 目录未初始化：降级 no-op
     std::thread::spawn(|| {
+        let _guard = crate::ThreadExitGuard("clip_image_janitor"); // M5-A
         // 首次 sweep 必须在 load_clip_history 填充 CLIP_CACHE 之后（否则空 referenced 集误删全部）
         std::thread::sleep(std::time::Duration::from_millis(CLIP_IMAGE_SWEEP_INITIAL_MS));
         loop {

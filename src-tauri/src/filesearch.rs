@@ -701,6 +701,7 @@ pub fn start_index_worker(app: AppHandle) {
     EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
     ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(move || {
+        let _guard = crate::ThreadExitGuard("index_worker"); // M5-A
         std::thread::sleep(Duration::from_secs(INITIAL_DELAY_SECS));
         let mut round: u32 = 0;
         loop {
