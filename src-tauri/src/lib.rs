@@ -27,6 +27,19 @@ static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLoc
 /// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
 static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
 
+// ── M5-A：常驻线程退出打点 ─────────────────────────────────────────────
+// RAII 守卫：线程以任何路径退出（early return / break / dev 下 panic unwind）都在 stderr 留一行。
+// release 是 panic=abort（不 unwind、进程直接死），故它抓的正是唯一残余形态——「静默提前 return」
+// （如监听器注册失败退化轮询、循环意外 break）。统一前缀 [thread-exit] 便于 grep。
+// 用法：常驻 spawn 闭包首行 `let _guard = crate::ThreadExitGuard("名字");`。
+// ⚠ 一次性任务线程别挂（正常结束会误报）。
+pub(crate) struct ThreadExitGuard(pub &'static str);
+impl Drop for ThreadExitGuard {
+    fn drop(&mut self) {
+        eprintln!("[thread-exit] {} 常驻线程退出（设计为永不返回；退出=该功能静默降级）", self.0);
+    }
+}
+
 /// 托盘菜单项句柄（setup 时 manage 进 app state），供 set_tray_language 运行时切换文案用。
 struct TrayMenuItems {
     toggle: MenuItem<tauri::Wry>,
@@ -519,6 +532,7 @@ fn start_hotkey_monitor(app: AppHandle) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState; // combo VK 列表改读 HOTKEY_VK_KEYS
 
     std::thread::spawn(move || {
+        let _guard = ThreadExitGuard("hotkey_monitor"); // M5-A
         let window = match app.get_webview_window("main") {
             Some(w) => w,
             None => { eprintln!("[hotkey] no main window, abort"); return; }
@@ -660,6 +674,7 @@ fn start_focus_watch(app: AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     std::thread::spawn(move || {
+        let _guard = ThreadExitGuard("focus_watch"); // M5-A
         let window = match app.get_webview_window("main") {
             Some(w) => w,
             None => { eprintln!("[focus] no main window, abort"); return; }
