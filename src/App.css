@@ -255,8 +255,6 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-item .stage-missing-badge{position:static;margin-right:2px;flex:none;}
 /* 快捷入口 / 关闭 / 移除按钮内的 Solar svg：块级消除基线缝隙 */
 .shortcut-chip svg,.search-dir-remove svg{display:block;}
-/* 剪贴板时间前缀类型图标（截屏=相机 / 文件=回形针），随 9px 时间文字缩小对齐 */
-.clip-time-ic{vertical-align:-2px;margin-right:3px;}
 /* ── 中转区方格卡片（固定 72px 绝对尺寸；行容量 9→10；行节奏与启动台严格对齐，见下）── */
 /* CSS Grid（auto-fill 固定 72px 列）：列数对整个网格只算一次。
    justify-content:space-evenly——把剩余横向空白平均分到「每张卡两侧+首尾」，
@@ -344,9 +342,11 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .clip-block{position:relative;background:var(--fill-1);border-radius:var(--radius);padding:10px 12px;cursor:pointer;transition:background 80ms;display:flex;flex-direction:column;gap:4px;
   content-visibility:auto;contain-intrinsic-size:auto 90px;}
 .clip-block:hover{background:var(--fill-2);}
-.clip-actions{position:absolute;bottom:6px;right:6px;display:flex;gap:2px;}
+.clip-actions{display:flex;gap:2px;}  /* 文档流布局：落在 .clip-foot 底部行内，不浮于内容上 */
+.clip-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;}  /* 卡片底部行：左时间戳、右按钮组，均在内边距内 */
 .clip-copy-btn,.clip-del-btn,.clip-pin-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .clip-block:hover .clip-copy-btn,.clip-block:hover .clip-del-btn,.clip-block:hover .clip-pin-btn{opacity:1;}
+.clip-block .clip-copy-btn,.clip-block .clip-del-btn,.clip-block .clip-pin-btn{opacity:1;width:26px;height:26px;}  /* 剪贴板卡片按钮常显+加大（仅卡片作用域，中转站沿用悬停显隐） */
 .clip-copy-btn:hover,.clip-pin-btn:hover{background:var(--accent-soft);color:var(--accent);}
 .clip-del-btn:hover{background:rgba(255,80,80,0.2);color:#ff6b6b;}
 .clip-copy-btn.copied{opacity:1;color:#4ade80;}  /* 复制成功 ✓：绿色、移开鼠标也保持可见 */
@@ -358,7 +358,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .file-clip-icon{font-size:20px;flex-shrink:0;}
 .clip-file-icon{font-size:1.25rem;line-height:1;flex-shrink:0;}
 .file-clip-info{font-size:11px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.clip-time{font-size:9px;color:var(--text3);align-self:flex-start;}
+.clip-time{display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--text3);line-height:1;}  /* flex 居中对齐，取代 vertical-align hack */
+.clip-time svg{flex:none;opacity:0.7;}  /* 类型图标淡一层，时间文本为主 */
 
 /* ── 剪贴板卡片长按拖拽到中转区 ── */
 /* 拖拽期间：禁文字选中（防泛蓝）+ 抓取光标 */
