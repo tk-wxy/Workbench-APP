@@ -105,6 +105,9 @@ interface LauncherItem {
   ext?: string;           // file 显示图标用
 }
 const LAUNCHER_MAX = 200;
+/// 搜索现场（页面搜索/增强搜索）保留时长：隐藏时若仍带着搜索现场则不立即复位，保留此时长供用户
+/// 多次呼出继续浏览；每次隐藏重新起算，呼出即取消计时；超时在隐藏中静默复位，下次呼出全新。
+const SEARCH_KEEP_MS = 10_000;
 /// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
 /// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
 const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
@@ -290,6 +293,7 @@ const enhPath = (r: EnhResult) =>
 export default function App() {
   const [visible, setVisible] = useState(false);
   const [search, setSearch] = useState("");
+  const searchValueRef = useRef(""); searchValueRef.current = search; // 供 hotkey-hide 闭包读最新值（判定有无搜索现场）
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
@@ -597,11 +601,16 @@ export default function App() {
   useEffect(() => {
     let cleanup: (() => void)[] = [];
     let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
+    let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
+    // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
+    const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setSearch(""); pageSearchForcedRef.current = false; };
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
+        const un1 = await listen("hotkey-show", () => { if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; } setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
+        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setPickerOpen(false); setPickerQuery(""); setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); // 搜索现场例外：带着搜索现场隐藏时不立即复位，保留 SEARCH_KEEP_MS（每次隐藏重新起算）供多次呼出继续浏览；无现场则照旧立即复位
+        if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; }
+        if (searchValueRef.current || enhOpenRef.current) { searchKeepTimer = setTimeout(() => { searchKeepTimer = null; resetSearchState(); }, SEARCH_KEEP_MS); } else { resetSearchState(); } }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
         const un3 = await listen("clipboard-update", async () => {
           // 性能优化步骤2：image 条目 content 已不入前端 state，无法再按 content 做乐观去重。
           // 改为回拉 Rust 权威历史（get_clipboard_history 已剥图片 content、且 Rust 侧已按 ahash 去重 R24）。
@@ -776,7 +785,7 @@ export default function App() {
         cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10, un11];
       } catch (e) { console.error("listen error:", e); }
     })();
-    return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
+    return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
@@ -2900,13 +2909,6 @@ export default function App() {
                 onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp}
                 onPointerCancel={handleClipPointerCancel} onLostPointerCapture={()=>endClipDrag()}
                 onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?t("单击左键粘贴"):c.type==="file"?t("单击左键粘贴文件"):t("单击左键复制")}>
-                <div className="clip-actions">
-                  <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin/></button>
-                  <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?t("已复制"):t("复制到剪贴板")}>
-                    {copiedTime===c.time ? <IconCheck/> : <IconCopy/>}
-                  </button>
-                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><IconTrash/></button>
-                </div>
                 {c.type==="image"? (clipThumbs[c.time]
                     ? <img className="clip-image" src={clipThumbs[c.time]} alt="" draggable={false}/>
                     : <div className="clip-image clip-image-ph" aria-hidden/>)
@@ -2915,7 +2917,15 @@ export default function App() {
                     <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : t("{n}个文件", {n: c.count ?? 0})}</span>
                   </div>
                 : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
-                <span className="clip-time">{c.type==="image"?<IconCamera size={12} className="clip-time-ic"/>:c.type==="file"?<IconPaperclip size={12} className="clip-time-ic"/>:null}{ago(c.time, t)}</span>
+                <div className="clip-foot"><span className="clip-time">{c.type==="image"?<IconCamera size={11}/>:c.type==="file"?<IconPaperclip size={11}/>:null}{ago(c.time, t)}</span>
+                  <div className="clip-actions">
+                    <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin size={14}/></button>
+                    <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?t("已复制"):t("复制到剪贴板")}>
+                      {copiedTime===c.time ? <IconCheck size={14}/> : <IconCopy size={14}/>}
+                    </button>
+                    <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><IconTrash size={14}/></button>
+                  </div>
+                </div>
               </div>
             )): <p className="empty-hint">{search.trim()?t("无匹配"):t("显示时自动读取")}</p>}
           </div>
