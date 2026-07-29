@@ -597,7 +597,56 @@ fn save_clip_history(snapshot: Vec<serde_json::Value>) -> Result<(), String> {
     Ok(())
 }
 
-/// 把原图 PNG 写到 clip_images/{time}.png（原子写 tmp→rename）。
+// ── 续148：D1 原图丢失窗口根治（raw 先落地 + 启动恢复）──────────────────────────
+// 旧设计的唯一慢段是 PNG 编码（~689ms，CPU 密集）；崩在这段 = entry 已带 orig_path 落盘、
+// 文件却永远不来 → 原图永久丢。但 RGBA 原始字节在本线程内存里现成，落盘它是纯 I/O
+// （25MB ≈ 10-50ms）。故写盘改两段式：① 先落 {time}.raw（自描述头 + RGBA）——不可恢复窗口
+// 从 ~689ms 压到本段；② PNG 编码照旧（此时已有 raw 兜底）；③ 成功删 raw。
+// 崩在② → 下次启动 recover_pending_raws 从 raw 补出 PNG。崩在① 才是新的不可恢复残留
+// （要归零只能同步写进监听循环、加宽采样塌缩，违反 R17/R20 既定权衡，不做）。
+
+/// raw 恢复文件魔数。自描述布局：magic(4B) + w(u32 LE) + h(u32 LE) + RGBA(w*h*4B)。
+const RAW_MAGIC: &[u8; 4] = b"WBRA";
+
+/// 编码 raw 字节流。纯函数供单测。
+fn encode_raw(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(12 + rgba.len());
+    v.extend_from_slice(RAW_MAGIC);
+    v.extend_from_slice(&w.to_le_bytes());
+    v.extend_from_slice(&h.to_le_bytes());
+    v.extend_from_slice(rgba);
+    v
+}
+
+/// 解码并严格校验 raw：魔数 / 非零宽高 / 总长 == 12 + w*h*4（全程 checked 溢出安全）。
+/// 任一不符 → None（= 写了一半或损坏，调用方删除放弃）。纯函数供单测。
+fn decode_raw(bytes: &[u8]) -> Option<(u32, u32, &[u8])> {
+    if bytes.len() < 12 || !bytes.starts_with(RAW_MAGIC) { return None; }
+    let w = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    let h = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let expect = (w as usize).checked_mul(h as usize)?.checked_mul(4)?.checked_add(12)?;
+    (w > 0 && h > 0 && bytes.len() == expect).then_some((w, h, &bytes[12..]))
+}
+
+/// `{time}.raw` 文件名 → time。恢复循环只认这个形态，别的文件一律不碰。纯函数供单测。
+fn raw_name_time(name: &str) -> Option<i64> {
+    name.strip_suffix(".raw")?.parse().ok()
+}
+
+/// PNG 编码 + 原子写（tmp→rename）到 path。抽自 save_clip_image_to_disk，启动恢复复用。
+fn write_png_atomic(img: &image::DynamicImage, path: &std::path::Path, time: i64) -> Result<(), ()> {
+    let tmp = path.with_extension("png.tmp");
+    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+    if img.write_to(&mut cursor, image::ImageFormat::Png).is_err() {
+        eprintln!("[clip_img] PNG 编码失败 time={time}"); return Err(());
+    }
+    if std::fs::write(&tmp, cursor.into_inner()).is_err() {
+        eprintln!("[clip_img] 写临时文件失败 time={time}"); return Err(());
+    }
+    std::fs::rename(&tmp, path).map_err(|e| { eprintln!("[clip_img] rename 失败 time={time}: {e}"); })
+}
+
+/// 把原图写到 clip_images/（续148 两段式：raw 先落地兜底 → PNG tmp→rename → 删 raw）。
 /// 在 detached 线程内调用，不持任何锁。>MAX_ORIG_DIM 时等比缩放后存。失败仅 eprintln。
 fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) {
     // 计数守卫：编码/写盘中途任何 early-return 都要减回去，否则退出时会白等满超时
@@ -619,18 +668,60 @@ fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) 
     } else {
         img
     };
-    let tmp = path.with_extension("png.tmp");
-    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-    if save_img.write_to(&mut cursor, image::ImageFormat::Png).is_err() {
-        eprintln!("[clip_img] PNG 编码失败 time={time}"); return;
+    // ① raw 先落地（纯 I/O 快段）。存 MAX_ORIG_DIM 钳制后的图——与 PNG 内容同源，
+    //    恢复补出的 PNG 与未崩溃时一致。失败不阻断：退回旧设计的全窗口命运，仍继续编码。
+    let raw_path = dir.join(format!("{time}.raw"));
+    let rgba = save_img.to_rgba8();
+    let (sw, sh) = (rgba.width(), rgba.height());
+    if std::fs::write(&raw_path, encode_raw(sw, sh, rgba.as_raw())).is_err() {
+        eprintln!("[clip_img] raw 落地失败 time={time}（本张丧失崩溃保护，继续编码）");
     }
-    if std::fs::write(&tmp, cursor.into_inner()).is_err() {
-        eprintln!("[clip_img] 写临时文件失败 time={time}"); return;
-    }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        eprintln!("[clip_img] rename 失败 time={time}: {e}");
-    } else {
+    // ② PNG 编码（慢段，现有 raw 兜底）
+    let ok = write_png_atomic(&save_img, &path, time).is_ok();
+    // ③ 成功删 raw；失败留着 → 下次启动 recover_pending_raws 再补
+    if ok {
+        let _ = std::fs::remove_file(&raw_path);
         eprintln!("[clip_img] 原图已落盘 {time}.png ({w}×{h})");
+    }
+}
+
+/// 启动恢复（续148）：把上次崩溃/强杀时「raw 已落地、PNG 没来得及编码」的原图补回来。
+/// 纯文件级匹配（不看 entry）：{time}.raw ↔ {time}.png 配对。同步执行，**必须在
+/// load_clip_history 之前**——PNG 补齐后，load 的悬空 orig_path 摘除才不会误摘。
+/// 正常启动零代价（readdir 无 .raw 即返）；只有崩溃后那次启动才付出重编码耗时。
+fn recover_pending_raws() {
+    let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
+    recover_pending_raws_in(dir);
+}
+
+/// 恢复主体与全局目录解耦，供端到端单测（临时目录驱动）。
+fn recover_pending_raws_in(dir: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return; };
+    for ent in rd.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        let Some(time) = raw_name_time(&name) else { continue; };
+        let raw_path = ent.path();
+        let png_path = dir.join(format!("{time}.png"));
+        if png_path.exists() {
+            // 崩在「rename 成功 ↔ 删 raw」之间：PNG 已好，raw 纯多余
+            let _ = std::fs::remove_file(&raw_path);
+            continue;
+        }
+        // PNG 缺 → 从 raw 重编码补出。raw 损坏（写了一半）→ 删除放弃
+        // （= 旧设计整个 689ms 窗口的命运，如今只剩 raw 落地前 ~10-50ms 段才有此结局）。
+        let img = std::fs::read(&raw_path).ok()
+            .and_then(|bytes| decode_raw(&bytes).map(|(w, h, rgba)| (w, h, rgba.to_vec())))
+            .and_then(|(w, h, rgba)| image::RgbaImage::from_raw(w, h, rgba))
+            .map(image::DynamicImage::ImageRgba8);
+        match img {
+            Some(img) => {
+                if write_png_atomic(&img, &png_path, time).is_ok() {
+                    eprintln!("[clip_img] 崩溃恢复：{time}.png 已从 raw 补回");
+                } // 编码/写盘失败的错误已在 write_png_atomic 内打过；raw 照删（留着下轮也同样失败）
+            }
+            None => eprintln!("[clip_img] raw 损坏/写了一半，放弃恢复 time={time}"),
+        }
+        let _ = std::fs::remove_file(&raw_path);
     }
 }
 
@@ -1428,11 +1519,14 @@ fn parse_clip_image_time(name: &str) -> Option<i64> {
 /// 铁律：**绝不取 CLIPBOARD_LOCK**（磁盘 I/O 与 Win32 剪贴板锁正交）；CLIP_CACHE 锁仅
 /// snapshot-and-release 收集被引用文件名后立即释放、锁块内零 fs 调用，绝不持锁跨文件操作。
 /// 全程 best-effort：任何 fs/锁错误 log + 跳过，绝不 panic、绝不阻塞。
-/// 续146d：判定一个未被引用的 `.tmp` 文件是否应保留（正在写盘、别当孤儿删）。
-/// 非 `.tmp` 恒 false（正常孤儿逻辑照走）；`.tmp` 年轻于保护期则保留；年龄读不出 → 保守判「可删」
+/// 续146d：判定一个未被引用的临时文件（`.tmp` / 续148 的 `.raw`）是否应保留（正在写盘、别当孤儿删）。
+/// 非临时后缀恒 false（正常孤儿逻辑照走）；临时文件年轻于保护期则保留；年龄读不出 → 保守判「可删」
 /// （与本次修复前的旧行为一致，不因 mtime 偶发读失败而永久泄漏）。抽出纯函数只为可确定性测试。
+/// `.raw` 同款：写盘线程先落 raw 再慢速编码 PNG（续148），sweep 插在期间删 raw 会毁掉崩溃恢复源；
+/// 老的 .raw = 崩溃且启动恢复也失败的残留 → 照孤儿清。
 fn tmp_write_in_flight(name: &str, age_ms: Option<u128>) -> bool {
-    name.ends_with(".tmp") && age_ms.is_some_and(|a| a < CLIP_TMP_GRACE_MS as u128)
+    (name.ends_with(".tmp") || name.ends_with(".raw"))
+        && age_ms.is_some_and(|a| a < CLIP_TMP_GRACE_MS as u128)
 }
 
 fn sweep_clip_image_cache() {
@@ -1598,6 +1692,9 @@ pub(crate) fn init(app: &AppHandle, data_dir: &std::path::Path) {
         CLIP_CACHE_MAX_RUNTIME.store(n, Ordering::Relaxed);
         eprintln!("[clip] 历史上限按 store 落地：{n}");
     }
+    // 2.5 崩溃恢复（续148）：上次死亡时 raw 已落地但 PNG 未编码的原图补回来。
+    //     必须在 load 之前——PNG 补齐后，load 的悬空 orig_path 摘除才不会误摘。
+    recover_pending_raws();
     // 3. 读历史（必须在 monitor 之前，否则监听写盘会覆盖磁盘历史）
     load_clip_history();
     // 4. 启动事件通知源（续129）。放在 monitor 之前只为让 monitor 一起手就有事件可等；
@@ -1632,8 +1729,107 @@ mod tests {
         // .tmp 但 mtime 读不出 → 保守可清（同修复前旧行为，绝不因偶发读失败永久泄漏）
         assert!(!tmp_write_in_flight("1730000000000.png.tmp", None));
         // 非 .tmp → 恒 false，正常孤儿逻辑不受影响
+        // 续148：.raw 同款在写保护（写盘线程先落 raw 再编码 PNG，sweep 不得删在写的恢复源）
+        assert!(tmp_write_in_flight("1730000000000.raw", Some(0)));
+        assert!(tmp_write_in_flight("1730000000000.raw", Some(CLIP_TMP_GRACE_MS as u128 - 1)));
+        assert!(!tmp_write_in_flight("1730000000000.raw", Some(CLIP_TMP_GRACE_MS as u128)));
         assert!(!tmp_write_in_flight("1730000000000.png", Some(0)));
         assert!(!tmp_write_in_flight("orphan.png", None));
+    }
+
+    /// 续148：raw 恢复文件编解码——roundtrip 保真；魔数错/截断/尺寸不符/零宽高/溢出 一律拒。
+    #[test]
+    fn raw_codec_roundtrip_and_rejects() {
+        let rgba = vec![7u8; 4 * 4 * 4]; // 4×4 图
+        let bytes = encode_raw(4, 4, &rgba);
+        let (w, h, back) = decode_raw(&bytes).expect("合法 raw 必须解码");
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(back, &rgba[..]);
+        // 魔数错
+        let mut bad = bytes.clone(); bad[0] = b'X';
+        assert!(decode_raw(&bad).is_none());
+        // 截断（写了一半）：少 1 字节 / 只有头的前半截
+        assert!(decode_raw(&bytes[..bytes.len() - 1]).is_none());
+        assert!(decode_raw(&bytes[..8]).is_none());
+        // 尺寸字段与实长不符
+        assert!(decode_raw(&encode_raw(8, 8, &rgba)).is_none());
+        // 零宽高
+        assert!(decode_raw(&encode_raw(0, 4, &[])).is_none());
+        // 尺寸溢出（u32 极大值相乘）不得 panic、必须拒
+        assert!(decode_raw(&encode_raw(u32::MAX, u32::MAX, &[])).is_none());
+    }
+
+    /// 续148 诊断：分段计时真实写盘路径（3200×1987 大图，debug 构建）。
+    /// 目的：实测「raw 落地」距起点多久——它决定崩溃窗口的实际宽度。
+    /// 手动跑：cargo test write_path_stage_timing -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn write_path_stage_timing() {
+        let dir = std::env::temp_dir()
+            .join(format!("wb_timing_{}_{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (3200u32, 1987u32);
+        let img = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_pixel(w, h, image::Rgba([128, 64, 32, 255])));
+
+        let t0 = std::time::Instant::now();
+        let rgba = img.to_rgba8();
+        let t_rgba = t0.elapsed();
+
+        let raw_bytes = encode_raw(w, h, rgba.as_raw());
+        let t_encode_raw = t0.elapsed();
+
+        std::fs::write(dir.join("x.raw"), &raw_bytes).unwrap();
+        let t_raw_written = t0.elapsed();
+
+        write_png_atomic(&img, &dir.join("x.png"), 1).unwrap();
+        let t_png_done = t0.elapsed();
+
+        eprintln!("to_rgba8: {t_rgba:?} | +encode_raw: {t_encode_raw:?} | +raw落盘: {t_raw_written:?} | +PNG完成: {t_png_done:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 续148：恢复循环只认 `{time}.raw` 形态，别的文件一律不碰。
+    #[test]
+    fn raw_name_parse() {
+        assert_eq!(raw_name_time("1730000000000.raw"), Some(1730000000000));
+        assert_eq!(raw_name_time("1730000000000.png"), None);
+        assert_eq!(raw_name_time("1730000000000.png.tmp"), None);
+        assert_eq!(raw_name_time("abc.raw"), None);
+        assert_eq!(raw_name_time(".raw"), None);
+    }
+
+    /// 续148：恢复闭环端到端（临时目录驱动）——raw 在/PNG 缺 → 补出 PNG 且像素逐字节一致；
+    /// PNG 已在 → raw 纯多余被删；raw 损坏（写了一半）→ 删除且不产 PNG。
+    #[test]
+    fn recover_pending_raws_end_to_end() {
+        let dir = std::env::temp_dir()
+            .join(format!("wb_recover_test_{}_{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_pixel(8, 8, image::Rgba([1, 2, 3, 255])));
+        let rgba = img.to_rgba8();
+        // 情形1：raw 在、PNG 缺 → 应恢复
+        std::fs::write(dir.join("100.raw"), encode_raw(8, 8, rgba.as_raw())).unwrap();
+        // 情形2：PNG 已在 → raw 应被当多余删掉
+        std::fs::write(dir.join("200.raw"), encode_raw(8, 8, rgba.as_raw())).unwrap();
+        write_png_atomic(&img, &dir.join("200.png"), 200).unwrap();
+        // 情形3：raw 写了一半（截断）→ 应删除且不产 PNG
+        std::fs::write(dir.join("300.raw"), &encode_raw(8, 8, rgba.as_raw())[..20]).unwrap();
+
+        recover_pending_raws_in(&dir);
+
+        // 1：PNG 补回、raw 已删、解码像素与原图逐字节一致（PNG 无损）
+        let back = image::open(dir.join("100.png")).unwrap().to_rgba8();
+        assert_eq!(back.as_raw(), rgba.as_raw());
+        assert!(!dir.join("100.raw").exists());
+        // 2：raw 已删、PNG 原样保留
+        assert!(!dir.join("200.raw").exists());
+        assert!(dir.join("200.png").exists());
+        // 3：raw 已删、不产 PNG
+        assert!(!dir.join("300.raw").exists());
+        assert!(!dir.join("300.png").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// 多格式并挂（copy_image_to_clipboard）的 CF_DIB 载荷回归钉：BITMAPINFOHEADER 关键字段 +

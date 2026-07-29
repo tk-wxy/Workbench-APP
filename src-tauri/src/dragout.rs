@@ -523,6 +523,15 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 /// DoDragDrop 起手 SetCapture 失败、拖拽不启动（续71 首版症状：界面消失但什么都没投放）。
 /// force_hide：本次拖出由"区内重排中按热键"升级而来——用户已明确要隐藏 overlay 去外部投放，故无视 keepOpen
 /// 设置强制走隐藏收场（详见 do_drag_on_main）。边界越出触发的常规拖出传 None/false，沿用 DRAGOUT_AUTO_CLOSE。
+/// 本批拖出是否剪贴板来源（条目带 time = 剪贴板项；中转条目 time 为 None，见 DragOutItem 文档）。
+/// 决定允许的 drop 效果：**剪贴板来源只许 COPY**——条目拖出后要保留（R39），若许 MOVE，
+/// Explorer 同盘落点会把源文件直接搬走：image 的 `clip_images/` 原图、file 条目引用的用户文件，
+/// 都是「条目留下、文件没了」→ 下次启动 orig_path 悬空被剥离、静默降级缩略图（续148 实测三连）。
+/// 中转站来源维持 COPY|MOVE：「移出即消失」语义下条目随投放成功移除，文件搬走是自洽的（续86）。
+fn is_clip_sourced(items: &[DragOutItem]) -> bool {
+    items.iter().any(|it| it.time.is_some())
+}
+
 #[tauri::command]
 pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: Option<bool>) {
     let force_hide = force_hide.unwrap_or(false);
@@ -530,6 +539,7 @@ pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: Optio
 }
 
 fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
+    let copy_only = is_clip_sourced(&items);
     let (formats, temp_files) = build_formats(&items);
     println!("[dragout] start: {} item(s) → {} format(s) force_hide={force_hide}", items.len(), formats.len());
     // 若本次是从区内重排升级来的（STAGE_REORDER_ACTIVE 仍为真），任何"没走到 do_drag_on_main"的中止路径都必须
@@ -551,7 +561,7 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
     };
     let app_main = app.clone();
     // 切到主线程跑 DoDragDrop（阻塞其模态循环，期间 tao 窗口仍收消息——同文件对话框 idiom）
-    if let Err(e) = app.run_on_main_thread(move || do_drag_on_main(app_main, formats, temp_files, hwnd, force_hide)) {
+    if let Err(e) = app.run_on_main_thread(move || do_drag_on_main(app_main, formats, temp_files, hwnd, force_hide, copy_only)) {
         eprintln!("[dragout] run_on_main_thread 调度失败: {e}");
         STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
         CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110
@@ -560,7 +570,7 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
 
 /// 在主线程执行：构建 COM 对象 → 起手 DoDragDrop（持有 capture）→ 延迟隐藏 overlay → 阻塞至投放/取消。
 /// 主线程已是 OLE STA（dragdrop setup 的 OleInitialize），**不再 init/uninit**（否则破坏拖入的 OLE 状态）。
-fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec<PathBuf>, hwnd: isize, force_hide: bool) {
+fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec<PathBuf>, hwnd: isize, force_hide: bool, copy_only: bool) {
     let data_obj: IDataObject = DragOutDataObject { formats }.into();
     let drop_src: IDropSource = DragOutDropSource.into();
     // force_hide（区内重排中按热键升级来的拖出）：用户已明确要隐藏 overlay，无视 keepOpen 设置强制走隐藏收场。
@@ -622,12 +632,15 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
         });
     }
 
+    // 剪贴板来源只许 COPY（理由见 is_clip_sourced）：Explorer 同盘落点的默认效果是 move，
+    // 一旦许 MOVE 它会把 clip_images/ 原图这类「条目还在引用的文件」直接搬走。
+    let allowed = if copy_only { DROPEFFECT_COPY } else { DROPEFFECT_COPY | DROPEFFECT_MOVE };
     let mut effect = DROPEFFECT(0);
     let hr = unsafe {
         DoDragDrop(
             &data_obj,
             &drop_src,
-            DROPEFFECT_COPY | DROPEFFECT_MOVE,
+            allowed,
             &mut effect,
         )
     };
@@ -689,5 +702,24 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
                 let _ = std::fs::remove_file(p);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(time: Option<i64>) -> DragOutItem {
+        DragOutItem { r#type: "image".into(), content: None, items: None, orig_path: None, time }
+    }
+
+    /// 续148：剪贴板来源（带 time）→ COPY-only；中转来源（time=None）→ 维持 COPY|MOVE。
+    /// 混合批次含任一 clip 项即按 clip 处理（前端实际不会混发，防御性判定）。
+    #[test]
+    fn clip_sourced_detection() {
+        assert!(is_clip_sourced(&[item(Some(123))]));
+        assert!(!is_clip_sourced(&[item(None)]));
+        assert!(is_clip_sourced(&[item(None), item(Some(1))]));
+        assert!(!is_clip_sourced(&[]));
     }
 }
