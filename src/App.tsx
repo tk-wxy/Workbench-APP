@@ -20,7 +20,7 @@ interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
 // ⚠️ Rust 侧带 #[serde(rename_all="camelCase")]，这里也必须按 camelCase 读（防续112 那次错配重演）。
 interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; modified?: number | null; created?: number | null; entries?: number | null; entriesCapped?: boolean; width?: number | null; height?: number | null; target?: string | null; }
 interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
-interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
+interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; orig_degraded?: boolean; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
 // content：text=正文；image=base64 图片。**image 的 content 是内存态**——落盘前被 dehydrateStage
@@ -159,6 +159,9 @@ function clipToStage(c: ClipItem): StageItem {
 }
 // 性能优化步骤2：剪贴板 image 条目的 content 已从前端 state 剥离（30 张 ≤1024px base64 会撑爆 JS 堆）。
 // 真正需要原文的动作（复制/粘贴/拖出/入中转）按 time 向 Rust CLIP_CACHE 现取；文本 / 已带 content（如中转条目）者原样返回。
+const mapClipHistory = (history: Array<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string;orig_degraded?:boolean}>): ClipItem[] =>
+  history.map(e => ({ type: e.type as ClipItem["type"], content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path, orig_degraded: e.orig_degraded }));
+
 async function hydrateContent(item: { type: string; content?: string; time?: number }): Promise<string | undefined> {
   if (item.content || item.type !== "image" || item.time == null) return item.content;
   const { invoke } = await import("@tauri-apps/api/core");
@@ -169,7 +172,7 @@ async function writeItemToClipboard(item: Pasteable) {
   const { invoke } = await import("@tauri-apps/api/core");
   if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
   else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
-  else await invoke("copy_image_to_clipboard", { base64: (await hydrateContent(item)) ?? "", origPath: item.orig_path ?? null });
+  else await invoke("copy_image_to_clipboard", { base64: (await hydrateContent(item)) ?? "", origPath: item.orig_path ?? null, time: item.time ?? null });
 }
 
 // 时钟：自持 state + 分钟对齐 tick，memo 化后其重渲**不牵动父组件 App**（续147 修 M1）。
@@ -437,6 +440,13 @@ export default function App() {
   const [toast, setToast] = useState<{id:number;msg:string}|null>(null);
   const toastTimerRef = useRef<number|null>(null);
   const toastIdRef = useRef(0);
+  // deps[] 核心监听无法捕获后面声明的 showToast；用恒稳 ref 复用同一 toast 状态机。
+  const showToastRef = useRef((msg:string) => {
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    setToast({ id: ++toastIdRef.current, msg });
+    toastTimerRef.current = window.setTimeout(() => { setToast(null); toastTimerRef.current = null; }, TOAST_MS);
+  });
+  const langRef = useRef<Lang>(lang); langRef.current = lang;
   const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
   const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 呼出默认搜索模式：page=顶栏界面搜索（默认），enhanced=直接进增强搜索层
@@ -617,8 +627,8 @@ export default function App() {
           // 改为回拉 Rust 权威历史（get_clipboard_history 已剥图片 content、且 Rust 侧已按 ahash 去重 R24）。
           // 事件仅在真实外部复制时触发（自写回流被 R21 抑制），此处一次 IPC 开销可忽略。
           const { invoke } = await import("@tauri-apps/api/core");
-          const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
-          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+          const history = await invoke<ClipItem[]>("get_clipboard_history");
+          setClipboard(mapClipHistory(history));
         });
         // 原生拖入（S3b）：落点在启动器区→入启动器，否则→入中转（兜底）；落地区域闪烁确认。
         // pt 是 Windows 屏幕物理像素，÷ devicePixelRatio 转 CSS px 后与 getBoundingClientRect 比对。
@@ -783,7 +793,18 @@ export default function App() {
           console.log("[clip-drag] hotkey during drag → 升级为原生拖出 + 隐藏", ds.item.type); // 续110 诊断
           beginClipDragOut(ds.item);
         });
-        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10, un11];
+        // D2：Rust 在粘贴/复制/拖出消费时首次发现原图不可用，持久标记后同步当前卡片。
+        // badge 是主提示；toast 只在界面仍可见的首次消费降级时补一句，避免粘贴已隐藏后留下幽灵提示。
+        const un12 = await listen<{time?:number;reason?:string;visible?:boolean}>("clipboard-original-degraded", event => {
+          const time = event.payload?.time;
+          if (time != null) {
+            setClipboard(prev => prev.map(c => c.time===time ? {...c,orig_degraded:true} : c));
+          }
+          if (event.payload?.reason === "consume-fallback" && event.payload?.visible) {
+            showToastRef.current(makeT(langRef.current)("原图不可用，本次已使用缩略图"));
+          }
+        });
+        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10, un11, un12];
         if (disposed) { cleanup.forEach(fn => fn()); cleanup = []; } // H1：同步 cleanup 已先跑（StrictMode 首 mount）→ 这批刚注册的监听立即卸掉
       } catch (e) { console.error("listen error:", e); }
     })();
@@ -796,9 +817,9 @@ export default function App() {
     (async () => {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
+        const history = await invoke<ClipItem[]>("get_clipboard_history");
         if (history.length) {
-          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+          setClipboard(mapClipHistory(history));
         }
       } catch {}
     })();
@@ -1672,11 +1693,7 @@ export default function App() {
   }, [search, saveLauncher]);
 
   // 发一条轻提示；重复调用直接顶掉上一条（不排队——排队会让连续操作的提示滞后于操作本身）。
-  const showToast = useCallback((msg:string) => {
-    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
-    setToast({ id: ++toastIdRef.current, msg });
-    toastTimerRef.current = window.setTimeout(() => { setToast(null); toastTimerRef.current = null; }, TOAST_MS);
-  }, []);
+  const showToast = useCallback((msg:string) => showToastRef.current(msg), []);
 
   // 把 AddResult 翻成一句提示。集中在此，避免每个调用点各写一遍三分支（也保证措辞一致）。
   const toastAddResult = useCallback((res:AddResult, target:"launcher"|"stage", name:string) => {
@@ -2215,8 +2232,8 @@ export default function App() {
   // 用它把前端拽回权威真相，避免「前端删了、磁盘没删 → 重启复活」的静默分叉。
   const refreshClipboard = useCallback(async () => {
     const { invoke } = await import("@tauri-apps/api/core");
-    const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
-    setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+    const history = await invoke<ClipItem[]>("get_clipboard_history");
+    setClipboard(mapClipHistory(history));
   }, []);
   const deleteClipItem = useCallback(async (time:number) => {
     setClipboard(prev => prev.filter(c => c.time !== time)); // 乐观：先从界面移除
@@ -2357,8 +2374,8 @@ export default function App() {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("set_clip_cache_max", { n });
       // Rust 已截断缓存，重新拉取最新历史同步前端 state
-      const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
-      setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+      const history = await invoke<ClipItem[]>("get_clipboard_history");
+      setClipboard(mapClipHistory(history));
     } catch {}
   }, [store]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
@@ -2368,7 +2385,7 @@ export default function App() {
       const {invoke}=await import("@tauri-apps/api/core");
       if (item.type === "text") { try { await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
       else if (item.type === "file" && item.items) { try { await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); } }
-      else { try { await invoke("set_clipboard_image",{base64:(await hydrateContent(item)) ?? "",origPath:item.orig_path??null}); } catch{ await hideWorkbench(); } } // 步骤2：图片 content 现取
+      else { try { await invoke("set_clipboard_image",{base64:(await hydrateContent(item)) ?? "",origPath:item.orig_path??null,time:item.time??null}); } catch{ await hideWorkbench(); } } // 步骤2：图片 content 现取
     };
     // 无障碍：跳过淡出，沿用即时粘贴
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -2911,9 +2928,12 @@ export default function App() {
                 onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp}
                 onPointerCancel={handleClipPointerCancel} onLostPointerCapture={()=>endClipDrag()}
                 onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?t("单击左键粘贴"):c.type==="file"?t("单击左键粘贴文件"):t("单击左键复制")}>
-                {c.type==="image"? (clipThumbs[c.time]
-                    ? <img className="clip-image" src={clipThumbs[c.time]} alt="" draggable={false}/>
-                    : <div className="clip-image clip-image-ph" aria-hidden/>)
+                {c.type==="image"? <>
+                    {clipThumbs[c.time]
+                      ? <img className="clip-image" src={clipThumbs[c.time]} alt="" draggable={false}/>
+                      : <div className="clip-image clip-image-ph" aria-hidden/>}
+                    {c.orig_degraded && <span className="clip-degraded-badge" title={t("原图不可用，复制、粘贴或拖出时将使用缩略图")}><IconWarn size={15}/></span>}
+                  </>
                 : c.type==="file"? <div className="file-clip-preview">
                     <span className="clip-file-icon"><FileGlyph size={20} {...fileGlyphFor(c)}/></span>
                     <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : t("{n}个文件", {n: c.count ?? 0})}</span>
@@ -3193,7 +3213,7 @@ export default function App() {
                     <span className="settings-row-label">{t("图片原图缓存")}</span>
                     <div style={{display:"flex",gap:4}}>
                       <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
+                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");await refreshClipboard();setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
                     </div>
                   </div>
                   <p className="settings-hint">{t("历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。")}</p>
