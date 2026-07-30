@@ -356,7 +356,7 @@ impl IDropSource_Impl for DragOutDropSource_Impl {
 /// - 无任何文件格式（纯单条 text）时暴露 CF_UNICODETEXT。
 ///
 /// 不删 orig_path 原图（`clip_images/` 持久缓存），只删本函数新建的 temp。
-fn build_formats(items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>, Vec<PathBuf>) {
+fn build_formats(app: &AppHandle, items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>, Vec<PathBuf>) {
     let mut file_paths: Vec<String> = Vec::new();
     let mut temp_files: Vec<PathBuf> = Vec::new();
     let mut text_payload: Option<String> = None;
@@ -372,7 +372,7 @@ fn build_formats(items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>, Vec<PathBuf>) {
                 }
             }
             "image" => {
-                if let Some(p) = image_to_file(it, &mut temp_files) {
+                if let Some(p) = image_to_file(app, it, &mut temp_files) {
                     file_paths.push(p);
                 }
             }
@@ -402,10 +402,19 @@ fn build_formats(items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>, Vec<PathBuf>) {
 }
 
 /// image 条目 → 磁盘 PNG 路径：优先 orig_path（持久原图、不入 temp 列表），否则 base64 落临时文件。
-fn image_to_file(it: &DragOutItem, temp_files: &mut Vec<PathBuf>) -> Option<String> {
+fn image_to_file(app: &AppHandle, it: &DragOutItem, temp_files: &mut Vec<PathBuf>) -> Option<String> {
     if let Some(op) = &it.orig_path {
         if std::path::Path::new(op).exists() {
             return Some(op.clone());
+        }
+        // 剪贴板来源才有 time；中转 image 可沿用 fallback，但其状态由前端持久化域管理。
+        if it.time.is_some() {
+            crate::clipboard::mark_clip_original_degraded(
+                app,
+                it.time,
+                Some(op),
+                "consume-fallback",
+            );
         }
     }
     let content = it.resolve_content()?; // 步骤2：剪贴板项按 time 现取
@@ -540,7 +549,7 @@ pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: Optio
 
 fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
     let copy_only = is_clip_sourced(&items);
-    let (formats, temp_files) = build_formats(&items);
+    let (formats, temp_files) = build_formats(&app, &items);
     println!("[dragout] start: {} item(s) → {} format(s) force_hide={force_hide}", items.len(), formats.len());
     // 若本次是从区内重排升级来的（STAGE_REORDER_ACTIVE 仍为真），任何"没走到 do_drag_on_main"的中止路径都必须
     // 在此清掉该让路标志——否则标志永久悬置，monitor/light-dismiss 永远让路、窗口再也无法正常隐藏/关闭。

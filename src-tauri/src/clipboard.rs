@@ -29,6 +29,9 @@ static CLIP_EVENT_GEN: Mutex<u64> = Mutex::new(0);
 static CLIP_EVENT_CV: std::sync::Condvar = std::sync::Condvar::new();
 /// 剪贴板历史落盘路径（setup 阶段写入一次，之后只读）。未初始化时 load/save 静默 no-op。
 static CLIP_HISTORY_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+/// 串行化历史文件写入。每个写者拿到此锁后重新抓 CLIP_CACHE 最新快照，防较旧快照后写覆盖新历史。
+/// 不与 CLIP_CACHE 同时跨磁盘 I/O 持有：只在锁内 clone，随即释放缓存锁再写文件。
+static CLIP_HISTORY_SAVE_LOCK: Mutex<()> = Mutex::new(());
 /// 原图落盘目录（setup 阶段初始化）。未初始化时 save_clip_image_to_disk 静默跳过。
 static CLIP_IMAGE_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
@@ -59,6 +62,10 @@ const CLIP_IMAGE_SWEEP_MS: u64 = 10 * 60 * 1000;
 /// 退出前用它等一等（见 wait_pending_image_writes）。
 pub(crate) static PENDING_IMAGE_WRITES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+/// 正在写盘的具体剪贴板条目 time。全局计数只供退出等待；消费降级判定必须按条目精确查询，
+/// 不能让另一张图的编码遮蔽当前条目的原图丢失。
+static PENDING_IMAGE_WRITE_TIMES: std::sync::LazyLock<Mutex<std::collections::HashSet<i64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 /// 退出时最多等多久（毫秒）——够写完一两张全屏截图，又不至于让退出显得卡死。
 const PENDING_WRITE_WAIT_MAX_MS: u64 = 3000;
 /// 原图缓存 janitor 起手延迟（5s）：错开 setup 同步 load_clip_history，防空 referenced 集误删全部
@@ -86,6 +93,120 @@ fn now_ms() -> i64 {
 // ── 剪贴板后台缓存 ─────────────────────────────────────────
 
 static CLIP_CACHE: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+
+/// 根据原始尺寸与原图文件状态规范化降级标记。只持久化 `true`：正常小图本来就没有
+/// `orig_path`，绝不能因字段缺失被误标；旧条目尺寸也缺失时不猜测。
+/// 返回 JSON 是否发生变化。`path_exists` 由调用方注入，便于纯函数测试。
+fn normalize_orig_degraded(
+    item: &mut serde_json::Value,
+    path_exists: impl FnOnce(&str) -> bool,
+) -> bool {
+    if item["type"].as_str() != Some("image") {
+        return false;
+    }
+    let is_large = item["w"].as_u64().is_some_and(|w| w > MAX_THUMB_DIM as u64)
+        || item["h"].as_u64().is_some_and(|h| h > MAX_THUMB_DIM as u64);
+    let degraded = match item["orig_path"].as_str() {
+        Some(path) => !path_exists(path),
+        None => is_large,
+    };
+    let was_degraded = item["orig_degraded"].as_bool() == Some(true);
+    if degraded == was_degraded {
+        return false;
+    }
+    if let Some(obj) = item.as_object_mut() {
+        if degraded {
+            obj.insert("orig_degraded".into(), serde_json::Value::Bool(true));
+        } else {
+            obj.remove("orig_degraded");
+        }
+    }
+    true
+}
+
+/// 消费图片时确认原图不可用：幂等更新 Rust 权威缓存，锁外落盘并通知前端。
+/// `time` 优先精确定位剪贴板条目；`orig_path` 仅作旧调用/同源路径兜底。
+/// 新大图 entry 会先预置路径再异步写盘：只对“目标条目本身刚创建、且确有写线程”给短暂宽限，
+/// 避免用全局 pending 状态误压住另一条旧图片的真实降级。
+pub(crate) fn mark_clip_original_degraded(
+    app: &AppHandle,
+    time: Option<i64>,
+    orig_path: Option<&str>,
+    reason: &str,
+) {
+    let changed = {
+        let mut cache = CLIP_CACHE.lock().unwrap();
+        let Some(item) = cache.iter_mut().find(|e| {
+            e["type"].as_str() == Some("image")
+                && (time.is_some_and(|t| e["time"].as_i64() == Some(t))
+                    || (time.is_none()
+                        && orig_path.is_some_and(|p| e["orig_path"].as_str() == Some(p))))
+        }) else {
+            return;
+        };
+        // PNG 尚在 detached 写盘时，消费可能先撞上预置但尚不存在的 orig_path。
+        // 必须按目标条目的 time 精确确认，不能用全局 pending 计数误压住另一条旧图片。
+        let target_write_pending = reason.ends_with("fallback")
+            && item["time"].as_i64().is_some_and(|t| {
+                PENDING_IMAGE_WRITE_TIMES.lock().unwrap().contains(&t)
+            });
+        if target_write_pending || item["orig_degraded"].as_bool() == Some(true) {
+            return;
+        }
+        item["orig_degraded"] = serde_json::Value::Bool(true);
+        cache.clone()
+    }; // CLIP_CACHE 锁在此释放；落盘与 emit 均在锁外
+    let _ = save_clip_history(changed);
+    let visible = app.get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false);
+    let _ = app.emit("clipboard-original-degraded", serde_json::json!({
+        "time": time,
+        "origPath": orig_path,
+        "reason": reason,
+        "visible": visible,
+    }));
+}
+
+/// 将所有仍引用原图路径的图片标为降级。用于用户主动清空原图缓存后立即同步 UI，
+/// 不等到下一次消费或重启；路径 exists 检查在 CLIP_CACHE 锁外，锁内只改 JSON + 快照。
+fn mark_all_clip_originals_degraded(app: &AppHandle) {
+    // 路径存在性检查是磁盘 I/O：先在缓存锁外取 (time, path) 快照并判断，再回锁内应用。
+    let candidates: Vec<(i64, String)> = CLIP_CACHE.lock().unwrap().iter()
+        .filter_map(|item| {
+            (item["type"].as_str() == Some("image")
+                && item["orig_degraded"].as_bool() != Some(true))
+                .then(|| Some((item["time"].as_i64()?, item["orig_path"].as_str()?.to_string())))
+                .flatten()
+        })
+        .collect();
+    let missing: std::collections::HashSet<i64> = candidates.into_iter()
+        .filter_map(|(time, path)| (!std::path::Path::new(&path).exists()).then_some(time))
+        .collect();
+    let changed = {
+        let mut cache = CLIP_CACHE.lock().unwrap();
+        let mut times = Vec::new();
+        for item in cache.iter_mut() {
+            if item["time"].as_i64().is_some_and(|time| missing.contains(&time))
+                && item["type"].as_str() == Some("image")
+                && item["orig_degraded"].as_bool() != Some(true)
+            {
+                item["orig_degraded"] = serde_json::Value::Bool(true);
+                if let Some(time) = item["time"].as_i64() { times.push(time); }
+            }
+        }
+        (!times.is_empty()).then(|| (cache.clone(), times))
+    };
+    let Some((snapshot, times)) = changed else { return; };
+    let _ = save_clip_history(snapshot);
+    for time in times {
+        let _ = app.emit("clipboard-original-degraded", serde_json::json!({
+            "time": time,
+            "origPath": serde_json::Value::Null,
+            "reason": "cache-cleared",
+        }));
+    }
+}
 
 /// 将 arboard 图片处理为缓存 entry：>MAX_THUMB_DIM 时缩放(Triangle) → PNG 编码 → aHash。失败返回 None。
 /// 大图（>MAX_THUMB_DIM）与监听内联分支**完全一致**：保留原图、预置 `orig_path`、detached 落盘原图。
@@ -129,6 +250,7 @@ fn image_to_cache_entry(img: arboard::ImageData) -> Option<serde_json::Value> {
     // 大图 detached 落盘原图（本路径无图片去重、entry 必入缓存 → 不产孤儿；spawn 即返回、不阻塞）
     if let Some(orig_img) = large_img_opt {
         PENDING_IMAGE_WRITES.fetch_add(1, Ordering::Relaxed); // 续146d：先记账再 spawn，退出时可等
+        PENDING_IMAGE_WRITE_TIMES.lock().unwrap().insert(time);
         std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, time));
     }
     println!("[clipbg] image {w}×{h} cached, large={is_large} (build_clip_entry path)");
@@ -475,6 +597,7 @@ fn start_clipboard_monitor(app_handle: AppHandle) {
                 if let Some(orig_img) = large_img_opt {
                     let t = time;
                     PENDING_IMAGE_WRITES.fetch_add(1, Ordering::Relaxed); // 续146d：先记账再 spawn
+                    PENDING_IMAGE_WRITE_TIMES.lock().unwrap().insert(t);
                     std::thread::spawn(move || save_clip_image_to_disk(orig_img, w, h, t));
                 }
                 let _ = app_handle.emit("clipboard-update", entry);
@@ -554,37 +677,46 @@ fn load_clip_history() {
         }
     };
     if let Some(items) = v["items"].as_array() {
-        let mut cache = CLIP_CACHE.lock().unwrap();
+        // 路径检查是磁盘 I/O，先在锁外规范化；正常小图无 orig_path 不算降级。
+        // 恢复流程已在 load 前补齐可恢复 PNG，因此此处看到的悬空路径才是真降级。
+        let mut loaded = Vec::with_capacity(items.len());
+        let mut normalized = false;
         for item in items {
             let mut item = item.clone();
-            // orig_path 文件不存在时去掉该字段（降级为缩略图，重启自愈）
-            if let Some(path) = item["orig_path"].as_str() {
-                if !std::path::Path::new(path).exists() {
-                    item.as_object_mut().map(|m| m.remove("orig_path"));
-                    eprintln!("[clip] orig_path 不存在，降级为缩略图");
+            if normalize_orig_degraded(&mut item, |path| std::path::Path::new(path).exists()) {
+                normalized = true;
+                if item["orig_degraded"].as_bool() == Some(true) {
+                    eprintln!("[clip] 原图不可用，标记为缩略图降级");
                 }
             }
-            cache.push(item);
+            loaded.push(item);
         }
-        let read = cache.len();
-        cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
+        let (read, snapshot) = {
+            let mut cache = CLIP_CACHE.lock().unwrap();
+            cache.extend(loaded);
+            let read = cache.len();
+            cache.truncate(CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed));
+            (read, normalized.then(|| cache.clone()))
+        }; // CLIP_CACHE 锁在此释放
+        if let Some(snapshot) = snapshot {
+            let _ = save_clip_history(snapshot); // 旧历史状态迁移 best-effort 写回
+        }
         // 两个数都打：截断会在下一次落盘时把磁盘历史一起削掉（不可逆），一旦 read>kept
         // 而用户并没调低上限，就是「上限没落地」类 bug 复发（续145），日志里一眼可见。
+        let kept = CLIP_CACHE.lock().unwrap().len();
         eprintln!(
             "[clip] loaded {} item(s) from history (read {}, cap {})",
-            cache.len(), read, CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed)
+            kept, read, CLIP_CACHE_MAX_RUNTIME.load(Ordering::Relaxed)
         );
     }
 }
 
-/// 把历史快照原子写到磁盘（tmp → rename）。接受快照入参，自身不持任何锁。
+/// 把历史权威缓存原子写到磁盘（tmp → rename）。形参保留既有调用形状；写前会在串行锁内
+/// 重新抓 CLIP_CACHE 最新快照，避免多个锁外写者把旧状态覆盖到新状态之上。
 /// 调用方必须保证 CLIP_CACHE 锁与 CLIPBOARD_LOCK 均已释放后再调用（防重入死锁）。
-/// 任何磁盘错误只 eprintln，不传播、不 panic，持久化降级但 app 正常运行。
-/// 落盘历史。返回 `Err` 让**用户主动发起**的写（delete/clear）能把失败上报前端 → 前端从权威
-/// 缓存回同步而非静默分叉（续147：修「删除/清空失败静默 → 重启后已删条目复活」）。
-/// 监听循环等 best-effort 写用 `let _ =` 忽略（无接收方、下一次落盘自愈）。
-/// 契约不变：接快照入参、自身不持任何锁（磁盘 I/O 与 CLIPBOARD_LOCK 正交）。
-fn save_clip_history(snapshot: Vec<serde_json::Value>) -> Result<(), String> {
+fn save_clip_history(_snapshot: Vec<serde_json::Value>) -> Result<(), String> {
+    let _save_guard = CLIP_HISTORY_SAVE_LOCK.lock().unwrap();
+    let snapshot = CLIP_CACHE.lock().unwrap().clone();
     let Some(path) = CLIP_HISTORY_PATH.get() else { return Err("历史路径未初始化".into()); };
     let data = serde_json::to_string(&serde_json::json!({"version":1,"items":snapshot}))
         .map_err(|e| { eprintln!("[clip] serialize error: {e}"); format!("序列化失败: {e}") })?;
@@ -650,13 +782,14 @@ fn write_png_atomic(img: &image::DynamicImage, path: &std::path::Path, time: i64
 /// 在 detached 线程内调用，不持任何锁。>MAX_ORIG_DIM 时等比缩放后存。失败仅 eprintln。
 fn save_clip_image_to_disk(img: image::DynamicImage, w: u32, h: u32, time: i64) {
     // 计数守卫：编码/写盘中途任何 early-return 都要减回去，否则退出时会白等满超时
-    struct WriteGuard;
+    struct WriteGuard(i64);
     impl Drop for WriteGuard {
         fn drop(&mut self) {
+            PENDING_IMAGE_WRITE_TIMES.lock().unwrap().remove(&self.0);
             PENDING_IMAGE_WRITES.fetch_sub(1, Ordering::Relaxed);
         }
     }
-    let _wg = WriteGuard;
+    let _wg = WriteGuard(time);
     let Some(dir) = CLIP_IMAGE_DIR.get() else { return; };
     let path = dir.join(format!("{time}.png"));
     let save_img = if w > MAX_ORIG_DIM || h > MAX_ORIG_DIM {
@@ -1128,7 +1261,7 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>) -> Result<(), String> {
+pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>, time: Option<i64>) -> Result<(), String> {
     use enigo::Direction::{Press, Release};
     use enigo::Keyboard;
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
@@ -1147,6 +1280,9 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
             match from_orig {
                 Some(b) => b,
                 None => {
+                    if orig_path.is_some() {
+                        mark_clip_original_degraded(&app, time, orig_path.as_deref(), "paste-fallback");
+                    }
                     let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
                     base64_decode(b64).ok_or("base64 解码失败")?
                 }
@@ -1187,6 +1323,9 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         let png_path: String = match orig_path.as_deref() {
             Some(p) if std::path::Path::new(p).exists() => p.to_string(),
             _ if !base64.is_empty() => {
+                if orig_path.is_some() {
+                    mark_clip_original_degraded(&app, time, orig_path.as_deref(), "paste-fallback");
+                }
                 let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
                 let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
                 let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
@@ -1231,6 +1370,9 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         let png_path: String = match orig_path.as_deref() {
             Some(p) if std::path::Path::new(p).exists() => p.to_string(),
             _ if !base64.is_empty() => {
+                if orig_path.is_some() {
+                    mark_clip_original_degraded(&app, time, orig_path.as_deref(), "paste-fallback");
+                }
                 let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
                 let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
                 let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
@@ -1285,6 +1427,9 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
                 println!("[imgpaste] 使用原图 {}×{}", data.0, data.1);
                 data
             } else {
+                if orig_path.is_some() {
+                    mark_clip_original_degraded(&app, time, orig_path.as_deref(), "paste-fallback");
+                }
                 let b64 = if let Some(c) = base64.find(',') { &base64[c+1..] } else { &base64 };
                 let bytes = match base64_decode(b64) {
                     Some(b) => b,
@@ -1411,7 +1556,7 @@ pub(crate) fn copy_text_to_clipboard(text: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn copy_image_to_clipboard(base64: String, orig_path: Option<String>) -> Result<(), String> {
+pub(crate) fn copy_image_to_clipboard(app: AppHandle, base64: String, orig_path: Option<String>, time: Option<i64>) -> Result<(), String> {
     // 「只复制」按钮：一次性把图片以**多种剪贴板格式并挂**，让任意粘贴目标各取所需——
     //   · CF_DIB       位图 → 画图/Word/Chrome/聊天框（内嵌图片）
     //   · CF_HDROP     文件 → 桌面/资源管理器（粘出 PNG 文件）
@@ -1425,6 +1570,9 @@ pub(crate) fn copy_image_to_clipboard(base64: String, orig_path: Option<String>)
     let png_path: String = match orig_path.as_deref() {
         Some(p) if std::path::Path::new(p).exists() => p.to_string(),
         _ if !base64.is_empty() => {
+            if orig_path.is_some() {
+                mark_clip_original_degraded(&app, time, orig_path.as_deref(), "consume-fallback");
+            }
             let b64 = if let Some(c) = base64.find(',') { &base64[c + 1..] } else { &base64 };
             let bytes = base64_decode(b64).ok_or("base64 解码失败")?;
             let dir = CLIP_IMAGE_DIR.get().cloned().unwrap_or_else(std::env::temp_dir);
@@ -1493,16 +1641,35 @@ pub(crate) fn open_clip_image_dir() -> Result<(), String> {
 }
 
 /// 删除 clip_images/ 内全部文件（不删目录本身）。
-/// 当前会话 entry 的 orig_path 变悬空 → paste 自动降级缩略图；重启后 load_clip_history 去掉该字段（自愈）。
+/// 当前会话里仍引用已删原图的 entry 会立即持久化 `orig_degraded`，前端同步显示缩略图降级。
 #[tauri::command]
-pub(crate) fn clear_clip_image_cache() -> Result<(), String> {
+pub(crate) fn clear_clip_image_cache(app: AppHandle) -> Result<(), String> {
     let Some(dir) = CLIP_IMAGE_DIR.get() else { return Ok(()); };
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let _ = std::fs::remove_file(entry.path());
+    // 最多等待现有写线程正常收尾；若超时则拒绝清空，避免命令返回后 PNG 又被补写回来。
+    wait_pending_image_writes();
+    let pending = PENDING_IMAGE_WRITES.load(Ordering::Relaxed);
+    if pending > 0 {
+        return Err(format!("仍有 {pending} 张原图正在写入，请稍后重试"));
+    }
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("读取图片缓存失败: {e}"))?;
+    let mut failures = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => {
+                let path = entry.path();
+                if let Err(e) = std::fs::remove_file(&path) {
+                    failures.push(format!("{}: {e}", path.display()));
+                }
+            }
+            Err(e) => failures.push(format!("读取目录项失败: {e}")),
         }
     }
-    Ok(())
+    mark_all_clip_originals_degraded(&app);
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("部分图片缓存未能删除: {}", failures.join("; ")))
+    }
 }
 
 /// 从原图文件名 `{time}.png` 解析出 time（i64 ms），用于「最旧先删」排序；非该格式返回 None。
@@ -1715,6 +1882,38 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn orig_degraded_normalization_distinguishes_small_and_lost_originals() {
+        // 正常小图从来不需要 orig_path，不能误标。
+        let mut small = serde_json::json!({"type":"image","w":800,"h":600});
+        assert!(!normalize_orig_degraded(&mut small, |_| false));
+        assert_ne!(small["orig_degraded"].as_bool(), Some(true));
+        let mut boundary = serde_json::json!({"type":"image","w":1024,"h":1024});
+        assert!(!normalize_orig_degraded(&mut boundary, |_| false));
+
+        // 旧大图没留下路径，但尺寸能证明原图曾被缩小 → 标记降级。
+        let mut large = serde_json::json!({"type":"image","w":1025,"h":600});
+        assert!(normalize_orig_degraded(&mut large, |_| false));
+        assert_eq!(large["orig_degraded"].as_bool(), Some(true));
+        assert!(!normalize_orig_degraded(&mut large, |_| false)); // 幂等
+
+        // 悬空路径保留，供状态识别/未来恢复；路径恢复后清掉标记。
+        let mut missing = serde_json::json!({
+            "type":"image","w":2000,"h":1200,"orig_path":"C:/lost.png"
+        });
+        assert!(normalize_orig_degraded(&mut missing, |_| false));
+        assert_eq!(missing["orig_path"].as_str(), Some("C:/lost.png"));
+        assert_eq!(missing["orig_degraded"].as_bool(), Some(true));
+        assert!(normalize_orig_degraded(&mut missing, |_| true));
+        assert_ne!(missing["orig_degraded"].as_bool(), Some(true));
+
+        // 尺寸和路径都没有的旧条目不猜；非图片完全不碰。
+        let mut unknown = serde_json::json!({"type":"image"});
+        assert!(!normalize_orig_degraded(&mut unknown, |_| false));
+        let mut text = serde_json::json!({"type":"text","orig_degraded":true});
+        assert!(!normalize_orig_degraded(&mut text, |_| false));
     }
 
     /// 续146d 竞态回归钉：janitor 孤儿判定必须放过「正在写盘」的 .tmp，又不能永久漏掉崩溃遗留的 .tmp。
