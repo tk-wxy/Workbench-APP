@@ -865,18 +865,21 @@ fn save_b64_pngs(dir: &std::path::Path, tag: &[u8; 4], data: &[String]) -> Vec<O
         .collect()
 }
 
-/// 读回目录下全部 PNG：文件名 → data URL。前端启动时一次性调用，把内容补回内存条目。
-/// 单次 IPC 传全量——与原先「store JSON 里读同样多 base64」等价，不是新增开销，
-/// 且发生在启动路径、不在任何交互热路径上。
-fn load_b64_pngs(dir: &std::path::Path) -> std::collections::HashMap<String, String> {
+/// 只接受目录内的纯文件名，所有资产读取共用此边界，避免 `../` 跳出应用数据目录。
+fn asset_path(dir: &std::path::Path, file: &str) -> Result<PathBuf, String> {
+    if file.is_empty() || file.contains('/') || file.contains('\\') || file.contains("..") {
+        return Err("非法文件名".into());
+    }
+    Ok(dir.join(file))
+}
+
+/// 只读前端当前条目实际引用的 PNG：文件名 → data URL。
+/// 旧实现扫描整个目录，孤儿回收线程运行前的历史残留也会进入 IPC 与 JS 堆；选择性读取让
+/// 启动峰值和常驻量只与真实条目数相关。
+fn load_b64_pngs(dir: &std::path::Path, files: &[String]) -> std::collections::HashMap<String, String> {
     let mut map = std::collections::HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return map; };
-    for entry in entries.flatten() {
-        let p = entry.path();
-        if !p.is_file() {
-            continue;
-        }
-        let Some(name) = p.file_name().and_then(|s| s.to_str()) else { continue; };
+    for name in files {
+        let Ok(p) = asset_path(dir, name) else { continue; };
         if let Ok(bytes) = std::fs::read(&p) {
             map.insert(
                 name.to_string(),
@@ -896,10 +899,10 @@ pub fn save_launcher_icons(icons: Vec<String>) -> Vec<Option<String>> {
     }
 }
 
-/// 启动台图标：读回全部（文件名 → data URL）。
+/// 启动台图标：只读当前条目实际引用的文件（文件名 → data URL）。
 #[tauri::command]
-pub fn load_launcher_icons() -> std::collections::HashMap<String, String> {
-    LAUNCHER_ICON_DIR.get().map(|d| load_b64_pngs(d)).unwrap_or_default()
+pub fn load_launcher_icons(files: Vec<String>) -> std::collections::HashMap<String, String> {
+    LAUNCHER_ICON_DIR.get().map(|d| load_b64_pngs(d, &files)).unwrap_or_default()
 }
 
 /// 中转站图片内容：批量落盘，返回文件名（失败位 None → 调用方保留内嵌 content）。
@@ -913,10 +916,32 @@ pub fn save_stage_images(images: Vec<String>) -> Vec<Option<String>> {
     }
 }
 
-/// 中转站图片内容：读回全部（文件名 → data URL）。
+/// 返回仍存在的中转图片文件名。启动时只做轻量完整性校验，不把图片内容补进 JS state。
 #[tauri::command]
-pub fn load_stage_images() -> std::collections::HashMap<String, String> {
-    STAGE_IMAGE_DIR.get().map(|d| load_b64_pngs(d)).unwrap_or_default()
+pub fn existing_stage_images(files: Vec<String>) -> Vec<String> {
+    let Some(dir) = STAGE_IMAGE_DIR.get() else { return Vec::new(); };
+    files.into_iter()
+        .filter(|file| asset_path(dir, file).is_ok_and(|p| p.is_file()))
+        .collect()
+}
+
+/// 读取一条中转图片的原始 PNG。拖出路径直接用字节/路径，复制与粘贴才经命令按需转 data URL。
+pub(crate) fn read_stage_image_bytes(file: &str) -> Option<Vec<u8>> {
+    let dir = STAGE_IMAGE_DIR.get()?;
+    let path = asset_path(dir, file).ok()?;
+    std::fs::read(path).ok()
+}
+
+pub(crate) fn stage_image_path(file: &str) -> Option<PathBuf> {
+    let dir = STAGE_IMAGE_DIR.get()?;
+    let path = asset_path(dir, file).ok()?;
+    path.is_file().then_some(path)
+}
+
+#[tauri::command]
+pub fn get_stage_image_content(file: String) -> Result<String, String> {
+    let bytes = read_stage_image_bytes(&file).ok_or("文件不存在或不可读")?;
+    Ok(format!("data:image/png;base64,{}", base64_encode(&bytes)))
 }
 
 /// 中转站 image 条目的**小缩略图**（160px，复用 get_stage_thumbnail 的落盘缓存）。
@@ -929,11 +954,7 @@ pub fn load_stage_images() -> std::collections::HashMap<String, String> {
 #[tauri::command]
 pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
     let dir = STAGE_IMAGE_DIR.get().ok_or("stage_images 目录未初始化")?;
-    // 只收纯文件名：杜绝 `../` 之类跳出目录（入参来自前端，按不可信处理）
-    if file.is_empty() || file.contains('/') || file.contains('\\') || file.contains("..") {
-        return Err("非法文件名".into());
-    }
-    let p = dir.join(&file);
+    let p = asset_path(dir, &file)?;
     if !p.is_file() {
         return Err("文件不存在".into());
     }
@@ -1435,6 +1456,27 @@ mod tests {
         assert!(images.contains("clip_777.png"), "stage-items 引用的物化图片不得被当孤儿");
         assert!(stage_imgs.contains("deadbeef.png"), "stage-items[].contentFile 必须进引用集");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn asset_loading_is_scoped_to_references_and_rejects_traversal() {
+        let dir = std::env::temp_dir().join(format!(
+            "wb_asset_load_{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("used.png"), b"used").unwrap();
+        std::fs::write(dir.join("orphan.png"), b"orphan").unwrap();
+
+        let loaded = load_b64_pngs(&dir, &["used.png".into()]);
+        assert_eq!(loaded.len(), 1, "未引用的孤儿资产不得进入返回表");
+        assert!(loaded.contains_key("used.png"));
+        assert!(!loaded.contains_key("orphan.png"));
+
+        for bad in ["", "../used.png", r"..\used.png", "sub/used.png"] {
+            assert!(asset_path(&dir, bad).is_err(), "必须拒绝越界文件名：{bad}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1171,7 +1171,10 @@ pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<
     println!("[filepaste] paths count={}", paths.len());
 
     // Bug A 修复：场景判断提到写剪贴板之前，桌面直接落地不碰剪贴板
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        crate::set_webview_memory_low(&window, true);
+    }
     wait_foreground_handback(&app, "filepaste"); // 交接完成后 class 判断才可信（含日志）
     let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
 
@@ -1267,7 +1270,10 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
     // 先隐藏窗口，再判断目标（与 set_clipboard_files 逻辑对齐）
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        crate::set_webview_memory_low(&window, true);
+    }
     wait_foreground_handback(&app, "imgpaste"); // 交接完成后 class 判断才可信（含日志）
 
     let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
@@ -1489,7 +1495,10 @@ pub(crate) fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String
     }
     suppress_clip_until_now(); // 防自写内容回流历史面板（文本路径漏洞修复，对齐 set_clipboard_files/image）
 
-    if let Some(window) = app.get_webview_window("main") { let _ = window.hide(); }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        crate::set_webview_memory_low(&window, true);
+    }
     wait_foreground_handback(&app, "paste"); // 文本路径原先零日志，失败不可诊断；此处补齐
 
     unsafe {
@@ -1811,10 +1820,15 @@ pub(crate) fn save_image_as_launcher_file(
     app: AppHandle,
     base64: Option<String>,
     orig_path: Option<String>,
+    content_file: Option<String>,
 ) -> Result<String, String> {
     let bytes: Vec<u8> = match orig_path.as_deref() {
         Some(op) if std::path::Path::new(op).exists() => {
             std::fs::read(op).map_err(|e| format!("读原图失败: {e}"))?
+        }
+        _ if content_file.is_some() => {
+            crate::apps::read_stage_image_bytes(content_file.as_deref().unwrap())
+                .ok_or("中转图片文件不存在或不可读")?
         }
         _ => {
             let raw = base64.as_deref().ok_or("图片无内容")?;
