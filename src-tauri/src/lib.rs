@@ -79,6 +79,36 @@ const HOTKEY_TAP_MAX_MS: u128 = 250;
 /// 前台窗口轮询间隔（50ms）：light dismiss——窗口可见时若前台切到别的应用则自动隐藏。
 /// GetForegroundWindow 是 µs 级调用，50ms 轮询近乎零成本
 const FOCUS_POLL_MS: u64 = 50;
+/// setup 发生在首屏导航完成前；启动隐藏态延迟重申 Low，才能回收页面加载期新建的缓存。
+const WEBVIEW_STARTUP_LOW_REAPPLY_MS: u64 = 2_000;
+
+/// WebView2 官方内存目标：隐藏时切 Low 回收非关键缓存，显示前恢复 Normal。
+/// 这不是 suspend/unload：React state、事件监听和后台 IPC 均保持不变。
+/// with_webview 会把 COM 调用调度到 WebView UI 线程，因此可安全从热键/焦点后台线程调用。
+pub(crate) fn set_webview_memory_low(window: &tauri::WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core_webview::Interface;
+
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    let label = if low { "low" } else { "normal" };
+    if let Err(error) = window.with_webview(move |webview| {
+        let result = unsafe { webview.controller().CoreWebView2() }
+            .and_then(|core| core.cast::<ICoreWebView2_19>())
+            .and_then(|core| unsafe { core.SetMemoryUsageTargetLevel(level) });
+        if let Err(error) = result {
+            eprintln!("[webview-memory] set {label} failed: {error}");
+        }
+    }) {
+        eprintln!("[webview-memory] dispatch {label} failed: {error}");
+    }
+}
 
 
 // ── 动态全屏 ───────────────────────────────────────────────
@@ -157,8 +187,10 @@ fn tray_toggle(app_handle: &AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
+            set_webview_memory_low(&window, true);
             let _ = app_handle.emit("hotkey-hide", ());
         } else {
+            set_webview_memory_low(&window, false);
             let _ = app_handle.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
             let _ = window.show();
             let win = window.clone();
@@ -176,6 +208,7 @@ fn tray_toggle(app_handle: &AppHandle) {
 fn hide_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
+        set_webview_memory_low(&window, true);
         let _ = app.emit("hotkey-hide", ());
     }
 }
@@ -190,6 +223,7 @@ fn trigger_screenshot(app: AppHandle) -> Result<(), String> {
 
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
+        set_webview_memory_low(&window, true);
         let _ = app.emit("hotkey-hide", ());
     }
     std::thread::sleep(std::time::Duration::from_millis(80));
@@ -545,6 +579,7 @@ fn start_hotkey_monitor(app: AppHandle) {
         // ── 内嵌的 show / hide 配方（复刻现有路径，不调用/不改现有 handler）──
         // show：§8 三约束——emit 先于 show（防白闪）；set_focus 延迟 50ms（防 WM_ACTIVATE 重绘）
         let show = |app: &AppHandle, window: &tauri::WebviewWindow| {
+            set_webview_memory_low(window, false);
             let _ = app.emit("hotkey-show", ());
             let _ = window.show();
             let win = window.clone();
@@ -556,6 +591,7 @@ fn start_hotkey_monitor(app: AppHandle) {
         // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
         let hide = |app: &AppHandle, window: &tauri::WebviewWindow| {
             let _ = window.hide();
+            set_webview_memory_low(window, true);
             let _ = app.emit("hotkey-hide", ());
         };
 
@@ -710,6 +746,7 @@ fn start_focus_watch(app: AppHandle) {
                 } else if armed && fg != 0 {
                     // 前台切到另一个真实窗口（fg==0 是切换瞬间的空窗，不误关）→ light dismiss
                     let _ = window.hide();
+                    set_webview_memory_low(&window, true);
                     let _ = app.emit("hotkey-hide", ());
                     armed = false;
                     println!("[focus] foreground lost → auto hide");
@@ -750,7 +787,7 @@ pub fn run() {
             apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
             apps::save_launcher_icons, apps::load_launcher_icons,
-            apps::save_stage_images, apps::load_stage_images, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
+            apps::save_stage_images, apps::existing_stage_images, apps::get_stage_image_content, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::get_clip_content, clipboard::set_clipboard_files,
@@ -790,6 +827,19 @@ pub fn run() {
             start_hotkey_monitor(app.handle().clone());
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
+            if let Some(window) = app.get_webview_window("main") {
+                let startup_window = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        WEBVIEW_STARTUP_LOW_REAPPLY_MS,
+                    ));
+                    if !startup_window.is_visible().unwrap_or(true) {
+                        // setup 早于页面加载完成：让首屏以默认 Normal 加载，稳定后首次切 Low。
+                        // 若用户已呼出则跳过，绝不把可见窗口降回 Low。
+                        set_webview_memory_low(&startup_window, true);
+                    }
+                });
+            }
             // 剪贴板子系统初始化（路径→load→monitor→janitor 时序封装在 clipboard::init 内）
             let data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
             clipboard::init(app.handle(), &data_dir);

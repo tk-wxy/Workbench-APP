@@ -42,6 +42,10 @@ windows = { version = "0.58", features = [
 ] }
 # #[implement] 宏生成 windows_core:: 路径，用 umbrella windows crate 时需把它列为直接依赖
 windows-core = "0.58"
+# Tauri/Wry 在 Windows 已传递依赖这两个 0.61 系 crate；列为直接依赖仅为调用
+# WebView2 ICoreWebView2_19::SetMemoryUsageTargetLevel，不会引入第二份运行时。
+webview2-com = "=0.38.2"
+windows-core-webview = { package = "windows-core", version = "0.61" }
 walkdir = "2.5"
 libloading = "0.8" # 运行时动态加载 Everything64.dll（可选 Everything 搜索引擎）
 flate2 = "1.1"

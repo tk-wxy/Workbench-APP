@@ -23,11 +23,12 @@ interface FileItem { path: string; name: string; ext: string; isImage: boolean; 
 interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; orig_degraded?: boolean; }
 // 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
 // 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
-// content：text=正文；image=base64 图片。**image 的 content 是内存态**——落盘前被 dehydrateStage
-// 摘掉换成 contentFile（stage_images/ 下的文件名），载入时补回（续146b）。消费方一律只读内存态。
+// content：text=正文；image=尚未成功落盘时的 base64 兜底。
+// image 一旦落进 stage_images/，内存态也只留 contentFile；复制/粘贴按需取内容，
+// 同步拖出则把 contentFile 交给 Rust 直接读文件，避免完整图片常驻 JS 堆。
 interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; contentFile?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
 // copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
-type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; time?: number; };
+type Pasteable = { type: "text" | "image" | "file"; content?: string; contentFile?: string; items?: FileItem[]; orig_path?: string; time?: number; };
 type TFn = ReturnType<typeof makeT>;
 // 只有含汉字的名字才需要派生拼音（纯英文名走直接匹配即可）。在前端先滤一道，
 // 免得把满屏英文文件名送去 Rust 白跑一趟。
@@ -157,15 +158,17 @@ function fileEntryToStage(f: FileEntry): StageItem {
 function clipToStage(c: ClipItem): StageItem {
   return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path };
 }
-// 性能优化步骤2：剪贴板 image 条目的 content 已从前端 state 剥离（30 张 ≤1024px base64 会撑爆 JS 堆）。
-// 真正需要原文的动作（复制/粘贴/拖出/入中转）按 time 向 Rust CLIP_CACHE 现取；文本 / 已带 content（如中转条目）者原样返回。
+// 图片大内容不常驻前端 state：剪贴板按 time 从 CLIP_CACHE 现取，中转图片按 contentFile 从
+// stage_images/ 现取。拖出路径另由 Rust 同步自查，绝不在前端 await（R13）。
 const mapClipHistory = (history: Array<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string;orig_degraded?:boolean}>): ClipItem[] =>
   history.map(e => ({ type: e.type as ClipItem["type"], content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path, orig_degraded: e.orig_degraded }));
 
-async function hydrateContent(item: { type: string; content?: string; time?: number }): Promise<string | undefined> {
-  if (item.content || item.type !== "image" || item.time == null) return item.content;
+async function hydrateContent(item: { type: string; content?: string; contentFile?: string; time?: number }): Promise<string | undefined> {
+  if (item.content || item.type !== "image") return item.content;
   const { invoke } = await import("@tauri-apps/api/core");
-  return (await invoke<string | null>("get_clip_content", { time: item.time })) ?? undefined;
+  if (item.time != null) return (await invoke<string | null>("get_clip_content", { time: item.time })) ?? undefined;
+  if (item.contentFile) return await invoke<string>("get_stage_image_content", { file: item.contentFile });
+  return undefined;
 }
 // 只写当前系统剪贴板（不粘贴、不隐藏 overlay），复用现成 copy_* 命令；剪贴板卡片与中转条目共用
 async function writeItemToClipboard(item: Pasteable) {
@@ -478,7 +481,7 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ let loaded=savedStage.slice(0,stageMaxLoaded); /* 续146b 补水：contentFile → data URL（老条目仍内嵌 content，原样可用，由迁移 effect 搬走） */ if(loaded.some(it=>it.contentFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const imgMap=await invoke<Record<string,string>>("load_stage_images"); /* 文件还在→补回 content；已不在→连 contentFile 一起摘掉（同 iconFile 那条退化路径） */ loaded=loaded.map(it=>{ if(!it.contentFile) return it; const hit=imgMap[it.contentFile]; if(hit) return {...it,content:hit}; const {contentFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 contentFile，下次启动再试 */} } loaded.forEach(it=>{ if(it.contentFile) stageContentFileRef.current.set(it.id,it.contentFile); }); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ let items=savedLauncher.slice(0,LAUNCHER_MAX); /* 续146 补水：iconFile → data URL（老条目仍内嵌 icon，原样可用，由下方迁移 effect 搬走） */ if(items.some(it=>it.iconFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const iconMap=await invoke<Record<string,string>>("load_launcher_icons"); /* 文件还在→补回 icon；文件已不在（手动删/异常清理）→ 连 iconFile 一起摘掉：否则该条目「有 iconFile 却永远补不出 icon」，图标回填每次启动白跑一轮、且因 dehydrate 认旧 iconFile 而永远存不下来 */ items=items.map(it=>{ if(!it.iconFile) return it; const hit=iconMap[it.iconFile]; if(hit) return {...it,icon:hit}; const {iconFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 iconFile，下次启动再试 */} } items.forEach(it=>{ if(it.iconFile) launcherIconFileRef.current.set(it.id,it.iconFile); }); setLauncher(items); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); /* 续146：清掉已删功能残留的死 key（plugin-store 不回收未知 key，会一直躺在 JSON 里） */ let pruned=false; for(const k of DEAD_STORE_KEYS){ try{ if(await s.delete(k)) pruned=true; }catch{} } if(pruned){ try{ await s.save(); }catch{} } } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ let loaded=savedStage.slice(0,stageMaxLoaded); /* image content 不再启动补水：只校验 contentFile 仍存在，动作时按需读取 */ if(loaded.some(it=>it.contentFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const files=[...new Set(loaded.flatMap(it=>it.contentFile?[it.contentFile]:[]))]; const existing=new Set(await invoke<string[]>("existing_stage_images",{files})); loaded=loaded.map(it=>{ if(!it.contentFile||existing.has(it.contentFile)) return it; const {contentFile:_gone,...rest}=it; return rest; }); }catch{/* 瞬时校验失败→保留引用，下次启动重试；不可把未知当不存在 */} } loaded.forEach(it=>{ if(it.contentFile) stageContentFileRef.current.set(it.id,it.contentFile); }); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ let items=savedLauncher.slice(0,LAUNCHER_MAX); /* 续146 补水：只读取当前条目实际引用的 iconFile，孤儿文件不进 IPC/JS 堆 */ if(items.some(it=>it.iconFile)){ try{ const{invoke}=await import("@tauri-apps/api/core"); const files=[...new Set(items.flatMap(it=>it.iconFile?[it.iconFile]:[]))]; const iconMap=await invoke<Record<string,string>>("load_launcher_icons",{files}); /* 文件还在→补回 icon；已不在→连 iconFile 一起摘掉 */ items=items.map(it=>{ if(!it.iconFile) return it; const hit=iconMap[it.iconFile]; if(hit) return {...it,icon:hit}; const {iconFile:_gone,...rest}=it; return rest; }); }catch{/* 整体取不到（瞬时失败）→ 保留 iconFile，下次启动再试 */} } items.forEach(it=>{ if(it.iconFile) launcherIconFileRef.current.set(it.id,it.iconFile); }); setLauncher(items); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); /* 续146：清掉已删功能残留的死 key（plugin-store 不回收未知 key，会一直躺在 JSON 里） */ let pruned=false; for(const k of DEAD_STORE_KEYS){ try{ if(await s.delete(k)) pruned=true; }catch{} } if(pruned){ try{ await s.save(); }catch{} } } catch{} })(); }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
   useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
@@ -513,10 +516,33 @@ export default function App() {
   // 用 storeRef 而非 store state + 依赖恒稳的 dehydrateStage → 自身标识稳定，[]-deps 监听器可安全捕获。
   const persistStage = useCallback(async (list:StageItem[]) => {
     const s = storeRef.current; if(!s) return;
-    try { await s.set("stage-items", await dehydrateStage(list)); await s.save(); } catch {}
+    try {
+      const persisted = await dehydrateStage(list);
+      await s.set("stage-items", persisted);
+      await s.save();
+      const liveIds = new Set(list.map(it=>it.id));
+      for (const id of stageContentFileRef.current.keys()) if (!liveIds.has(id)) stageContentFileRef.current.delete(id);
+      // 落盘成功后把同一版本的 image content 从 React state 摘掉，只留 contentFile。
+      // 用 id + content 双重比对兜并发：若等待 I/O 期间同 id 内容已变化，不碰新状态。
+      const sourceContent = new Map(list.filter(it=>it.type==="image"&&it.content).map(it=>[it.id,it.content]));
+      const persistedFile = new Map(persisted.filter(it=>it.type==="image"&&it.contentFile).map(it=>[it.id,it.contentFile!]));
+      if (persistedFile.size) {
+        setStage(current => {
+          let changed = false;
+          const next = current.map(it => {
+            const file = persistedFile.get(it.id);
+            if (!file || !it.content || it.content !== sourceContent.get(it.id)) return it;
+            const { content:_omit, ...rest } = it;
+            changed = true;
+            return { ...rest, contentFile:file };
+          });
+          return changed ? next : current;
+        });
+      }
+    } catch {}
   }, [dehydrateStage]);
   const saveStage = useCallback(async (list:StageItem[]) => {
-    setStage(list);                                 // 先上屏（内存态保留 content）
+    setStage(list);                                 // 先上屏；落盘成功后 persistStage 自动脱去 image content
     await persistStage(list);
   }, [persistStage]);
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
@@ -548,7 +574,12 @@ export default function App() {
   // 启动台落盘的**唯一出口**（同 persistStage 的理由：绕过它直写会把内嵌 base64 图标写回 JSON）。
   const persistLauncher = useCallback(async (list:LauncherItem[]) => {
     const s = storeRef.current; if(!s) return;
-    try { await s.set("launcher-items", await dehydrateLauncher(list)); await s.save(); } catch {}
+    try {
+      await s.set("launcher-items", await dehydrateLauncher(list));
+      await s.save();
+      const liveIds = new Set(list.map(it=>it.id));
+      for (const id of launcherIconFileRef.current.keys()) if (!liveIds.has(id)) launcherIconFileRef.current.delete(id);
+    } catch {}
   }, [dehydrateLauncher]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => {
     setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
@@ -1372,6 +1403,7 @@ export default function App() {
       if (stageThumbPendingRef.current.has(p)) continue;
       stageThumbPendingRef.current.add(p);
       runThumbTask(async () => { // 步骤3：经并发闸串流，避免批量拖入并发解码飙峰
+        if (!stageThumbPendingRef.current.has(p)) return; // 排队期间条目已删除/截尾：取消冷解码
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           const url = p.startsWith(STAGE_IMG_KEY)
@@ -1403,6 +1435,7 @@ export default function App() {
       if (clipThumbPendingRef.current.has(c.time)) continue;
       clipThumbPendingRef.current.add(c.time);
       runThumbTask(async () => { // 步骤3：与 stageThumbs 共用同一并发闸，全局串流削峰
+        if (!clipThumbPendingRef.current.has(c.time)) return; // 排队期间条目已被挤出/清空：取消冷解码
         try {
           const { invoke } = await import("@tauri-apps/api/core");
           // 步骤2：content 已不在前端，按 time 让 Rust 从 CLIP_CACHE 取原文再缩图
@@ -1771,8 +1804,25 @@ export default function App() {
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
   const addToStage = useCallback(async (c:ClipItem) => {
-    c = { ...c, content: await hydrateContent(c) }; // 步骤2：图片 content 现取，供下方 exists 比对 + clipToStage 落库
-    const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
+    c = { ...c, content: await hydrateContent(c) }; // 剪贴板图片按 time 现取，仅在本次动作局部变量中短驻
+    let contentFile: string | undefined;
+    if (c.type==="image" && c.content) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        contentFile = (await invoke<(string|null)[]>("save_stage_images", { images:[c.content] }))[0] ?? undefined;
+      } catch {}
+    }
+    let exists = stage.some(s => s.type===c.type && (c.type==="file"
+      ? s.items?.[0]?.path===c.items?.[0]?.path
+      : c.type==="image"
+        ? s.content===c.content || (!!contentFile && (s.contentFile===contentFile || stageContentFileRef.current.get(s.id)===contentFile))
+        : s.content===c.content));
+    // 极端降级：stage_images 写入失败时没有内容寻址文件名可比，才逐条按需读取既有图片。
+    if (!exists && c.type==="image" && !contentFile) {
+      for (const s of stage) {
+        if (s.type==="image" && await hydrateContent(s) === c.content) { exists = true; break; }
+      }
+    }
     // 续146c：原先重复项**静默 return**，用户看到的就是「拖过去没反应」，无从分辨是重复还是坏了。
     if (exists) {
       const nm = c.type==="text" ? (c.content||"").trim().slice(0,20) : c.type==="image" ? t("图片") : (c.items?.[0]?.name || t("文件"));
@@ -1780,6 +1830,11 @@ export default function App() {
       return;
     }
     let item = clipToStage(c);
+    if (contentFile) {
+      const { content:_omit, ...rest } = item;
+      item = { ...rest, contentFile };
+      stageContentFileRef.current.set(item.id, contentFile);
+    }
     if (c.type==="file" && (c.count??0)<=1 && c.items?.[0]?.path && item.items?.[0]) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -1976,6 +2031,7 @@ export default function App() {
     const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
       type: s.type,
       content: s.content ?? null,
+      content_file: s.contentFile ?? null,
       items: s.items?.map(f => f.path) ?? null,
       orig_path: s.orig_path ?? null,
     }));
@@ -2098,7 +2154,7 @@ export default function App() {
       // 图片项无实体路径：物化成持久 PNG 文件再加入（恢复旧「拖截图到启动台」；旧靠 OLE 产 temp 文件、会被清理→死链，今写持久 launcher_images/）
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        path = await invoke<string>("save_image_as_launcher_file", { base64: item.content ?? null, origPath: item.orig_path ?? null });
+        path = await invoke<string>("save_image_as_launcher_file", { base64: item.content ?? null, origPath: item.orig_path ?? null, contentFile:item.contentFile ?? null });
       } catch { showToast(t("图片加入启动台失败")); return; }
       name = t("截图"); ext = "png";
     } else { return; } // 文本等无实体，不该走到这
@@ -2832,9 +2888,8 @@ export default function App() {
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
                         {dotEl}
-                        {/* 续146c：优先用 160px 缩略图；原图（content，1024px）只在取走/复制/拖出时用，
-                            绝不再直接塞进 <img>——72px 的卡片渲染 1024px 图 = 每张 ≈2.3MB 解码位图（续99b 同款坑）。
-                            缩略图未就绪/生成失败时才回退原图，保证不出现空白卡。 */}
+                        {/* 优先用 160px 缩略图；完整 content 只可能是尚未落盘的短暂兜底。
+                            已落盘条目在缩略图未就绪时显示矢量占位，绝不为避免占位重新加载原图。 */}
                         {(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile])
                           ? <img className="cover" draggable={false} src={stageThumbs[STAGE_IMG_KEY + s.contentFile]} alt=""/>
                           : s.content
@@ -2881,8 +2936,8 @@ export default function App() {
                   const isMissing = missingIds.has(s.id); // 续100
                   return (
                   <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）")))}>
-                    {s.type==="image"
-                      ?<img className="stage-thumb" draggable={false} src={(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content} alt=""/> /* 续146c：同方格视图，优先 160px 缩略图 */
+                    {s.type==="image" && ((s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content)
+                      ?<img className="stage-thumb" draggable={false} src={(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content} alt=""/> /* 同方格视图，优先 160px 缩略图 */
                       :s.type==="file" && s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path]
                         ?<img className="stage-thumb" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/> /* 续99e：列表视图图片文件缩略图，与方格视图一致（复用同一 stageThumbs 缓存）*/
                         :s.type==="file" && s.items?.[0]?.icon

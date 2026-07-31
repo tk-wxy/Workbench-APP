@@ -219,20 +219,26 @@ fn alloc_hglobal(bytes: &[u8]) -> Option<isize> {
 pub struct DragOutItem {
     pub r#type: String,             // "file" | "text" | "image"
     pub content: Option<String>,    // 文本内容 或 base64（image）
+    /// 中转 image 在 stage_images/ 下的文件名。与剪贴板 time 同理，让同步拖出路径由 Rust
+    /// 自查内容，前端无需为拖出 await 大 base64。
+    pub content_file: Option<String>,
     pub items: Option<Vec<String>>, // file 条目的路径列表
     pub orig_path: Option<String>,  // image 原图路径（可选，存在则优先用、避免降分辨率）
     /// 剪贴板 image 条目的 time（性能优化步骤2）。前端 image 条目已不常驻 content，
     /// 拖出路径又必须完全同步（不能 await 现取，否则卡死 R13 交接），故带 time 让 Rust 自查 CLIP_CACHE。
-    /// 中转条目的 content 前端仍常驻直接带，此项为 None。serde 对缺失的 Option 字段自动填 None。
+    /// 中转条目用 content_file，此项为 None。serde 对缺失的 Option 字段自动填 None。
     pub time: Option<i64>,
 }
 
 impl DragOutItem {
-    /// image 条目的 content：前端直接带（中转项，content 常驻）或按 time 从 CLIP_CACHE 现取（剪贴板项，步骤2）。
-    fn resolve_content(&self) -> Option<String> {
-        self.content
-            .clone()
+    /// image 原始 PNG 字节：内嵌兜底 / 剪贴板 time / 中转 content_file 三路统一。
+    fn resolve_image_bytes(&self) -> Option<Vec<u8>> {
+        if let Some(content) = self.content.clone()
             .or_else(|| self.time.and_then(crate::clipboard::clip_content_by_time))
+        {
+            return base64_decode(strip_data_url(&content));
+        }
+        self.content_file.as_deref().and_then(crate::apps::read_stage_image_bytes)
     }
 }
 
@@ -417,8 +423,19 @@ fn image_to_file(app: &AppHandle, it: &DragOutItem, temp_files: &mut Vec<PathBuf
             );
         }
     }
-    let content = it.resolve_content()?; // 步骤2：剪贴板项按 time 现取
-    let bytes = base64_decode(strip_data_url(&content))?;
+    // stage_images 是不可重建的持久资产，不能直接交给允许 MOVE 的 OLE（Explorer 会搬走源文件）。
+    // 复制成临时 PNG 再交付：仍省掉 base64 IPC/解码，只多一次文件复制，且保持原有 temp 生命周期。
+    if let Some(source) = it.content_file.as_deref().and_then(crate::apps::stage_image_path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("workbench_dragout_{ts}.png"));
+        std::fs::copy(source, &path).ok()?;
+        temp_files.push(path.clone());
+        return Some(path.to_string_lossy().into_owned());
+    }
+    let bytes = it.resolve_image_bytes()?;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -431,8 +448,7 @@ fn image_to_file(app: &AppHandle, it: &DragOutItem, temp_files: &mut Vec<PathBuf
 
 /// CF_DIB：base64 PNG → RGBA → BITMAPINFOHEADER(40, 32bpp, BI_RGB) + 自底向上 BGRA 像素。
 fn build_dib(it: &DragOutItem) -> Option<Vec<u8>> {
-    let content = it.resolve_content()?; // 步骤2：剪贴板项按 time 现取
-    let bytes = base64_decode(strip_data_url(&content))?;
+    let bytes = it.resolve_image_bytes()?;
     let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
     let (w, h) = (img.width(), img.height());
     let mut out = Vec::with_capacity(40 + (w * h * 4) as usize);
@@ -678,6 +694,7 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
         // 由这里的 Tauri hide() 把 tao 缓存兜回“隐藏”、与真实状态重新对齐。
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.hide();
+            crate::set_webview_memory_low(&win, true);
         }
         let _ = app.emit("hotkey-hide", ());
         let _ = app.emit("drag-out-done", effect_str);
@@ -719,7 +736,14 @@ mod tests {
     use super::*;
 
     fn item(time: Option<i64>) -> DragOutItem {
-        DragOutItem { r#type: "image".into(), content: None, items: None, orig_path: None, time }
+        DragOutItem {
+            r#type: "image".into(),
+            content: None,
+            content_file: None,
+            items: None,
+            orig_path: None,
+            time,
+        }
     }
 
     /// 续148：剪贴板来源（带 time）→ COPY-only；中转来源（time=None）→ 维持 COPY|MOVE。
@@ -730,5 +754,19 @@ mod tests {
         assert!(!is_clip_sourced(&[item(None)]));
         assert!(is_clip_sourced(&[item(None), item(Some(1))]));
         assert!(!is_clip_sourced(&[]));
+    }
+
+    #[test]
+    fn stage_content_file_deserializes_without_inline_content() {
+        let item: DragOutItem = serde_json::from_value(serde_json::json!({
+            "type": "image",
+            "content": null,
+            "content_file": "deadbeef.png",
+            "items": null,
+            "orig_path": null,
+            "time": null
+        })).unwrap();
+        assert_eq!(item.content_file.as_deref(), Some("deadbeef.png"));
+        assert!(item.content.is_none());
     }
 }
