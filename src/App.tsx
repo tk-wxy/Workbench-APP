@@ -52,6 +52,12 @@ const clipDisplayName = (c: ClipItem, t: TFn) =>
   : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
 const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
+// 失效扫描只是提示补全，绝不能占用工作台呼出的关键路径。
+// 每批很小；预算到即停，下一次呼出再续扫。
+const STAGE_MISSING_SCAN_DELAY_MS = 250;
+const STAGE_MISSING_SCAN_BUDGET_MS = 750;
+const STAGE_MISSING_SCAN_BATCH_SIZE = 24;
+const STAGE_MISSING_SCAN_YIELD_MS = 32;
 // 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
 // 分组不足此条数则并入「其他文件」（续114b）。没有这道闸，一个只返回 3 个文件的查询会得到
 // 3 个标题配 3 条内容——标题比内容还多，比不分组更难看。这条阈值对实际观感的影响大于分类表本身。
@@ -105,6 +111,23 @@ interface LauncherItem {
   path: string;           // app=launch_app 的 path；file/folder=open_file 的 path
   ext?: string;           // file 显示图标用
 }
+// 启动台布局导入/导出的可携带格式：刻意不带 id/iconFile。id 只在本机 state 内有意义；
+// iconFile 是 app_data_dir 内的私有引用，跨机器必然失效。icon 则保留，导入后仍会经
+// persistLauncher 的唯一出口脱水为本机 launcher_icons/ 文件。
+interface LauncherLayoutItem {
+  kind: LauncherItem["kind"];
+  name: string;
+  path: string;
+  ext?: string;
+  icon?: string | null;
+}
+interface LauncherLayoutExport {
+  format: "workbench-launcher";
+  version: 1;
+  exportedAt: string;
+  items: LauncherLayoutItem[];
+}
+type LauncherImportPreview = { items: LauncherItem[]; duplicates: number; invalid: number; overCapacity: number; };
 const LAUNCHER_MAX = 200;
 /// 搜索现场（页面搜索/增强搜索）保留时长：隐藏时若仍带着搜索现场则不立即复位，保留此时长供用户
 /// 多次呼出继续浏览；每次隐藏重新起算，呼出即取消计时；超时在隐藏中静默复位，下次呼出全新。
@@ -116,6 +139,39 @@ const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "sta
 /// 与真实路径键共用同一张表，是为了复用它已有的 pending 去重与淘汰逻辑（续146c）。
 const STAGE_IMG_KEY = "simg:";
 const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
+
+// 导入前先完整规范化并生成预览，确认按钮只会写入这里已经验证过的条目。
+// 合并时一律按 path 去重；不覆写已有收藏，也不把超过 200 条的尾项静默塞进 state。
+function previewLauncherImport(text: string, current: LauncherItem[]): LauncherImportPreview {
+  let raw: unknown;
+  try { raw = JSON.parse(text); } catch { throw new Error("导入文件不是有效的 JSON"); }
+  if (!raw || typeof raw !== "object") throw new Error("导入文件格式不正确");
+  const doc = raw as Partial<LauncherLayoutExport>;
+  if (doc.format !== "workbench-launcher" || doc.version !== 1 || !Array.isArray(doc.items)) {
+    throw new Error("不是受支持的启动台布局文件");
+  }
+  const knownPaths = new Set(current.map(it => it.path));
+  const accepted: LauncherItem[] = [];
+  let duplicates = 0, invalid = 0;
+  for (const candidate of doc.items) {
+    if (!candidate || typeof candidate !== "object") { invalid++; continue; }
+    const v = candidate as Partial<LauncherLayoutItem>;
+    const kind = v.kind;
+    const name = typeof v.name === "string" ? v.name.trim() : "";
+    const path = typeof v.path === "string" ? v.path.trim() : "";
+    if ((kind !== "app" && kind !== "file" && kind !== "folder") || !name || !path || name.length > 256 || path.length > 32767) {
+      invalid++; continue;
+    }
+    if (knownPaths.has(path)) { duplicates++; continue; }
+    knownPaths.add(path);
+    // 导出内容可能来自旧版或其他机器；图标不合法时只丢图标，条目仍可被 FileGlyph/首字兜底渲染。
+    const icon = typeof v.icon === "string" && v.icon.startsWith("data:image/") && v.icon.length <= 300_000 ? v.icon : null;
+    const ext = typeof v.ext === "string" && v.ext.length <= 64 ? v.ext : undefined;
+    accepted.push({ id: launcherId(), kind, name, path, ext, icon });
+  }
+  const room = Math.max(0, LAUNCHER_MAX - current.length);
+  return { items: accepted.slice(0, room), duplicates, invalid, overCapacity: Math.max(0, accepted.length - room) };
+}
 
 
 // ── 应用使用打分：频率为主 × 近期乘数（频率高且近期用过的排前）──
@@ -303,6 +359,9 @@ export default function App() {
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
+  // 启动台不预扫：只记录用户点击过的条目的最近一次存在性结果，且不落盘，避免下次显示陈旧状态。
+  const [missingLauncherIds, setMissingLauncherIds] = useState<Set<number>>(new Set());
+  const launcherMissingScanTokenRef = useRef(new Map<number, number>()); // 同项连点时，只采用最后一次检查结果
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
   // 拼音派生表（续131）：原名 → 拼音变体。派生在 Rust，这里只缓存结果。
   // 空数组 = 已查过且该名无汉字（与"还没查过"区分开，避免反复重查纯英文名）。
@@ -359,10 +418,15 @@ export default function App() {
   // 列表原先直接渲染 ≤1024px 的 content → 每张 ≈4MB GPU 纹理。改为渲染小缩略图后纹理面积降到 ≈1/10。
   const [clipThumbs, setClipThumbs] = useState<Record<number,string>>({});
   const clipThumbPendingRef = useRef<Set<number>>(new Set()); // 已发起的 time（去重，失败回退整图见下方 catch）
-  // 续100：中转区 file 条目「原文件失踪」路径集。每次呼出时后台批量 exists() 扫一遍（check_stage_paths）。
+  // 中转区 file 条目「原文件失踪」路径集。每次呼出时后台批量 exists() 扫一遍（check_stage_paths）。
   // 不用实时文件监听（分散父目录 watcher 代价高/网络盘不支持），只在呼出这个「该看的时刻」懒扫。
-  // 处理按「拖出移除」同一豁免规则（见 scanStageMissing）：`!persist && !pinned` 直接移除；固定/持久化则留存并进本集合，供 ⚠️ 标记。
+  // 失效引用必须保留给用户处理：重新定位、复制原路径或删除整项，绝不静默删掉。
   const [missingPaths, setMissingPaths] = useState<Set<string>>(new Set()); // 复用既有 stageRef（行 216）读最新 stage
+  const missingPathsRef = useRef<Set<string>>(new Set()); missingPathsRef.current = missingPaths;
+  const stageMissingScanGenerationRef = useRef(0); // 新一轮或 hide 后，旧结果一律作废
+  const stageMissingScanTimerRef = useRef<number | null>(null);
+  const [stageRecoveryOpen, setStageRecoveryOpen] = useState(false);
+  const stageRecoveryOpenRef = useRef(false); stageRecoveryOpenRef.current = stageRecoveryOpen;
   const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
   const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
@@ -435,6 +499,12 @@ export default function App() {
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
   const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
   const [launcherPicking, setLauncherPicking] = useState(false); // 启动台「浏览…」选择框是否已弹出（同上，防重入叠弹）
+  // 启动台批量管理：不复用主网格的点击/拖拽语义，集中在独立模态中做多选删除与布局迁移。
+  const [launcherManageOpen, setLauncherManageOpen] = useState(false);
+  const [launcherManageSelected, setLauncherManageSelected] = useState<Set<number>>(new Set());
+  const [launcherImportPreview, setLauncherImportPreview] = useState<LauncherImportPreview | null>(null);
+  const [launcherLayoutBusy, setLauncherLayoutBusy] = useState(false);
+  const launcherManageOpenRef = useRef(false); launcherManageOpenRef.current = launcherManageOpen;
   // ── 全局轻提示（续113）──
   // 定位：补「无锚点操作」的反馈空白——右键菜单项、模态里点完就关的按钮，动作一完成界面上什么都没变，
   // 用户不知道成没成。**不替换已有的 7 处按钮原地 ✓ 反馈**（copiedTime/enhAdded/imgCacheCleared…）：
@@ -649,8 +719,8 @@ export default function App() {
     (async () => {
       try {
         const { listen } = await import("@tauri-apps/api/event");
-        const un1 = await listen("hotkey-show", () => { if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; } setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setPickerOpen(false); setPickerQuery(""); setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); // 搜索现场例外：带着搜索现场隐藏时不立即复位，保留 SEARCH_KEEP_MS（每次隐藏重新起算）供多次呼出继续浏览；无现场则照旧立即复位
+        const un1 = await listen("hotkey-show", () => { if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; } setVisible(true); scheduleStageMissingScan(); }); // 失效检查延后到首屏可操作后，绝不阻塞呼出。
+        const un2 = await listen("hotkey-hide", () => { cancelStageMissingScan(); endClipDrag(); if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); if(launchCloneNodeRef.current){launchCloneNodeRef.current.remove();launchCloneNodeRef.current=null;} setDismissing(false); launchingRef.current = false; if(launchSrcElRef.current){launchSrcElRef.current.style.opacity="";launchSrcElRef.current=null;} setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setPickerOpen(false); setPickerQuery(""); setLauncherManageOpen(false); setLauncherImportPreview(null); setStageRecoveryOpen(false); setCtxMenu(null); if(toastTimerRef.current!==null){clearTimeout(toastTimerRef.current);toastTimerRef.current=null;} setToast(null); // 搜索现场例外：带着搜索现场隐藏时不立即复位，保留 SEARCH_KEEP_MS（每次隐藏重新起算）供多次呼出继续浏览；无现场则照旧立即复位
         if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; }
         if (searchValueRef.current || enhOpenRef.current) { searchKeepTimer = setTimeout(() => { searchKeepTimer = null; resetSearchState(); }, SEARCH_KEEP_MS); } else { resetSearchState(); } }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留；含 toast，防隐藏时挂着的提示在下次呼出时残留半截动画）
         const un3 = await listen("clipboard-update", async () => {
@@ -1454,56 +1524,79 @@ export default function App() {
       return next;
     });
   }, [clipboard]);
-  // 续100：中转区失踪扫描。收集所有 file 条目路径 → Rust 批量 exists() → 记下失踪集合。
-  // 复用既有 stageRef（行 216，已随渲染更新）供 hotkey-show 闭包读最新 stage；scanStageMissing 无依赖、稳定。
-  const scanStageMissing = useCallback(async (list?: StageItem[]) => {
-    const src = list ?? stageRef.current;
+  // 中转区失踪扫描是低优先级任务：呼出后才延迟启动；按小批次检查并让出执行机会。
+  // 预算耗尽时不清空未检查路径的旧状态，避免“尚未检查”被误标；下一次呼出再继续。
+  const scanStageMissing = useCallback(async (generationOrInitial: number | StageItem[]) => {
+    const initialList = Array.isArray(generationOrInitial) ? generationOrInitial : null;
+    const generation = initialList ? stageMissingScanGenerationRef.current : generationOrInitial;
+    // 初始载入也不抢首屏：延后后沿用同一批次/预算策略；若期间已呼出新一轮则直接作废。
+    if (initialList) await new Promise<void>(resolve => window.setTimeout(resolve, STAGE_MISSING_SCAN_DELAY_MS));
+    if (generation !== stageMissingScanGenerationRef.current) return;
     const paths = Array.from(new Set(
-      src.flatMap(s => s.type === "file" ? (s.items?.map(i => i.path).filter(Boolean) ?? []) : [])
+      (initialList ?? stageRef.current).flatMap(s => s.type === "file" ? (s.items?.map(i => i.path).filter(Boolean) ?? []) : [])
     )) as string[];
-    if (!paths.length) { setMissingPaths(new Set()); return; }
+    if (!paths.length) {
+      if (generation === stageMissingScanGenerationRef.current) setMissingPaths(new Set());
+      return;
+    }
+    const checked = new Set<string>();
+    const missing = new Set<string>();
+    const deadline = performance.now() + STAGE_MISSING_SCAN_BUDGET_MS;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const missing = await invoke<string[]>("check_stage_paths", { paths });
-      const missSet = new Set(missing);
-      if (!missSet.size) { setMissingPaths(new Set()); return; }
-      // 续100：源文件失踪按「拖出移除」同一条豁免规则处理——`!persist && !pinned` 直接移除，固定/持久化则保留 + ⚠️ 标记。
-      const persist = stagePersistRef.current;
-      const removeIds = new Set<number>();       // 默认模式：自动移除
-      const keepMissing = new Set<string>();      // 固定/持久化：留存路径（供 missingIds 标记）
-      for (const it of src) {
-        if (it.type !== "file" || !it.items?.length) continue;
-        if (!it.items.every(f => missSet.has(f.path))) continue; // 批量条目部分尚在 → 不算失踪
-        if (!persist && !it.pinned) removeIds.add(it.id);
-        else it.items.forEach(f => keepMissing.add(f.path));
+      for (let offset = 0; offset < paths.length && performance.now() < deadline; offset += STAGE_MISSING_SCAN_BATCH_SIZE) {
+        if (generation !== stageMissingScanGenerationRef.current) return;
+        const batch = paths.slice(offset, offset + STAGE_MISSING_SCAN_BATCH_SIZE);
+        const gone = await invoke<string[]>("check_stage_paths", { paths: batch });
+        if (generation !== stageMissingScanGenerationRef.current) return;
+        batch.forEach(path => checked.add(path));
+        gone.forEach(path => missing.add(path));
+        if (performance.now() < deadline && offset + STAGE_MISSING_SCAN_BATCH_SIZE < paths.length) {
+          await new Promise<void>(resolve => window.setTimeout(resolve, STAGE_MISSING_SCAN_YIELD_MS));
+        }
       }
-      if (removeIds.size) {
-        // 函数式更新读最新 stage；storeRef 落盘（复用 files-dropped 同款 idiom，避免 saveStage 的闭包过期）。
-        setStage(prev => {
-          const next = prev.filter(s => !removeIds.has(s.id));
-          void persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
-          return next;
-        });
-      }
-      setMissingPaths(keepMissing);
-    } catch { /* 检查失败不改变现状，下次呼出再扫 */ }
+      if (generation !== stageMissingScanGenerationRef.current) return;
+      // 只覆写本轮已经确认过的路径；预算外路径保持上次确认状态。
+      setMissingPaths(prev => {
+        const next = new Set(prev);
+        checked.forEach(path => next.delete(path));
+        missing.forEach(path => next.add(path));
+        return next;
+      });
+    } catch { /* 当前批检查失败：保持上次状态，下次呼出重试 */ }
   }, []);
-  // 条目粒度：file 条目的全部文件都失踪才判该条目失踪（批量条目部分尚在则不误标）。
+  const cancelStageMissingScan = useCallback(() => {
+    stageMissingScanGenerationRef.current += 1;
+    if (stageMissingScanTimerRef.current !== null) {
+      window.clearTimeout(stageMissingScanTimerRef.current);
+      stageMissingScanTimerRef.current = null;
+    }
+  }, []);
+  const scheduleStageMissingScan = useCallback(() => {
+    cancelStageMissingScan();
+    const generation = stageMissingScanGenerationRef.current;
+    stageMissingScanTimerRef.current = window.setTimeout(() => {
+      stageMissingScanTimerRef.current = null;
+      void scanStageMissing(generation);
+    }, STAGE_MISSING_SCAN_DELAY_MS);
+  }, [cancelStageMissingScan, scanStageMissing]);
+  useEffect(() => () => cancelStageMissingScan(), [cancelStageMissingScan]);
+  // 多文件条目的语义尚未定型；只要其中任一路径失效，先整体视为不可消费，避免擅自定义“部分取走”。
   const missingIds = useMemo(() => {
     const s = new Set<number>();
-    if (!missingPaths.size) return s;
     for (const it of stage) {
       if (it.type !== "file" || !it.items?.length) continue;
-      if (it.items.every(f => missingPaths.has(f.path))) s.add(it.id);
+      if (it.items.some(f => missingPaths.has(f.path))) s.add(it.id);
     }
     return s;
   }, [stage, missingPaths]);
+  const missingStageItems = useMemo(() => stage.filter(s => missingIds.has(s.id)), [stage, missingIds]);
   const missingIdsRef = useRef<Set<number>>(new Set()); missingIdsRef.current = missingIds; // 给 []-注册的拖出/点击 handler 读最新失踪集
   const cleanupMissingStage = useCallback(() => {
-    if (!missingIds.size) return;
-    saveStage(stageRef.current.filter(s => !missingIds.has(s.id)));
+    if (!missingPaths.size) return;
+    saveStage(stageRef.current.filter(it => !missingIdsRef.current.has(it.id)));
     setMissingPaths(new Set());
-  }, [missingIds, saveStage]);
+  }, [missingPaths, saveStage]);
   // 剪贴板历史：同上
   const filteredClip = useMemo(() => {
     const q = deferredSearch.trim();
@@ -1568,6 +1661,21 @@ export default function App() {
   const openLauncherItem = useCallback((it:LauncherItem, iconEl?:HTMLElement|null) => {
     // 排序拖拽激活后抑制 onClick（pointer 事件顺序：up → click，ref 比 state 更即时）
     if (suppressLaunchClickRef.current) { suppressLaunchClickRef.current = false; return; }
+    // 点击照常打开；后台只检查这一个真实路径并更新标记。UWP shell 路径不是文件系统路径，跳过。
+    if (!it.path.startsWith("shell:AppsFolder\\")) {
+      const token = (launcherMissingScanTokenRef.current.get(it.id) ?? 0) + 1;
+      launcherMissingScanTokenRef.current.set(it.id, token);
+      import("@tauri-apps/api/core").then(({ invoke }) => invoke<string[]>("check_stage_paths", { paths: [it.path] }))
+        .then(missing => {
+          if (launcherMissingScanTokenRef.current.get(it.id) !== token) return;
+          setMissingLauncherIds(prev => {
+            const next = new Set(prev);
+            if (missing.includes(it.path)) next.add(it.id); else next.delete(it.id);
+            return next;
+          });
+        })
+        .catch(() => {}); // 检查失败不影响打开，也不改旧标记。
+    }
     if (it.kind === "app") {
       launchApp({ name: it.name, path: it.path, icon: it.icon ?? null }, iconEl ?? null);
       return;
@@ -1798,10 +1906,110 @@ export default function App() {
       setLauncherPicking(false);
     }
   }, [launcherPicking, addFsToLauncher, toastAddResult, showToast, t]);
+
+  // ── 启动台批量管理：选择、删除、导入 / 导出 ──
+  // 管理态独立于主网格，避免把「单击打开 / 拖拽排序」的既有肌肉记忆改成多选。
+  const openLauncherManager = useCallback(() => {
+    setLauncherManageSelected(new Set());
+    setLauncherImportPreview(null);
+    // 管理弹窗是独立页面层，不应在其后保留设置模态；关闭管理后直接回主界面。
+    setSettingsOpen(false);
+    setLauncherManageOpen(true);
+  }, []);
+  const toggleLauncherManageItem = useCallback((id: number) => {
+    setLauncherManageSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+  const toggleLauncherManageAll = useCallback(() => {
+    setLauncherManageSelected(prev => prev.size === launcher.length ? new Set() : new Set(launcher.map(it => it.id)));
+  }, [launcher]);
+  const deleteSelectedLauncherItems = useCallback(async () => {
+    if (!launcherManageSelected.size) return;
+    const selected = launcherManageSelected;
+    await saveLauncher(launcher.filter(it => !selected.has(it.id)));
+    setLauncherManageSelected(new Set());
+  }, [launcher, launcherManageSelected, saveLauncher]);
+  const exportLauncherLayout = useCallback(async () => {
+    if (!launcher.length || launcherLayoutBusy) return;
+    setLauncherLayoutBusy(true);
+    try {
+      // 复用已验证的原生文件夹对话框；用户明确选定目录后才向外写出导出文件。
+      const { invoke } = await import("@tauri-apps/api/core");
+      const dir = await invoke<string | null>("pick_folder");
+      if (!dir) return;
+      const doc: LauncherLayoutExport = {
+        format: "workbench-launcher", version: 1, exportedAt: new Date().toISOString(),
+        items: launcher.map(({ kind, name, path, ext, icon }): LauncherLayoutItem => ({ kind, name, path, ext, icon: icon ?? null })),
+      };
+      const path = await invoke<string>("write_launcher_layout_export", { dir, content: JSON.stringify(doc, null, 2) });
+      showToast(t("已导出到：{path}", { path }));
+    } catch {
+      showToast(t("导出失败"));
+    } finally {
+      setLauncherLayoutBusy(false);
+    }
+  }, [launcher, launcherLayoutBusy, showToast, t]);
+  const chooseLauncherLayoutImport = useCallback(async () => {
+    if (launcherLayoutBusy) return;
+    setLauncherLayoutBusy(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke<string | null>("pick_file");
+      if (!path) return;
+      const text = await invoke<string>("read_launcher_layout_import", { path });
+      setLauncherImportPreview(previewLauncherImport(text, launcher));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "导入失败";
+      showToast(t(msg));
+    } finally {
+      setLauncherLayoutBusy(false);
+    }
+  }, [launcher, launcherLayoutBusy, showToast, t]);
+  const confirmLauncherLayoutImport = useCallback(async () => {
+    if (!launcherImportPreview?.items.length) return;
+    await saveLauncher([...launcher, ...launcherImportPreview.items]);
+    setLauncherManageSelected(new Set());
+    setLauncherImportPreview(null);
+    showToast(t("已导入 {n} 项", { n: launcherImportPreview.items.length }));
+  }, [launcher, launcherImportPreview, saveLauncher, showToast, t]);
   // 从启动器移除（右键）
   const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
 
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
+  // ── 中转站失效条目的恢复操作 ──
+  const openStageRecovery = useCallback(() => {
+    setSettingsOpen(false);
+    setStageRecoveryOpen(true);
+  }, []);
+  // 单文件条目可直接替换引用。多文件条目的语义尚未定型，先保留原状等待用户决定。
+  const relinkStageItem = useCallback(async (item: StageItem) => {
+    if (item.type !== "file" || item.items?.length !== 1 || !item.items[0] || !missingPathsRef.current.has(item.items[0].path)) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke<string | null>(item.isDir ? "pick_folder" : "pick_file");
+      if (!path) return;
+      const info = await invoke<FileEntry>("get_file_info", { path });
+      const replacement: FileItem = { path: info.path, name: info.name, ext: info.ext, isImage: IMG_EXTS.includes(info.ext.toLowerCase()), icon: info.icon ?? null };
+      const next = stageRef.current.map(s => s.id === item.id
+        ? { ...s, items: [replacement], count: 1, name: info.name, ext: info.ext, isDir: info.isDir, size: info.size }
+        : s);
+      await saveStage(next);
+      setMissingPaths(prev => { const copy = new Set(prev); copy.delete(item.items![0].path); return copy; });
+      showToast(t("已重新定位：{name}", { name: info.name }));
+    } catch {
+      showToast(t("重新定位失败"));
+    }
+  }, [saveStage, showToast, t]);
+  const copyMissingStagePath = useCallback(async (path: string) => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("copy_text_to_clipboard", { text: path });
+      showToast(t("已复制原路径"));
+    } catch { showToast(t("复制失败")); }
+  }, [showToast, t]);
   // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
   const addToStage = useCallback(async (c:ClipItem) => {
     c = { ...c, content: await hydrateContent(c) }; // 剪贴板图片按 time 现取，仅在本次动作局部变量中短驻
@@ -2468,6 +2676,7 @@ export default function App() {
   // Rust 再解码写剪贴板，于是「点了没反应」（文本项因为快才显得正常）。✓ 反馈的语义是「你这一下点到了」，
   // 不是「剪贴板已写完」，故乐观置位；真失败时立刻撤掉 ✓，不会骗人。
   const copyStageToClipboard = useCallback(async (s:StageItem) => {
+    if (s.type === "file" && missingIdsRef.current.has(s.id)) return;
     setCopiedStageId(s.id);
     setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
     try { await writeItemToClipboard(s); }
@@ -2503,7 +2712,11 @@ export default function App() {
       }
       return;
     }
-    if (!stageMultiselect) { if (missingIdsRef.current.has(s.id)) return; copyAndPaste(s); return; } // 续100：失踪项不可取走（死路径粘贴无意义/可能崩目标）
+    if (!stageMultiselect) {
+      if (missingIdsRef.current.has(s.id)) return; // 含失效路径的条目只留恢复/清理动作，不把不完整引用送进粘贴链。
+      copyAndPaste(s);
+      return;
+    }
     setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
     stageAnchorRef.current = idx;
   }, [stageMultiselect, filteredStage, copyAndPaste]);
@@ -2522,7 +2735,7 @@ export default function App() {
   const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
     if (stageMultiselect && stageSel.size > 0) {
       const sel = stage.filter(x => stageSel.has(x.id));
-      const allFiles = sel.length > 0 && sel.every(x => x.type === "file");
+      const allFiles = sel.length > 0 && sel.every(x => x.type === "file" && !missingIds.has(x.id));
       const combined = (): Pasteable => ({ type: "file", items: sel.flatMap(x => x.items ?? []) });
       openCtxMenu(e, [
         { label: t("取走全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
@@ -2536,7 +2749,11 @@ export default function App() {
       return;
     }
     const items: CtxMenuItem[] = [];
-    if (s.type === "file" && s.items?.[0]?.path) {
+    const missingFile = missingIds.has(s.id) && s.type === "file" ? s.items?.find(f => missingPaths.has(f.path)) : undefined;
+    if (missingFile) {
+      if (s.items?.length === 1) items.push({ label: t("重新定位…"), action: () => relinkStageItem(s) });
+      items.push({ label: t("复制原路径"), action: () => copyMissingStagePath(missingFile.path) });
+    } else if (s.type === "file" && s.items?.[0]?.path) {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
@@ -2545,11 +2762,13 @@ export default function App() {
           await invoke("reveal_in_explorer", { path: s.items![0].path });
         },
       });
+      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
+    } else {
+      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     }
-    items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     items.push({ label: t("删除该项目"),   action: () => removeStage(s.id) });
     openCtxMenu(e, items);
-  }, [stageMultiselect, stageSel, stage, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, t]);
+  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
 
   // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
   const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
@@ -2708,7 +2927,7 @@ export default function App() {
       // 右键菜单是纯鼠标浮层（无键盘交互）：任何键盘/热键操作都顺带关掉它，避免切页/关页后残留悬浮。
       // Escape 交由下方分层逻辑处理（第一次 Esc 只关菜单、不关页），故此处排除。
       if(ctxMenuRef.current && e.key!=="Escape") setCtxMenu(null);
-      if(e.key==="Escape"){e.preventDefault();if(clipDragRef.current?.active){endClipDrag();return;}if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
+      if(e.key==="Escape"){e.preventDefault();if(clipDragRef.current?.active){endClipDrag();return;}if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(stageRecoveryOpenRef.current){setStageRecoveryOpen(false);return;}if(launcherManageOpenRef.current){setLauncherManageOpen(false);setLauncherImportPreview(null);return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
       if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
@@ -2795,18 +3014,22 @@ export default function App() {
         <section className="app-panel">
           <div className="stage-section-header">
             <span className="section-label">{t("启动器")}</span>
-            <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加到启动台")}>{t("添加")}</button>
+            <div className="launcher-header-actions">
+              <button className="stage-batch-btn" onClick={openLauncherManager} title={t("批量管理")}>{t("批量管理")}</button>
+              <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加到启动台")}>{t("添加")}</button>
+            </div>
           </div>
           <div className="app-grid" ref={launcherDropRef}>
             {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
             {filteredLauncher.map((it,i)=>(
               <div key={it.id}
-                className={`app-tile${i===launcherSelIdx?" selected":""}`}
+                className={`app-tile${i===launcherSelIdx?" selected":""}${missingLauncherIds.has(it.id)?" launcher-missing":""}`}
                 draggable={false}
                 onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
                 onContextMenu={e=>openLauncherCtxMenu(e,it)}
                 onPointerDown={e=>handleLauncherPointerDown(e, it.id)}
                 title={it.kind==="app"?t("单击启动"):t("单击打开")}>
+                {missingLauncherIds.has(it.id) && <span className="launcher-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
                 <div className="app-tile-icon">
                   {it.kind==="file" && it.ext && IMG_EXTS.includes(it.ext.toLowerCase()) && stageThumbs[it.path]
                      ? <img className="app-tile-thumb" src={stageThumbs[it.path]} alt="" draggable={false}/>
@@ -2832,11 +3055,11 @@ export default function App() {
             {stageMultiselect ? (
               <div className="stage-multi-toolbar">
                 {stageSel.size > 0 && <span className="stage-sel-count">{t("已选 {n}", {n: stageSel.size})}</span>}
-                <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
-                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
+                <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
                   onClick={()=>{const sel=stage.filter(x=>stageSel.has(x.id));copyAndPaste({type:"file",items:sel.flatMap(x=>x.items??[])});setStageSel(new Set());setStageMultiselect(false);}}>{t("取走")}</button>
-                <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
-                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?t("复制到剪贴板"):t("仅文件可批量复制")}
+                <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("复制到剪贴板"):t("仅文件可批量复制")}
                   onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>{t("复制")}</button>
                 <button className="stage-batch-btn" disabled={stageSel.size===0}
                   onClick={()=>{saveStage(stage.filter(x=>!stageSel.has(x.id)));setStageSel(new Set());}}>{t("删除")}</button>
@@ -2844,8 +3067,11 @@ export default function App() {
                   onClick={()=>{setStageSel(new Set());setStageMultiselect(false);stageAnchorRef.current=null;}}>{t("完成")}</button>
               </div>
             ) : (
-              <button className="stage-batch-btn" disabled={!stage.length}
-                onClick={()=>setStageMultiselect(true)} title={t("进入多选模式")}>{t("多选")}</button>
+              <div className="stage-multi-toolbar">
+                {missingStageItems.length > 0 && <button className="stage-batch-btn stage-missing-action" onClick={openStageRecovery} title={t("处理失效条目")}>{t("失效 {n} 项", { n: missingStageItems.length })}</button>}
+                <button className="stage-batch-btn" disabled={!stage.length}
+                  onClick={()=>setStageMultiselect(true)} title={t("进入多选模式")}>{t("多选")}</button>
+              </div>
             )}
           </div>
           <div className="drop-area" ref={dropAreaRef}
@@ -2865,7 +3091,8 @@ export default function App() {
               ? <div className={`stage-grid${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
                   const rawExt = (s.ext||s.items?.[0]?.ext||"").replace(/^\./,"");
                   const isAnyDir = !!s.isDir;
-                  const isMissing = missingIds.has(s.id); // 续100：原文件失踪，灰化 + ⚠️
+                  const isMissing = missingIds.has(s.id);
+                  const missingTip = t("原文件已失踪（可能被删除或移动）");
                   const cardName = s.type==="image" ? t("图片")
                     : s.type==="text" ? (s.content?.slice(0,12)||t("文本"))
                     : (s.count!==1 ? t("{n} 个文件", {n: s.count ?? 0}) : (s.name||s.items?.[0]?.name||t("文件")));
@@ -2882,8 +3109,8 @@ export default function App() {
                     </button>
                   );
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用")))}>
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
+                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?missingTip:(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用")))}>
+                    {isMissing && <span className="stage-missing-badge" title={missingTip}><IconWarn size={15}/></span>}
                     {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
                     {s.type==="image" && (
                       <div className="stage-card-thumb">
@@ -2933,9 +3160,10 @@ export default function App() {
                 );})}</div>
               : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
                   const label = s.type==="text"?(s.content?.slice(0,60)||t("文本")):s.type==="image"?t("图片"):(s.count!==1?t("{n} 个文件", {n: s.count ?? 0}):(s.name||s.items?.[0]?.name||t("文件")));
-                  const isMissing = missingIds.has(s.id); // 续100
+                  const isMissing = missingIds.has(s.id);
+                  const missingTip = t("原文件已失踪（可能被删除或移动）");
                   return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）")))}>
+                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?missingTip:(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）")))}>
                     {s.type==="image" && ((s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content)
                       ?<img className="stage-thumb" draggable={false} src={(s.contentFile && stageThumbs[STAGE_IMG_KEY + s.contentFile]) || s.content} alt=""/> /* 同方格视图，优先 160px 缩略图 */
                       :s.type==="file" && s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path]
@@ -2943,7 +3171,7 @@ export default function App() {
                         :s.type==="file" && s.items?.[0]?.icon
                           ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
                           :<span className="stage-emoji">{s.type==="text"?<FileGlyph cat="doc" size={20}/>:<FileGlyph size={20} isDir={s.isDir} isImage={s.items?.[0]?.isImage} ext={s.ext??s.items?.[0]?.ext??""}/>}</span>}
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
+                    {isMissing && <span className="stage-missing-badge" title={missingTip}><IconWarn size={15}/></span>}
                     <span className="stage-title">{label}</span>
                     {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
                     {/* 续99e：列表视图「固定」开关，与方格视图 dot 同语义——未固定 hover 才现、已固定常驻 accent；全局持久化开启时隐藏 */}
@@ -3131,6 +3359,91 @@ export default function App() {
           </div>
         </div>
       )}
+      {/* 失效项不再随扫描静默消失：集中列出并让用户决定重新定位或删除整个条目。 */}
+      {stageRecoveryOpen && (
+        <div className="settings-mask" onClick={()=>setStageRecoveryOpen(false)}>
+          <div className="settings-modal stage-recovery-modal" onClick={e=>e.stopPropagation()}>
+            <div className="settings-head">
+              <span className="settings-title">{t("处理中转站失效项")}</span>
+              <button className="settings-close" onClick={()=>setStageRecoveryOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
+            </div>
+            <div className="stage-recovery-list">
+              {missingStageItems.map(s => {
+                const lost = (s.items ?? []).filter(f => missingPaths.has(f.path));
+                const singleLost = s.type === "file" && s.items?.length === 1 && lost.length === 1;
+                const label = s.name || s.items?.[0]?.name || t("文件");
+                return <div key={s.id} className="stage-recovery-item">
+                  <div className="stage-recovery-main">
+                    <IconWarn size={16}/>
+                    <div>
+                      <div className="stage-recovery-name" title={label}>{label}</div>
+                      <div className="stage-recovery-meta">{t("原文件已失踪（可能被删除或移动）")}</div>
+                      {lost.map(f => <div key={f.path} className="stage-recovery-path" title={f.path}>{f.path}</div>)}
+                    </div>
+                  </div>
+                  <div className="stage-recovery-actions">
+                    {singleLost && <button className="settings-action" onClick={()=>relinkStageItem(s)}>{t("重新定位…")}</button>}
+                    {lost[0] && <button className="settings-action" onClick={()=>copyMissingStagePath(lost[0].path)}>{t("复制原路径")}</button>}
+                    <button className="settings-action danger" onClick={()=>removeStage(s.id)}>{t("删除该项目")}</button>
+                  </div>
+                </div>;
+              })}
+              {!missingStageItems.length && <p className="empty-hint">{t("暂无失效条目")}</p>}
+            </div>
+            <div className="picker-foot">{t("失效条目会保留在中转站，直到你主动处理。")}</div>
+          </div>
+        </div>
+      )}
+      {/* 启动台批量管理：选择态只存在于此，不干扰主启动台的打开和拖拽排序。 */}
+      {launcherManageOpen && (
+        <div className="settings-mask" onClick={()=>{setLauncherManageOpen(false);setLauncherImportPreview(null);}}>
+          <div className="settings-modal launcher-manager-modal" onClick={e=>e.stopPropagation()}>
+            <div className="settings-head">
+              <span className="settings-title">{t("启动台批量管理")}</span>
+              <button className="settings-close" onClick={()=>{setLauncherManageOpen(false);setLauncherImportPreview(null);}} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
+            </div>
+            {launcherImportPreview ? (
+              <div className="launcher-import-preview">
+                <div className="settings-panel-title">{t("导入预览")}</div>
+                <p>{t("将新增 {n} 项", { n: launcherImportPreview.items.length })}</p>
+                {launcherImportPreview.duplicates > 0 && <p>{t("跳过重复 {n} 项", { n: launcherImportPreview.duplicates })}</p>}
+                {launcherImportPreview.invalid > 0 && <p>{t("忽略无效 {n} 项", { n: launcherImportPreview.invalid })}</p>}
+                {launcherImportPreview.overCapacity > 0 && <p>{t("受上限影响，未导入 {n} 项", { n: launcherImportPreview.overCapacity })}</p>}
+                <p className="settings-hint">{t("导入采用合并方式，不会覆盖已有收藏。")}</p>
+                <div className="launcher-manager-actions">
+                  <button className="settings-action" onClick={()=>setLauncherImportPreview(null)}>{t("返回")}</button>
+                  <button className="settings-action" onClick={confirmLauncherLayoutImport} disabled={!launcherImportPreview.items.length}>{t("确认导入")}</button>
+                </div>
+              </div>
+            ) : (<>
+              <div className="launcher-manager-toolbar">
+                <span>{t("已选 {n} 项", { n: launcherManageSelected.size })}</span>
+                <div className="settings-inline-actions">
+                  <button className="settings-action" onClick={toggleLauncherManageAll} disabled={!launcher.length}>{launcherManageSelected.size === launcher.length && launcher.length ? t("取消全选") : t("全选")}</button>
+                  <button className="settings-action danger" onClick={deleteSelectedLauncherItems} disabled={!launcherManageSelected.size}>{t("删除已选（{n}）", { n: launcherManageSelected.size })}</button>
+                </div>
+              </div>
+              <div className="launcher-manager-list">
+                {launcher.length ? launcher.map(it=>(
+                  <label key={it.id} className={`launcher-manager-item${launcherManageSelected.has(it.id)?" selected":""}`}>
+                    <input type="checkbox" checked={launcherManageSelected.has(it.id)} onChange={()=>toggleLauncherManageItem(it.id)}/>
+                    <div className="launcher-manager-icon">{it.icon ? <img src={it.icon} alt=""/> : <FileGlyph ext={it.ext} isDir={it.kind==="folder"}/>}</div>
+                    <span className="launcher-manager-name" title={it.name}>{it.name}</span>
+                    <span className="launcher-manager-kind">{t(it.kind === "app" ? "应用程序" : it.kind === "folder" ? "文件夹" : "文件")}</span>
+                  </label>
+                )) : <p className="empty-hint">{t("暂无收藏条目")}</p>}
+              </div>
+              <div className="launcher-manager-foot">
+                <span className="settings-hint">{t("布局文件可用于备份或迁移；导入不会覆盖已有收藏。")}</span>
+                <div className="settings-inline-actions">
+                  <button className="settings-action" onClick={chooseLauncherLayoutImport} disabled={launcherLayoutBusy}>{t("导入布局")}</button>
+                  <button className="settings-action" onClick={exportLauncherLayout} disabled={!launcher.length || launcherLayoutBusy}>{t("导出布局")}</button>
+                </div>
+              </div>
+            </>)}
+          </div>
+        </div>
+      )}
       {settingsOpen && (
         <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
           <div className="settings-modal" onClick={e=>e.stopPropagation()}>
@@ -3180,6 +3493,7 @@ export default function App() {
                     <span className="settings-row-label">{t("收藏条目")}<span className="settings-row-sub">{launcher.length} / {LAUNCHER_MAX}</span></span>
                     <div className="settings-inline-actions">
                       <button className="settings-action" onClick={()=>{setPickerQuery("");setPickerOpen(true);}}>{t("添加到启动台")}</button>
+                      <button className="settings-action" onClick={openLauncherManager}>{t("批量管理")}</button>
                       <button className="settings-action danger" onClick={clearLauncher} disabled={!launcher.length}>{t("清空")}</button>
                     </div>
                   </div>
@@ -3202,10 +3516,13 @@ export default function App() {
                     <span className="settings-row-label">{t("中转条目")}<span className="settings-row-sub">{stage.length} / {stageMax}</span></span>
                     <button className="settings-action danger" onClick={clearStage} disabled={!stage.length}>{t("清空")}</button>
                   </div>
-                  {missingIds.size>0 && (
+                  {missingStageItems.length>0 && (
                     <div className="settings-row">
-                      <span className="settings-row-label">{t("失踪条目")}<span className="settings-row-sub">{t("{n} 条", {n: missingIds.size})}</span></span>
-                      <button className="settings-action danger" onClick={cleanupMissingStage}>{t("清理失踪")}</button>
+                      <span className="settings-row-label">{t("失效条目")}<span className="settings-row-sub">{t("{n} 条", {n: missingStageItems.length})}</span></span>
+                      <div className="settings-inline-actions">
+                        <button className="settings-action" onClick={openStageRecovery}>{t("处理失效项")}</button>
+                        <button className="settings-action danger" onClick={cleanupMissingStage}>{t("清理失效")}</button>
+                      </div>
                     </div>
                   )}
                   <div className="settings-row">
