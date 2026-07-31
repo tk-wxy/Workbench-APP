@@ -345,10 +345,10 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .clip-block:hover{background:var(--fill-2);}
 .clip-actions{display:flex;gap:2px;}  /* 文档流布局：落在 .clip-foot 底部行内，不浮于内容上 */
 .clip-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;}  /* 卡片底部行：左时间戳、右按钮组，均在内边距内 */
-.clip-copy-btn,.clip-del-btn,.clip-pin-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
-.clip-block:hover .clip-copy-btn,.clip-block:hover .clip-del-btn,.clip-block:hover .clip-pin-btn{opacity:1;}
-.clip-block .clip-copy-btn,.clip-block .clip-del-btn,.clip-block .clip-pin-btn{opacity:1;width:26px;height:26px;}  /* 剪贴板卡片按钮常显+加大（仅卡片作用域，中转站沿用悬停显隐） */
-.clip-copy-btn:hover,.clip-pin-btn:hover{background:var(--accent-soft);color:var(--accent);}
+.clip-copy-btn,.clip-del-btn,.clip-stage-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;opacity:0;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
+.clip-block:hover .clip-copy-btn,.clip-block:hover .clip-del-btn,.clip-block:hover .clip-stage-btn{opacity:1;}
+.clip-block .clip-copy-btn,.clip-block .clip-del-btn,.clip-block .clip-stage-btn{opacity:1;width:26px;height:26px;}  /* 剪贴板卡片按钮常显+加大（仅卡片作用域，中转站沿用悬停显隐） */
+.clip-copy-btn:hover,.clip-stage-btn:hover{background:var(--accent-soft);color:var(--accent);}
 .clip-del-btn:hover{background:rgba(255,80,80,0.2);color:#ff6b6b;}
 .clip-copy-btn.copied{opacity:1;color:#4ade80;}  /* 复制成功 ✓：绿色、移开鼠标也保持可见 */
 .clip-preview{font-size:11px;color:var(--text2);line-height:1.4;word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}

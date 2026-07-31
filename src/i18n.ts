@@ -169,7 +169,7 @@ export const EN_DICT: Record<string, string> = {
   "单击左键粘贴": "Left-click to paste",
   "单击左键粘贴文件": "Left-click to paste file",
   "单击左键复制": "Left-click to copy",
-  "钉到中转区": "Pin to Stage",
+  "加入中转站": "Add to Stage",
   "删除该条目": "Delete entry",
   "显示时自动读取": "Loaded automatically when shown",
 
