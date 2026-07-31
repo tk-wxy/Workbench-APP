@@ -176,8 +176,9 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 /* padding: 上4 右8 下8 左16。左(外缘)16=剪贴板右外缘，与「启动器」标题(16)对齐；
    右(内侧，贴中转区边界)8=匹配中转区卡片左缘(~9px)→ 边界1两侧留白对称。 */
 .app-grid{flex:1;overflow-y:auto;padding:4px 8px 8px 16px;display:grid;grid-template-columns:repeat(4,1fr);gap:4px;align-content:start;}
-.app-tile{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;transition:background 80ms;min-width:0;}
+.app-tile{position:relative;display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 4px 6px;border-radius:8px;transition:background 80ms;min-width:0;}
 .app-tile:hover,.app-tile.selected{background:var(--hover);}
+.launcher-missing-badge{position:absolute;top:4px;left:5px;z-index:2;color:#f5a623;display:inline-flex;pointer-events:none;}
 /* 容器保持 48px（行节奏依赖，见下方注释），去掉灰底 background、只作透明定位框；
    border-radius+overflow 仍保留，用于给缩略图裁圆角。图标视觉放大靠内部 img/字形放大，不动容器。 */
 .app-tile-icon{width:48px;height:48px;border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;flex-shrink:0;}
@@ -248,7 +249,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
 .stage-open-btn:hover{background:var(--hover);color:var(--text);}
-/* 续100：原文件失踪、且因固定/持久化被保留的中转条目——灰化 + ⚠️ 角标（非固定/持久化的失踪项直接自动移除，不到这）。 */
+/* 原文件失踪：含任一失效路径的条目整体灰化并禁用取走。 */
 .stage-card.stage-missing,.stage-item.stage-missing{opacity:0.5;filter:grayscale(0.7);}
 .stage-card.stage-missing:hover,.stage-item.stage-missing:hover{opacity:0.7;}
 .stage-missing-badge{position:absolute;top:2px;left:2px;z-index:3;font-size:12px;line-height:1;pointer-events:none;filter:none;color:#f5a623;display:inline-flex;}/* IconWarn 走 currentColor，这里给告警琥珀色 */
@@ -398,6 +399,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
    下方内容顶上来显不齐；统一 min-height 后 align-items:center 使标题基线对齐（多选工具栏换行时仍可超出）。 */
 .stage-section-header{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 4px;flex-shrink:0;gap:8px;min-height:34px;}
 .stage-section-header .section-label{padding:0;flex-shrink:0;}
+.launcher-header-actions{display:flex;align-items:center;gap:4px;}
 .stage-multi-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
 .stage-sel-count{font-size:11px;color:var(--text2);white-space:nowrap;padding:0 4px;}
 /* line-height 固定 1.2：不设时按钮继承不确定行高，实际高度可能略超标题行 min-height:34 → 把中转区标题行撑得比剪贴板高零点几~几 px（200%DPI 下可见），三栏标题就不齐。定死后按钮 ≈21px，标题行稳定由 min-height:34 决定。 */
@@ -453,6 +455,33 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 
 /* ── 启动器「添加到启动台」picker（复用 settings-modal 外框，内部为搜索 + enh-result 列表）── */
 .picker-modal{width:480px;height:520px;}
+/* ── 中转站失效项恢复 ── */
+.stage-recovery-modal{width:620px;height:560px;}
+.stage-recovery-list{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:8px;}
+.stage-recovery-item{padding:12px;border:1px solid var(--border);border-radius:8px;background:var(--fill-1);}
+.stage-recovery-main{display:flex;align-items:flex-start;gap:9px;color:#f5a623;}
+.stage-recovery-main>div{min-width:0;flex:1;}
+.stage-recovery-name{color:var(--text);font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.stage-recovery-meta{margin-top:3px;color:var(--text2);font-size:12px;}
+.stage-recovery-path{margin-top:4px;color:var(--text3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-recovery-actions{display:flex;justify-content:flex-end;gap:6px;flex-wrap:wrap;margin-top:10px;}
+/* ── 启动台批量管理 ── */
+.launcher-manager-modal{width:560px;height:580px;}
+.launcher-manager-toolbar,.launcher-manager-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 20px;border-bottom:1px solid var(--border);flex-shrink:0;font-size:12px;color:var(--text2);}
+.launcher-manager-list{flex:1;overflow-y:auto;padding:8px 20px;display:flex;flex-direction:column;gap:4px;}
+.launcher-manager-item{display:flex;align-items:center;gap:10px;min-height:44px;padding:5px 8px;border-radius:7px;cursor:pointer;color:var(--text);}
+.launcher-manager-item:hover,.launcher-manager-item.selected{background:var(--hover);}
+.launcher-manager-item input{accent-color:var(--accent);flex-shrink:0;}
+.launcher-manager-icon{width:30px;height:30px;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;border-radius:6px;}
+.launcher-manager-icon img{width:28px;height:28px;object-fit:contain;}
+.launcher-manager-icon svg{width:24px;height:24px;}
+.launcher-manager-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;}
+.launcher-manager-kind{font-size:11px;color:var(--text3);flex-shrink:0;}
+.launcher-manager-foot{border-top:1px solid var(--border);border-bottom:none;}
+.launcher-manager-foot .settings-hint{margin:0;max-width:290px;}
+.launcher-import-preview{flex:1;padding:24px;overflow-y:auto;font-size:13px;color:var(--text2);}
+.launcher-import-preview p{margin:8px 0;}
+.launcher-manager-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:24px;}
 /* 「浏览文件/文件夹」行：夹在搜索框与结果列表之间，flex-shrink:0 保证列表滚动时不被压扁 */
 .picker-browse{display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .picker-browse-label{flex:1;font-size:12px;color:var(--text3);}

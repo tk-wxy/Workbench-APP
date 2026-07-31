@@ -398,6 +398,65 @@ fn pick_path(app: AppHandle, folders: bool) -> Result<Option<String>, String> {
     }
 }
 
+// 启动台布局导入 / 导出 ────────────────────────────────────────
+// 布局本体仍只持久化在 app_data_dir（R28）。这两个命令只处理用户主动选择的
+// 外部备份文件：导入是只读，导出目录先由 pick_folder 明确取得，绝不在后台自行落盘。
+const LAUNCHER_LAYOUT_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 读取用户选定的布局文件。上限在 Rust 侧先卡住，避免前端 JSON.parse 意外吃进超大文件。
+#[tauri::command]
+fn read_launcher_layout_import(path: String) -> Result<String, String> {
+    use std::fs::File;
+    use std::io::{Read, Take};
+
+    let file = File::open(&path).map_err(|e| format!("无法读取导入文件: {e}"))?;
+    let mut reader: Take<File> = file.take(LAUNCHER_LAYOUT_MAX_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取导入文件失败: {e}"))?;
+    if bytes.len() as u64 > LAUNCHER_LAYOUT_MAX_BYTES {
+        return Err("导入文件过大（最多 2 MB）".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "导入文件不是 UTF-8 文本".to_string())
+}
+
+/// 在用户选定目录中创建一个不覆盖的布局 JSON。文件名用 Unix 毫秒保证稳定唯一；
+/// 极罕见同毫秒冲突时附加序号并以 create_new 保证绝不覆盖用户既有备份。
+#[tauri::command]
+fn write_launcher_layout_export(dir: String, content: String) -> Result<String, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if content.len() as u64 > LAUNCHER_LAYOUT_MAX_BYTES {
+        return Err("导出内容过大（最多 2 MB）".to_string());
+    }
+    let folder = PathBuf::from(dir);
+    if !folder.is_dir() {
+        return Err("导出目录不可用".to_string());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("读取系统时间失败: {e}"))?
+        .as_millis();
+    for attempt in 0..100u16 {
+        let suffix = if attempt == 0 { String::new() } else { format!("-{attempt}") };
+        let path = folder.join(format!("workbench-launcher-{stamp}{suffix}.json"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())
+                    .map_err(|e| format!("写入导出文件失败: {e}"))?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("无法创建导出文件: {e}")),
+        }
+    }
+    Err("无法创建不重名的导出文件".to_string())
+}
+
 // ── 入口 ───────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════════════
@@ -789,6 +848,7 @@ pub fn run() {
             apps::save_launcher_icons, apps::load_launcher_icons,
             apps::save_stage_images, apps::existing_stage_images, apps::get_stage_image_content, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
+            read_launcher_layout_import, write_launcher_layout_export,
             clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::get_clip_content, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
