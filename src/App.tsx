@@ -2010,7 +2010,7 @@ export default function App() {
       showToast(t("已复制原路径"));
     } catch { showToast(t("复制失败")); }
   }, [showToast, t]);
-  // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
+  // 剪贴板项「加入中转站」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
   const addToStage = useCallback(async (c:ClipItem) => {
     c = { ...c, content: await hydrateContent(c) }; // 剪贴板图片按 time 现取，仅在本次动作局部变量中短驻
     let contentFile: string | undefined;
@@ -2787,7 +2787,7 @@ export default function App() {
       });
     }
     items.push({ label: t("复制到剪贴板"), action: () => copyToClipboard(c) });
-    items.push({ label: t("钉到中转区"),  action: () => addToStage(c) });
+    items.push({ label: t("加入中转站"),  action: () => addToStage(c) });
     items.push({ label: t("删除该条目"),    action: () => deleteClipItem(c.time) });
     openCtxMenu(e, items);
   }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem, t]);
@@ -3224,7 +3224,7 @@ export default function App() {
                 : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
                 <div className="clip-foot"><span className="clip-time">{c.type==="image"?<IconCamera size={11}/>:c.type==="file"?<IconPaperclip size={11}/>:null}{ago(c.time, t)}</span>
                   <div className="clip-actions">
-                    <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin size={14}/></button>
+                    <button className="clip-stage-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("加入中转站")}><IconBox size={14}/></button>
                     <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?t("已复制"):t("复制到剪贴板")}>
                       {copiedTime===c.time ? <IconCheck size={14}/> : <IconCopy size={14}/>}
                     </button>
