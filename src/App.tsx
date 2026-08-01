@@ -8,7 +8,7 @@ import { matchName, type PinyinTable, type PinyinVariant } from "./lib/pinyin";
 import { tokenFromCode, parseComboStr, matchComboEvent, comboLabel } from "./lib/hotkey";
 import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch,
          IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
-         IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip } from "./icons";
+         IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconPaperclip, IconDrop } from "./icons";
 
 // ── 类型 ──
 // packaged=true 即 UWP / Packaged App（续125）：path 是 `shell:AppsFolder\<AUMID>` 而非真实文件路径，
@@ -3108,7 +3108,7 @@ export default function App() {
               <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加到启动台")}>{t("添加")}</button>
             </div>
           </div>
-          <div className="app-grid" ref={launcherDropRef}>
+          <div className={`app-grid${!launcher.length&&!search.trim()?" app-grid-empty":""}`} ref={launcherDropRef}>
             {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
             {filteredLauncher.map((it,i)=>(
               <div key={it.id}
@@ -3131,11 +3131,13 @@ export default function App() {
               </div>
             ))}
             {/* 末尾插入指示线：insertIdx === launcher.length 时显示在最后一个元素之后 */}
-            {!filteredLauncher.length && (
-              <p className="empty-hint" style={{gridColumn:"1/-1"}}>
-                {launcher.length ? t("无匹配") : t("拖入或点「添加」收藏应用")}
-              </p>
-            )}
+            {!filteredLauncher.length && (search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
+              <div className="launcher-empty-guide" aria-label={t("添加常用应用")}>
+                <span className="launcher-empty-guide-icon"><IconRocket size={26}/></span>
+                <span className="launcher-empty-guide-title">{t("添加常用应用")}</span>
+                <span className="launcher-empty-guide-subtitle">{t("拖入应用，或点击右上角“添加”")}</span>
+              </div>
+            ))}
           </div>
         </section>
         <section className="center-panel">
@@ -3276,7 +3278,13 @@ export default function App() {
                     </div>
                   </div>);
                 })}</div>
-            ) : <p className="empty-hint">{search.trim()?t("无匹配"):t("拖入文件 / 文件夹，或在剪贴板卡片点固定按钮钉入")}</p>}
+            ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
+              <div className="stage-empty-guide" aria-label={t("将文件拖到这里")}>
+                <span className="stage-empty-guide-icon"><IconDrop size={26}/></span>
+                <span className="stage-empty-guide-title">{t("将文件拖到这里")}</span>
+                <span className="stage-empty-guide-subtitle">{t("也可从剪贴板固定到中转区")}</span>
+              </div>
+            )}
           </div>
           {/* 快捷入口：可在设置→中转站关闭；关闭后本行不渲染，上方 .drop-area(flex:1) 自动铺满归还的空间 */}
           {showShortcuts && (<>
@@ -3293,7 +3301,7 @@ export default function App() {
           <div className="stage-section-header">
             <span className="section-label">{t("剪贴板历史")}</span>
           </div>
-          <div className="clip-list">
+          <div className={`clip-list${!filteredClip.length&&!search.trim()?" clip-list-empty":""}`}>
             {filteredClip.length? filteredClip.map((c)=>(
               <div key={c.time} className="clip-block"
                 onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
@@ -3321,7 +3329,13 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            )): <p className="empty-hint">{search.trim()?t("无匹配"):t("显示时自动读取")}</p>}
+            )): search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
+              <div className="clip-empty-guide" aria-label={t("复制内容会自动出现在这里")}>
+                <span className="clip-empty-guide-icon"><IconClipboard size={26}/></span>
+                <span className="clip-empty-guide-title">{t("复制内容会自动出现在这里")}</span>
+                <span className="clip-empty-guide-subtitle">{t("支持文本、文件和图片")}</span>
+              </div>
+            )}
           </div>
         </section>
       </main>
@@ -3563,8 +3577,8 @@ export default function App() {
                   <div className="settings-row">
                     <span className="settings-row-label">{t("语言")}</span>
                     <div className="seg">
-                      {([["zh","中文"],["en","English"]] as const).map(([v,l])=>(
-                        <button key={v} className={`seg-btn${lang===v?" seg-active":""}`} onClick={()=>changeLang(v)}>{t(l)}</button>
+                      {([["zh","中文"],["en","English"]] as const).map(([v,label])=>(
+                        <button key={v} className={`seg-btn${lang===v?" seg-active":""}`} onClick={()=>changeLang(v)}>{label}</button>
                       ))}
                     </div>
                   </div>

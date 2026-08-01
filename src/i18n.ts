@@ -4,7 +4,6 @@ export type Lang = "zh" | "en";
 
 export const EN_DICT: Record<string, string> = {
   "语言": "Language",
-  "中文": "Chinese",
   "常规": "General",
   "启动台": "Launcher",
   "中转站": "Stage",
@@ -81,7 +80,8 @@ export const EN_DICT: Record<string, string> = {
   "浏览文件夹…": "Browse Folders…",
   "单击启动": "Click to launch",
   "单击打开": "Click to open",
-  "拖入或点「添加」收藏应用": "Drag in or click \"Add\" to save an app",
+  "添加常用应用": "Add your favorite apps",
+  "拖入应用，或点击右上角“添加”": "Drag in an app, or click Add above",
   "打开所在目录": "Open containing folder",
   "从启动器移除": "Remove from Launcher",
   "点击添加到启动器": "Click to add to Launcher",
@@ -135,7 +135,10 @@ export const EN_DICT: Record<string, string> = {
   "单击取走（粘贴到上个窗口），拖出可拖到其他应用": "Click to take (pastes to previous window); drag out to another app",
   "单击取走（写回剪贴板并粘贴）": "Click to take (writes to clipboard & pastes)",
   "单击取走（粘贴到上个窗口）": "Click to take (pastes to previous window)",
-  "拖入文件 / 文件夹，或在剪贴板卡片点固定按钮钉入": "Drag in files/folders, or click the pin button on a clipboard card",
+  "将文件拖到这里": "Drop files or folders here",
+  "也可从剪贴板固定到中转区": "Or pin an item here from Clipboard",
+  "复制内容会自动出现在这里": "Copied content appears here automatically",
+  "支持文本、文件和图片": "Text, files, and images are supported",
   "快捷入口": "Quick Access",
   "截屏": "Screenshot",
   "文件管理器": "File Explorer",
@@ -172,7 +175,6 @@ export const EN_DICT: Record<string, string> = {
   "单击左键复制": "Left-click to copy",
   "加入中转站": "Add to Stage",
   "删除该条目": "Delete entry",
-  "显示时自动读取": "Loaded automatically when shown",
 
   // ── 增强搜索 ──
   "搜索应用、中转、剪贴板…": "Search apps, stage, clipboard…",

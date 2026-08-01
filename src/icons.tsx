@@ -98,6 +98,14 @@ export const IconPin = ({ size = 12, className }: IconProps) => (
     <path d="M5 17h14l-2-4V7a2 2 0 0 0-2-2H9a2 2 0 0 0-2 2v6z" />
   </svg>
 );
+// 空态引导：向托盘落入的箭头，比回形针更直接表达“拖到这里”。
+export const IconDrop = ({ size = 24, className }: IconProps) => (
+  <svg width={size} height={size} {...stroke} className={className}>
+    <path d="M12 3v11" />
+    <polyline points="8 10 12 14 16 10" />
+    <path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" />
+  </svg>
+);
 
 // 搜索图标：原实现固定 className="search-icon-svg"（搜索框内定位依赖此类），保留
 export const IconSearch = ({ size = 16, className }: IconProps) => (
