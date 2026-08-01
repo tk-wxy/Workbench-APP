@@ -2,7 +2,7 @@
 //
 // 架构命脉（违反任一条都会卡前端，见 DECISIONS §17 / CLAUDE.md 不变量）：
 // 1. 内置索引建立只在独立后台线程（start_index_worker 内 spawn），永不经 Tauri 命令 / invoke / 阻塞 IPC。
-// 2. 查询命令（search_files / get_index_status）只读内存 / 走 Everything IPC，绝不在命令里做磁盘遍历。
+// 2. 查询命令（search_files / search_builtin_all / get_index_status）只读内存 / 走 Everything IPC，绝不在命令里做磁盘遍历。
 // 3. 双缓冲原子替换：新索引在后台 Vec 建好后一次性替换旧 Vec，查询永远命中完整索引。
 // 4. 锁纪律：FILE_INDEX 锁只罩「替换 Vec」与「查询读 Vec」的瞬间临界区；walkdir 遍历（耗时部分）绝不持锁。
 //    本锁是全新独立 Mutex，与剪贴板 CLIPBOARD_LOCK / CLIP_CACHE 无任何交集，无锁序问题。
@@ -15,18 +15,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use walkdir::WalkDir;
+
+use crate::search_rank::{
+    build_search_aliases, with_matchers, SearchCandidate, SearchQuery, SearchScore,
+};
 
 /// 内存索引条目：name_lower 预存小写，查询时不重复 to_lowercase。
 ///
 /// **续126 内存布局收紧**：原先 `path`/`name`/`name_lower`/`ext` 四个 `String` 把同一份字节
 /// 存了三四遍（`name` 是 `path` 的后缀、`ext` 是 `name` 的后缀、`name_lower` 是 `name` 的小写副本），
-/// 且每个 `String` 头就吃 24 B。现在只留两份实际字节（`path` 与 `name_lower`），
-/// `name`/`ext` 改由偏移量切片派生 —— 见 `name()` / `ext()`。
-/// 实测 241 → 158 B/条（-34%），8 万条索引下省约 6 MB。
+/// 且每个 `String` 头就吃 24 B。主体只留两份实际字节（`path` 与 `name_lower`），
+/// `name`/`ext` 改由偏移量切片派生；V2 另加一份通常为空或很短的紧凑别名串。
+/// 真机 V2 44,744 条总估算 7.7 MB（含结构体、路径、小写名与别名）。
 ///
 /// `Box<str>` 而非 `String`：索引建好后再不修改，少存一个 capacity 字段（24→16 B/个）。
 #[derive(Clone)]
@@ -34,6 +38,9 @@ pub struct IndexEntry {
     pub path: Box<str>,
     /// 文件名的小写形式。**匹配全部走它**（查询词已小写），故它必须独立存在，无法从 path 派生。
     pub name_lower: Box<str>,
+    /// NUL 分隔的搜索别名：拉丁词首缩写 + 中文全拼/拼音首字母。
+    /// 只存字符串，不存前端高亮需要的回映射表；查询期按分隔符借用、零分配。
+    aliases: Box<str>,
     /// `name` 在 `path` 中的起始字节偏移（`path[name_off..]` == 文件名原始大小写）。
     name_off: u32,
     /// `ext` 在 `name_lower` 中的起始字节偏移（`name_lower[ext_off..]` == 小写扩展名，不含点）。
@@ -68,12 +75,22 @@ impl IndexEntry {
         let ext_off = name_lower
             .len()
             .checked_sub(ext_lower.len())
-            .filter(|&i| !ext_lower.is_empty() && name_lower.is_char_boundary(i) && name_lower[i..] == ext_lower)
+            .filter(|&i| {
+                !ext_lower.is_empty()
+                    && name_lower.is_char_boundary(i)
+                    && name_lower[i..] == ext_lower
+            })
             .unwrap_or(name_lower.len()) as u32;
+        let alias_source = if is_dir || ext.is_empty() {
+            name
+        } else {
+            name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
+        };
         Self {
             depth: path_depth(&path),
             path: path.into_boxed_str(),
             name_lower: name_lower.into_boxed_str(),
+            aliases: build_search_aliases(alias_source, true),
             name_off,
             ext_off,
             is_dir,
@@ -90,6 +107,42 @@ impl IndexEntry {
     /// 小写扩展名（不含点）。从 `name_lower` 切片派生，不占额外内存。
     pub fn ext(&self) -> &str {
         &self.name_lower[self.ext_off as usize..]
+    }
+
+    /// 小写文件名主体；目录名不因包含点号而被错误截断。
+    fn stem_lower(&self) -> &str {
+        let ext_off = self.ext_off as usize;
+        if self.is_dir || ext_off == self.name_lower.len() || ext_off == 0 {
+            return &self.name_lower;
+        }
+        let dot = ext_off - 1;
+        if self.name_lower.as_bytes().get(dot) == Some(&b'.') {
+            &self.name_lower[..dot]
+        } else {
+            &self.name_lower
+        }
+    }
+
+    /// 父路径（不含末尾分隔符）。异常 Unicode 后缀退化时 name_off=0，此处返回空串。
+    fn parent_path(&self) -> &str {
+        if self.name_off == 0 {
+            ""
+        } else {
+            self.path[..self.name_off as usize].trim_end_matches(['\\', '/'])
+        }
+    }
+
+    fn search_candidate(&self) -> SearchCandidate<'_> {
+        SearchCandidate {
+            name: self.name(),
+            name_lower: &self.name_lower,
+            stem_lower: self.stem_lower(),
+            parent_path: self.parent_path(),
+            aliases: &self.aliases,
+            keywords: "",
+            ext: self.ext(),
+            is_dir: self.is_dir,
+        }
     }
 }
 
@@ -116,7 +169,9 @@ pub struct FileSearchResult {
     pub mtime: u64,
 }
 
-static FILE_INDEX: OnceLock<Mutex<Vec<IndexEntry>>> = OnceLock::new();
+static FILE_INDEX: OnceLock<Mutex<Arc<[IndexEntry]>>> = OnceLock::new();
+/// 应用 / 中转 / 剪贴板的轻量搜索投影。前端只在源列表变化时同步，逐键查询只克隆 Arc 快照。
+static DYNAMIC_INDEX: OnceLock<Mutex<DynamicSnapshot>> = OnceLock::new();
 /// 用户可配置的额外扫描根目录（如 D:\），与 %USERPROFILE% 合并。
 static EXTRA_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
 /// 图标预热缓存：key（扩展名小写 或 文件夹哨兵）→ Shell 图标 base64（提取失败为 None）。
@@ -125,6 +180,95 @@ static EXTRA_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
 static ICON_CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
 /// 当前搜索引擎：0=内置自建索引，1=Everything。
 static SEARCH_ENGINE: AtomicU8 = AtomicU8::new(0);
+
+const MAX_DYNAMIC_SEARCH_ITEMS: usize = 2_000;
+const DYNAMIC_BOOST_MAX: i32 = 400;
+const APP_KIND_BONUS: i32 = 350;
+const STAGE_KIND_BONUS: i32 = 250;
+const CLIP_KIND_BONUS: i32 = 150;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicKind {
+    App,
+    Stage,
+    Clip,
+}
+
+impl DynamicKind {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "app" => Some(Self::App),
+            "stage" => Some(Self::Stage),
+            "clip" => Some(Self::Clip),
+            _ => None,
+        }
+    }
+
+    fn bonus(self) -> i32 {
+        match self {
+            Self::App => APP_KIND_BONUS,
+            Self::Stage => STAGE_KIND_BONUS,
+            Self::Clip => CLIP_KIND_BONUS,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DynamicEntry {
+    kind: DynamicKind,
+    key: Box<str>,
+    name: Box<str>,
+    name_lower: Box<str>,
+    stem_lower: Box<str>,
+    parent_path: Box<str>,
+    aliases: Box<str>,
+    keywords: Box<str>,
+    ext: Box<str>,
+    is_dir: bool,
+    boost: i32,
+}
+
+impl DynamicEntry {
+    fn search_candidate(&self) -> SearchCandidate<'_> {
+        SearchCandidate {
+            name: &self.name,
+            name_lower: &self.name_lower,
+            stem_lower: &self.stem_lower,
+            parent_path: &self.parent_path,
+            aliases: &self.aliases,
+            keywords: &self.keywords,
+            ext: &self.ext,
+            is_dir: self.is_dir,
+        }
+    }
+}
+
+struct DynamicSnapshot {
+    revision: u64,
+    entries: Arc<[DynamicEntry]>,
+}
+
+impl Default for DynamicSnapshot {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            entries: Arc::from(Vec::<DynamicEntry>::new()),
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicSearchInput {
+    kind: String,
+    key: String,
+    name: String,
+    path: Option<String>,
+    ext: Option<String>,
+    is_dir: Option<bool>,
+    boost: Option<i32>,
+    keywords: Option<Vec<String>>,
+}
 
 /// 文件「使用学习」记录（续132）：路径（归一化小写）→ 打开次数 / 最后打开时间。
 ///
@@ -155,6 +299,8 @@ const REBUILD_INTERVAL_SECS: u64 = 30 * 60; // 30 分钟周期重建
 const ICON_CACHE_FULL_REFRESH_EVERY: u32 = 12;
 const INITIAL_DELAY_SECS: u64 = 3; // 避开开机高峰后再首次建索引
 const QUERY_LIMIT_CAP: usize = 500; // 查询返回上限硬顶（Everything 全盘可返回大量结果，前端按引擎传不同 limit）
+/// 多词完整匹配不足时，用部分覆盖结果补到这个数量；完整匹配永远排在部分结果之前。
+const PARTIAL_FALLBACK_TARGET: usize = 8;
 
 /// 额外扫描目录（用户手动添加）的条目加分（续111b）。
 ///
@@ -254,7 +400,10 @@ fn path_depth_bonus(depth: u8) -> i32 {
 }
 /// 路径分隔符个数 = 深度。`C:\Windows` → 1，`C:\a\b\c` → 3。u8 饱和（不存在深于 255 层的路径）。
 fn path_depth(path: &str) -> u8 {
-    path.bytes().filter(|b| *b == b'\\' || *b == b'/').count().min(255) as u8
+    path.bytes()
+        .filter(|b| *b == b'\\' || *b == b'/')
+        .count()
+        .min(255) as u8
 }
 
 /// 文件「使用学习」加分上限（续132）。
@@ -277,8 +426,11 @@ const MAX_USAGE_ENTRIES: usize = 2000;
 /// 条目级加分的合计上限。**必须小于相邻带的最小间隙**。
 /// 只有测试引用它，但它是预算的声明本身，故不放进 #[cfg(test)]。
 #[allow(dead_code)]
-const ENTRY_BONUS_BUDGET: i32 =
-    EXTRA_DIR_BONUS + SHORT_NAME_BONUS_MAX + RECENCY_BONUS_MAX + PATH_DEPTH_BONUS_MAX + OPEN_BONUS_MAX;
+const ENTRY_BONUS_BUDGET: i32 = EXTRA_DIR_BONUS
+    + SHORT_NAME_BONUS_MAX
+    + RECENCY_BONUS_MAX
+    + PATH_DEPTH_BONUS_MAX
+    + OPEN_BONUS_MAX;
 
 /// 修改时间 → 新鲜度加分（续117）。
 ///
@@ -379,7 +531,10 @@ pub fn record_file_open(path: &str) {
     let snapshot = {
         let Ok(mut map) = lock.lock() else { return };
         let now = now_unix();
-        let e = map.entry(key).or_insert(FileUse { count: 0, last_used: now });
+        let e = map.entry(key).or_insert(FileUse {
+            count: 0,
+            last_used: now,
+        });
         e.count = e.count.saturating_add(1);
         e.last_used = now;
         // 越限则淘汰衰减分最低的一条（刚 bump 的这条分数最高，不会被自己淘汰）。
@@ -403,7 +558,9 @@ pub fn record_file_open(path: &str) {
 
 /// 把使用记录快照原子写盘（tmp→rename）。接快照入参、自身不持锁；失败只 eprintln。
 fn save_file_usage(snapshot: HashMap<String, FileUse>) {
-    let Some(path) = FILE_USAGE_PATH.get() else { return };
+    let Some(path) = FILE_USAGE_PATH.get() else {
+        return;
+    };
     let data = match serde_json::to_string(&serde_json::json!({"version": 1, "items": snapshot})) {
         Ok(d) => d,
         Err(e) => {
@@ -445,7 +602,6 @@ pub fn init_file_usage(data_dir: &std::path::Path) {
     eprintln!("[fileusage] loaded {n} record(s)");
 }
 
-
 /// 驱动器根的索引深度（续123）。
 ///
 /// 续122 曾点名把系统根（C:\Windows 等）加进来，但用户的项目在 `D:\dev\workbench-app`，
@@ -476,7 +632,10 @@ const DRIVE_ROOT_DEPTH: usize = 3;
 /// `set_search_dirs_indexes_extra_dir` 会去走真实的 C:/D:，既慢又变成环境依赖
 /// （与既有的替换 USERPROFILE 的做法保持一致）。
 fn drive_roots() -> Vec<PathBuf> {
-    if std::env::var("WORKBENCH_SCAN_DRIVES").map(|v| v == "0").unwrap_or(false) {
+    if std::env::var("WORKBENCH_SCAN_DRIVES")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
         return Vec::new();
     }
     ('A'..='Z')
@@ -561,7 +720,8 @@ const NOISE_PATH_SEQS: &[&[&str]] = &[&["go", "pkg", "mod"]];
 fn path_has_noise_pattern(path: &str) -> bool {
     let segs: Vec<String> = path.split(['\\', '/']).map(|s| s.to_lowercase()).collect();
     NOISE_PATH_SEQS.iter().any(|seq| {
-        segs.windows(seq.len()).any(|w| w.iter().zip(seq.iter()).all(|(a, b)| a == b))
+        segs.windows(seq.len())
+            .any(|w| w.iter().zip(seq.iter()).all(|(a, b)| a == b))
     })
 }
 
@@ -687,7 +847,9 @@ fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
                 continue; // 先前的根已收过这条，跳过（见函数顶部 seen 的说明）
             }
             let is_extra = extra_prefixes.iter().any(|p| key.starts_with(p.as_str()));
-            out.push(IndexEntry::new(path_s, &name, &ext, is_dir, is_extra, mtime));
+            out.push(IndexEntry::new(
+                path_s, &name, &ext, is_dir, is_extra, mtime,
+            ));
         }
         covered.push(dir.clone());
     }
@@ -697,7 +859,7 @@ fn build_index(dirs: &[(PathBuf, bool, usize)]) -> Vec<IndexEntry> {
 /// 后台索引线程：setup 阶段调用。永不阻塞主线程 / UI。
 /// sleep(INITIAL_DELAY) 避开开机高峰 → 建索引 → 原子替换 → emit 通知 → 周期重建。
 pub fn start_index_worker(app: AppHandle) {
-    FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+    FILE_INDEX.get_or_init(|| Mutex::new(Arc::from(Vec::<IndexEntry>::new())));
     EXTRA_DIRS.get_or_init(|| Mutex::new(Vec::new()));
     ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(move || {
@@ -708,9 +870,9 @@ pub fn start_index_worker(app: AppHandle) {
             let dirs = scan_dirs();
             let started = Instant::now();
             let new_index = build_index(&dirs); // 耗时部分，不持锁
-            // 图标预热（续128 改为增量）：取上一轮缓存的快照当基线，只提本轮新出现的 key。
-            // 每 ICON_CACHE_FULL_REFRESH_EVERY 轮传空表做一次全刷——否则 exe/lnk 是按路径做 key 的，
-            // 程序升级换了图标后会**永远**停在旧图上。全刷把陈旧上限钉死在约 6 小时。
+                                                // 图标预热（续128 改为增量）：取上一轮缓存的快照当基线，只提本轮新出现的 key。
+                                                // 每 ICON_CACHE_FULL_REFRESH_EVERY 轮传空表做一次全刷——否则 exe/lnk 是按路径做 key 的，
+                                                // 程序升级换了图标后会**永远**停在旧图上。全刷把陈旧上限钉死在约 6 小时。
             let base = if round.is_multiple_of(ICON_CACHE_FULL_REFRESH_EVERY) {
                 HashMap::new()
             } else {
@@ -723,15 +885,15 @@ pub fn start_index_worker(app: AppHandle) {
             let icon_started = Instant::now();
             let new_icons = build_icon_cache(&new_index, &base); // 遍历后、替换前预热（后台线程，不持锁）
             let icon_ms = icon_started.elapsed();
-            let reused = new_icons.len().saturating_sub(
-                new_icons.keys().filter(|k| !base.contains_key(*k)).count(),
-            );
+            let reused = new_icons
+                .len()
+                .saturating_sub(new_icons.keys().filter(|k| !base.contains_key(*k)).count());
             let icon_total = new_icons.len();
             round = round.wrapping_add(1);
             let count = new_index.len();
             if let Some(lock) = FILE_INDEX.get() {
                 if let Ok(mut guard) = lock.lock() {
-                    *guard = new_index; // 原子替换（瞬间临界区）
+                    *guard = Arc::from(new_index); // 原子替换（瞬间临界区）
                 } // 立即出锁
             }
             if let Some(lock) = ICON_CACHE.get() {
@@ -754,13 +916,98 @@ pub fn start_index_worker(app: AppHandle) {
     });
 }
 
+fn dynamic_entry(input: DynamicSearchInput) -> Option<DynamicEntry> {
+    let kind = DynamicKind::parse(&input.kind)?;
+    let key = input.key.trim();
+    let name = input.name.trim();
+    if key.is_empty() || name.is_empty() || key.len() > 32_768 || name.len() > 512 {
+        return None;
+    }
+    let is_dir = input.is_dir.unwrap_or(false);
+    let ext = if is_dir {
+        String::new()
+    } else {
+        input
+            .ext
+            .unwrap_or_default()
+            .trim()
+            .trim_start_matches('.')
+            .to_lowercase()
+    };
+    let name_lower = name.to_lowercase();
+    let stem_lower = if !ext.is_empty() {
+        let dot_ext = format!(".{ext}");
+        name_lower
+            .strip_suffix(&dot_ext)
+            .unwrap_or(&name_lower)
+            .to_owned()
+    } else {
+        name_lower.clone()
+    };
+    let alias_source = if !ext.is_empty() {
+        name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(name)
+    } else {
+        name
+    };
+    let parent_path = input
+        .path
+        .as_deref()
+        .and_then(|path| path.rfind(['\\', '/']).map(|pos| &path[..pos]))
+        .unwrap_or("");
+    let mut keywords: Vec<String> = input
+        .keywords
+        .unwrap_or_default()
+        .into_iter()
+        .map(|word| word.trim().to_lowercase())
+        .filter(|word| !word.is_empty() && word.len() <= 64 && !word.contains('\0'))
+        .collect();
+    keywords.sort_unstable();
+    keywords.dedup();
+
+    Some(DynamicEntry {
+        kind,
+        key: key.to_owned().into_boxed_str(),
+        name: name.to_owned().into_boxed_str(),
+        name_lower: name_lower.into_boxed_str(),
+        stem_lower: stem_lower.into_boxed_str(),
+        parent_path: parent_path.to_owned().into_boxed_str(),
+        aliases: build_search_aliases(alias_source, true),
+        keywords: keywords.join("\0").into_boxed_str(),
+        ext: ext.into_boxed_str(),
+        is_dir,
+        boost: input.boost.unwrap_or(0).clamp(0, DYNAMIC_BOOST_MAX),
+    })
+}
+
+/// 同步动态来源的轻量搜索投影。revision 防止多个异步 invoke 乱序时旧快照反盖新快照。
+#[tauri::command]
+pub fn set_search_items(revision: u64, items: Vec<DynamicSearchInput>) -> u64 {
+    let entries: Vec<DynamicEntry> = items
+        .into_iter()
+        .take(MAX_DYNAMIC_SEARCH_ITEMS)
+        .filter_map(dynamic_entry)
+        .collect();
+    let lock = DYNAMIC_INDEX.get_or_init(|| Mutex::new(DynamicSnapshot::default()));
+    let Ok(mut snapshot) = lock.lock() else {
+        return 0;
+    };
+    if revision >= snapshot.revision {
+        snapshot.revision = revision;
+        snapshot.entries = Arc::from(entries);
+    }
+    snapshot.revision
+}
+
 // ── 打分（内置引擎）────────────────────────────────────────────────
 // 多词 AND：查询按空白拆词，每词都须命中（子串或子序列），总分为各词之和。
 // 分层：子串命中（强，基线 1500+）恒高于子序列模糊（弱，≤1000），保证「直接含」永远排在「拆字母」前。
 
 // 词边界字符：命中点前是这些字符时给词首加权（report_2024 里搜 "2024" 视作词首）。
 fn is_boundary(c: char) -> bool {
-    matches!(c, ' ' | '_' | '-' | '.' | '/' | '\\' | '(' | '[' | ']' | ')')
+    matches!(
+        c,
+        ' ' | '_' | '-' | '.' | '/' | '\\' | '(' | '[' | ']' | ')'
+    )
 }
 
 // 子序列模糊打分：t 的字符按序出现在 name 中即算命中；连续命中、词首命中额外加分。上限 SUBSEQ_CAP。
@@ -822,7 +1069,10 @@ fn token_score(t: &str, name_lower: &str) -> Option<i32> {
     // 完全一致也看**去掉扩展名的词干**（续121）。查 "report" 时
     // `report.md` 就是要找的东西本身，不该和 `report_draft.md` 挤在同一层、
     // 靠短名加分那点微弱差距分胜负。
-    let stem = name_lower.rsplit_once('.').map(|(a, _)| a).unwrap_or(name_lower);
+    let stem = name_lower
+        .rsplit_once('.')
+        .map(|(a, _)| a)
+        .unwrap_or(name_lower);
     if name_lower == t || stem == t {
         return Some(L_EXACT);
     }
@@ -851,6 +1101,7 @@ fn token_score(t: &str, name_lower: &str) -> Option<i32> {
 /// 抽出理由：**为了在不碰全局状态（FILE_INDEX / EXTRA_DIRS / USERPROFILE）的前提下测排序**。
 /// 既有的端到端测试会改写这些全局量，因而带着「只此一个、别并行加测」的约束，
 /// 排序的回归测试没法搭在它上面。这里做成纯函数后，就能手工构造 IndexEntry 自由验证。
+#[cfg(test)]
 fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
     let mut total = 0i32;
     for t in tokens {
@@ -866,50 +1117,368 @@ fn entry_score(tokens: &[&str], e: &IndexEntry, now: u64) -> Option<i32> {
     Some(total)
 }
 
-// 内置引擎查询：纯内存读，<5ms。多词 AND + 分层打分 + 短名优先 + 新鲜度。
+#[derive(Clone, Copy)]
+struct RankedHit {
+    relevance: SearchScore,
+    bonus: i32,
+    index: usize,
+}
+
+/// 最佳结果在前。相关性是硬层级；使用、时间、目录意图等只在相同字符串质量下破同分。
+fn compare_ranked_hits(a: &RankedHit, b: &RankedHit, index: &[IndexEntry]) -> std::cmp::Ordering {
+    b.relevance
+        .cmp(&a.relevance)
+        .then_with(|| b.bonus.cmp(&a.bonus))
+        .then_with(|| {
+            index[a.index]
+                .name()
+                .len()
+                .cmp(&index[b.index].name().len())
+        })
+        .then_with(|| index[a.index].path.cmp(&index[b.index].path))
+}
+
+/// 只完整排序最终需要的 Top-K；大候选集先线性选择，避免对全部命中项做 O(n log n) 排序。
+fn retain_top_hits(hits: &mut Vec<RankedHit>, index: &[IndexEntry], limit: usize) {
+    if hits.len() > limit {
+        hits.select_nth_unstable_by(limit, |a, b| compare_ranked_hits(a, b, index));
+        hits.truncate(limit);
+    }
+    hits.sort_unstable_by(|a, b| compare_ranked_hits(a, b, index));
+}
+
+/// 对一份不可变索引快照排名。抽成纯索引输入，便于黄金语料和真机性能探针复用。
+fn rank_index(
+    query: &SearchQuery,
+    index: &[IndexEntry],
+    usage: Option<&HashMap<String, FileUse>>,
+    now: u64,
+    limit: usize,
+) -> Vec<RankedHit> {
+    rank_index_impl(query, index, usage, now, limit, false)
+}
+
+fn rank_index_impl(
+    query: &SearchQuery,
+    index: &[IndexEntry],
+    usage: Option<&HashMap<String, FileUse>>,
+    now: u64,
+    limit: usize,
+    include_all_partial: bool,
+) -> Vec<RankedHit> {
+    let (mut full, partial) = with_matchers(|matchers| {
+        let mut full = Vec::new();
+        let mut partial = Vec::new();
+        for (idx, e) in index.iter().enumerate() {
+            if let Some(relevance) = query.score(e.search_candidate(), matchers) {
+                let mut bonus = short_name_bonus(e.name().len())
+                    + recency_bonus(e.mtime, now)
+                    + path_depth_bonus(e.depth);
+                if e.extra {
+                    bonus += EXTRA_DIR_BONUS;
+                }
+                if let Some(u) = usage {
+                    bonus += open_bonus(u.get(&usage_key(&e.path)), now);
+                }
+                let hit = RankedHit {
+                    relevance,
+                    bonus,
+                    index: idx,
+                };
+                if relevance.full_match {
+                    full.push(hit);
+                } else {
+                    partial.push(hit);
+                }
+            }
+        }
+        (full, partial)
+    });
+
+    // 多词完整命中不够时才召回部分覆盖；完整项靠 SearchScore.full_match 始终在前。
+    if query.token_count() > 1
+        && (include_all_partial || full.len() < limit.min(PARTIAL_FALLBACK_TARGET))
+    {
+        full.extend(partial);
+    }
+    retain_top_hits(&mut full, index, limit);
+    full
+}
+
+#[derive(Clone, Copy)]
+struct DynamicRankedHit {
+    relevance: SearchScore,
+    bonus: i32,
+    index: usize,
+}
+
+fn compare_dynamic_hits(
+    a: &DynamicRankedHit,
+    b: &DynamicRankedHit,
+    entries: &[DynamicEntry],
+) -> std::cmp::Ordering {
+    b.relevance
+        .cmp(&a.relevance)
+        .then_with(|| b.bonus.cmp(&a.bonus))
+        .then_with(|| {
+            entries[a.index]
+                .name
+                .len()
+                .cmp(&entries[b.index].name.len())
+        })
+        .then_with(|| entries[a.index].key.cmp(&entries[b.index].key))
+}
+
+#[cfg(test)]
+fn rank_dynamic(
+    query: &SearchQuery,
+    entries: &[DynamicEntry],
+    limit: usize,
+) -> Vec<DynamicRankedHit> {
+    rank_dynamic_impl(query, entries, limit, false)
+}
+
+fn rank_dynamic_impl(
+    query: &SearchQuery,
+    entries: &[DynamicEntry],
+    limit: usize,
+    include_all_partial: bool,
+) -> Vec<DynamicRankedHit> {
+    let (mut full, partial) = with_matchers(|matchers| {
+        let mut full = Vec::new();
+        let mut partial = Vec::new();
+        for (idx, entry) in entries.iter().enumerate() {
+            let Some(relevance) = query.score(entry.search_candidate(), matchers) else {
+                continue;
+            };
+            let hit = DynamicRankedHit {
+                relevance,
+                bonus: entry.kind.bonus() + entry.boost + short_name_bonus(entry.name.len()),
+                index: idx,
+            };
+            if relevance.full_match {
+                full.push(hit);
+            } else {
+                partial.push(hit);
+            }
+        }
+        (full, partial)
+    });
+    if query.token_count() > 1
+        && (include_all_partial || full.len() < limit.min(PARTIAL_FALLBACK_TARGET))
+    {
+        full.extend(partial);
+    }
+    if full.len() > limit {
+        full.select_nth_unstable_by(limit, |a, b| compare_dynamic_hits(a, b, entries));
+        full.truncate(limit);
+    }
+    full.sort_unstable_by(|a, b| compare_dynamic_hits(a, b, entries));
+    full
+}
+
+#[derive(Clone, Copy)]
+enum CombinedSource {
+    File(usize),
+    Dynamic(usize),
+}
+
+#[derive(Clone, Copy)]
+struct CombinedHit {
+    relevance: SearchScore,
+    bonus: i32,
+    source: CombinedSource,
+}
+
+fn combined_name_len(hit: &CombinedHit, files: &[IndexEntry], dynamic: &[DynamicEntry]) -> usize {
+    match hit.source {
+        CombinedSource::File(idx) => files[idx].name().len(),
+        CombinedSource::Dynamic(idx) => dynamic[idx].name.len(),
+    }
+}
+
+fn combined_stable_key<'a>(
+    hit: &CombinedHit,
+    files: &'a [IndexEntry],
+    dynamic: &'a [DynamicEntry],
+) -> &'a str {
+    match hit.source {
+        CombinedSource::File(idx) => &files[idx].path,
+        CombinedSource::Dynamic(idx) => &dynamic[idx].key,
+    }
+}
+
+fn compare_combined_hits(
+    a: &CombinedHit,
+    b: &CombinedHit,
+    files: &[IndexEntry],
+    dynamic: &[DynamicEntry],
+) -> std::cmp::Ordering {
+    b.relevance
+        .cmp(&a.relevance)
+        .then_with(|| b.bonus.cmp(&a.bonus))
+        .then_with(|| {
+            combined_name_len(a, files, dynamic).cmp(&combined_name_len(b, files, dynamic))
+        })
+        .then_with(|| {
+            combined_stable_key(a, files, dynamic).cmp(combined_stable_key(b, files, dynamic))
+        })
+}
+
+/// 多词部分召回必须按合并后的总候选判断，不能让某个来源各自偷偷补入弱结果。
+fn apply_combined_partial_fallback(hits: &mut Vec<CombinedHit>, limit: usize) {
+    let full_count = hits.iter().filter(|hit| hit.relevance.full_match).count();
+    if full_count >= limit.min(PARTIAL_FALLBACK_TARGET) {
+        hits.retain(|hit| hit.relevance.full_match);
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind")]
+pub enum UnifiedSearchResult {
+    #[serde(rename = "app")]
+    App { key: String },
+    #[serde(rename = "stage")]
+    Stage { key: String },
+    #[serde(rename = "clip")]
+    Clip { key: String },
+    #[serde(rename = "fs")]
+    Fs {
+        path: String,
+        name: String,
+        ext: String,
+        #[serde(rename = "isDir")]
+        is_dir: bool,
+        #[serde(rename = "iconKey")]
+        icon_key: String,
+    },
+}
+
+#[derive(serde::Serialize)]
+pub struct UnifiedSearchResponse {
+    pub results: Vec<UnifiedSearchResult>,
+    pub icons: HashMap<String, String>,
+}
+
+/// 内置引擎统一查询：动态来源与文件索引共用一套 SearchScore，并保持严格全局顺序。
+#[tauri::command]
+pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse {
+    let limit = limit.min(QUERY_LIMIT_CAP);
+    let search = SearchQuery::new(&query);
+    if limit == 0 || search.is_empty() {
+        return UnifiedSearchResponse {
+            results: Vec::new(),
+            icons: HashMap::new(),
+        };
+    }
+    let files = FILE_INDEX
+        .get()
+        .and_then(|lock| lock.lock().ok())
+        .map(|index| Arc::clone(&index))
+        .unwrap_or_else(|| Arc::from(Vec::<IndexEntry>::new()));
+    let dynamic = DYNAMIC_INDEX
+        .get()
+        .and_then(|lock| lock.lock().ok())
+        .map(|snapshot| Arc::clone(&snapshot.entries))
+        .unwrap_or_else(|| Arc::from(Vec::<DynamicEntry>::new()));
+    let now = now_unix();
+    let usage = FILE_USAGE.get().and_then(|lock| lock.lock().ok());
+    // 两边先带回部分候选，等合并后再按全局完整结果数决定是否需要补位。
+    let file_hits = rank_index_impl(&search, &files, usage.as_deref(), now, limit, true);
+    let dynamic_hits = rank_dynamic_impl(&search, &dynamic, limit, true);
+
+    let mut combined = Vec::with_capacity(file_hits.len() + dynamic_hits.len());
+    combined.extend(file_hits.into_iter().map(|hit| CombinedHit {
+        relevance: hit.relevance,
+        bonus: hit.bonus,
+        source: CombinedSource::File(hit.index),
+    }));
+    combined.extend(dynamic_hits.into_iter().map(|hit| CombinedHit {
+        relevance: hit.relevance,
+        bonus: hit.bonus,
+        source: CombinedSource::Dynamic(hit.index),
+    }));
+    apply_combined_partial_fallback(&mut combined, limit);
+    combined.sort_unstable_by(|a, b| compare_combined_hits(a, b, &files, &dynamic));
+    combined.truncate(limit);
+
+    let mut results = Vec::with_capacity(combined.len());
+    for hit in combined {
+        match hit.source {
+            CombinedSource::File(idx) => {
+                let entry = &files[idx];
+                results.push(UnifiedSearchResult::Fs {
+                    path: entry.path.to_string(),
+                    name: entry.name().to_owned(),
+                    ext: entry.ext().to_owned(),
+                    is_dir: entry.is_dir,
+                    icon_key: icon_key(entry.is_dir, entry.ext(), &entry.path),
+                });
+            }
+            CombinedSource::Dynamic(idx) => {
+                let entry = &dynamic[idx];
+                let key = entry.key.to_string();
+                results.push(match entry.kind {
+                    DynamicKind::App => UnifiedSearchResult::App { key },
+                    DynamicKind::Stage => UnifiedSearchResult::Stage { key },
+                    DynamicKind::Clip => UnifiedSearchResult::Clip { key },
+                });
+            }
+        }
+    }
+
+    let mut icons = HashMap::new();
+    if let Some(cache) = ICON_CACHE.get().and_then(|lock| lock.lock().ok()) {
+        for result in &results {
+            let UnifiedSearchResult::Fs { icon_key, .. } = result else {
+                continue;
+            };
+            if let Some(Some(icon)) = cache.get(icon_key) {
+                icons
+                    .entry(icon_key.clone())
+                    .or_insert_with(|| icon.clone());
+            }
+        }
+    }
+    UnifiedSearchResponse { results, icons }
+}
+
+// 内置引擎查询：索引快照 + Nucleo 多字段匹配；查询路径只读内存、不碰磁盘。
 fn builtin_search(query: &str, limit: usize) -> Vec<FileSearchResult> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
+    let limit = limit.min(QUERY_LIMIT_CAP);
+    if limit == 0 {
         return Vec::new();
     }
-    let tokens: Vec<&str> = q.split_whitespace().collect();
-    if tokens.is_empty() {
+    let query = SearchQuery::new(query);
+    if query.is_empty() {
         return Vec::new();
     }
     let lock = match FILE_INDEX.get() {
         Some(l) => l,
         None => return Vec::new(),
     };
-    let guard = match lock.lock() {
-        Ok(g) => g,
+    // 只在复制 Arc 时持锁；下面遍历的是不可变快照，后台重建可随时原子换入下一版。
+    let index = match lock.lock() {
+        Ok(g) => Arc::clone(&g),
         Err(_) => return Vec::new(),
     };
     // 新鲜度加分用的当前时间只取一次（循环里每条都调 SystemTime::now 是浪费）
     let now = now_unix();
     // 使用学习加分（续132）：锁一次 FILE_USAGE、整段循环持有。
-    // 锁序 FILE_INDEX → FILE_USAGE 固定，record_file_open 只取 FILE_USAGE，无环。
     // open_bonus 只对**已命中 token** 的条目查表（path.to_lowercase 仅少数命中项付费）。
     let usage = FILE_USAGE.get().and_then(|l| l.lock().ok());
-    let mut scored: Vec<(i32, &IndexEntry)> = Vec::new();
-    for e in guard.iter() {
-        if let Some(mut total) = entry_score(&tokens, e, now) {
-            if let Some(u) = &usage {
-                total += open_bonus(u.get(&usage_key(&e.path)), now);
+    let hits = rank_index(&query, &index, usage.as_deref(), now, limit);
+    hits.into_iter()
+        .map(|hit| {
+            let e = &index[hit.index];
+            FileSearchResult {
+                path: e.path.to_string(),
+                name: e.name().to_string(),
+                ext: e.ext().to_string(),
+                is_dir: e.is_dir,
+                icon_key: String::new(), // 由 attach_icons 统一填充
+                mtime: e.mtime,
             }
-            scored.push((total, e));
-        }
-    }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name().len().cmp(&b.1.name().len())));
-    scored
-        .into_iter()
-        .take(limit.min(QUERY_LIMIT_CAP))
-        .map(|(_, e)| FileSearchResult {
-            path: e.path.to_string(),
-            name: e.name().to_string(),
-            ext: e.ext().to_string(),
-            is_dir: e.is_dir,
-            icon_key: String::new(), // 由 attach_icons 统一填充
-            mtime: e.mtime,
         })
         .collect()
 }
@@ -1178,13 +1747,20 @@ mod tests {
     /// 以及旧线性形拉不开的差距现在确实拉开了。
     #[test]
     fn short_name_bonus_shape() {
-        assert_eq!(short_name_bonus(0), SHORT_NAME_BONUS_MAX, "len=0 时取最大值");
+        assert_eq!(
+            short_name_bonus(0),
+            SHORT_NAME_BONUS_MAX,
+            "len=0 时取最大值"
+        );
         let lens = [0usize, 4, 7, 20, 60, 100, 300];
         for w in lens.windows(2) {
             assert!(
                 short_name_bonus(w[0]) >= short_name_bonus(w[1]),
                 "不是单调递减: len={} → {} vs len={} → {}",
-                w[0], short_name_bonus(w[0]), w[1], short_name_bonus(w[1])
+                w[0],
+                short_name_bonus(w[0]),
+                w[1],
+                short_name_bonus(w[1])
             );
         }
         // 续120 实测中出问题的那组对比：`Windows`(7 字符) 与 WinSxS 的长名(60 字符)。
@@ -1200,7 +1776,10 @@ mod tests {
         assert_eq!(path_depth("C:\\Windows"), 1);
         assert_eq!(path_depth("C:/a/b/c"), 3, "正斜杠分隔也要算");
         // 单调递减且非负
-        let d: Vec<i32> = [1u8, 3, 6, 10, 20, 200].iter().map(|x| path_depth_bonus(*x)).collect();
+        let d: Vec<i32> = [1u8, 3, 6, 10, 20, 200]
+            .iter()
+            .map(|x| path_depth_bonus(*x))
+            .collect();
         for w in d.windows(2) {
             assert!(w[0] >= w[1], "不是单调递减: {d:?}");
         }
@@ -1237,48 +1816,89 @@ mod tests {
         //    home 若排到后面就会被驱动器根的浅遍历吃掉，只能索引到浅层。
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         if !home.is_empty() && PathBuf::from(&home).exists() {
-            assert_eq!(dirs[0].0, PathBuf::from(&home), "home 不在最前: {:?}", dirs[0].0);
+            assert_eq!(
+                dirs[0].0,
+                PathBuf::from(&home),
+                "home 不在最前: {:?}",
+                dirs[0].0
+            );
             assert_eq!(dirs[0].2, MAX_WALK_DEPTH, "home 必须走深度遍历");
         }
 
         // ② 驱动器根已加入，且分配到的是浅深度
-        let drives: Vec<_> = dirs.iter().filter(|(_, _, d)| *d == DRIVE_ROOT_DEPTH).collect();
+        let drives: Vec<_> = dirs
+            .iter()
+            .filter(|(_, _, d)| *d == DRIVE_ROOT_DEPTH)
+            .collect();
         assert!(!drives.is_empty(), "一个驱动器根都没加进来: {dirs:?}");
-        const { assert!(DRIVE_ROOT_DEPTH < MAX_WALK_DEPTH, "驱动器根不比 home 浅就失去意义了") };
+        const {
+            assert!(
+                DRIVE_ROOT_DEPTH < MAX_WALK_DEPTH,
+                "驱动器根不比 home 浅就失去意义了"
+            )
+        };
 
         // ③ 关闭开关确实生效（测试隔离的生命线）
         std::env::set_var("WORKBENCH_SCAN_DRIVES", "0");
-        assert!(drive_roots().is_empty(), "WORKBENCH_SCAN_DRIVES=0 没能停掉驱动器遍历");
+        assert!(
+            drive_roots().is_empty(),
+            "WORKBENCH_SCAN_DRIVES=0 没能停掉驱动器遍历"
+        );
         std::env::remove_var("WORKBENCH_SCAN_DRIVES");
     }
 
     /// 噪声路径判定（续121）。从 Everything 的全盘结果里滤掉 WinSxS 之类。
     #[test]
     fn noise_path_detection() {
-        assert!(is_noise_path("C:\\Windows\\WinSxS\\amd64_microsoft-windows-cng_31bf.txt"));
+        assert!(is_noise_path(
+            "C:\\Windows\\WinSxS\\amd64_microsoft-windows-cng_31bf.txt"
+        ));
         assert!(is_noise_path("C:/Windows/winsxs/x"), "正斜杠分隔也要认");
         assert!(is_noise_path("D:\\proj\\node_modules\\react\\index.js"));
-        assert!(is_noise_path("C:\\py\\venv\\Lib\\site-packages\\numpy\\core.py"), "Python 依赖包");
+        assert!(
+            is_noise_path("C:\\py\\venv\\Lib\\site-packages\\numpy\\core.py"),
+            "Python 依赖包"
+        );
         assert!(is_noise_path("C:\\Users\\me\\AppData\\Local\\x.log"));
         // 正常路径不能被滤掉——这里误伤就会变成「本该有的文件搜不到」
         assert!(!is_noise_path("C:\\Windows\\System32\\cmd.exe"));
         assert!(!is_noise_path("D:\\dev\\workbench-app\\src\\App.tsx"));
         // 不能因子串误伤（只是名字里含 "target" 是另一回事）
         assert!(!is_noise_path("D:\\dev\\my-target-app\\main.rs"));
-        assert!(is_noise_path("D:\\dev\\rustproj\\target\\debug\\x.exe"), "作为完整路径段则应滤掉");
+        assert!(
+            is_noise_path("D:\\dev\\rustproj\\target\\debug\\x.exe"),
+            "作为完整路径段则应滤掉"
+        );
     }
 
     /// 路径序列噪声（续139）：Go 模块缓存 go\pkg\mod。单名名单抓不到、必须按连续段识别。
     #[test]
     fn go_module_cache_pruned() {
         // 实测 `note` 前 9 全是它——必须滤掉
-        assert!(path_has_noise_pattern("C:\\Users\\me\\go\\pkg\\mod\\golang.org\\x\\sys@v0.30.0\\note"));
-        assert!(path_has_noise_pattern("C:/Users/me/go/pkg/mod/cache/download"), "正斜杠也认");
-        assert!(is_noise_path("C:\\Users\\me\\go\\pkg\\mod\\x\\y.go"), "并入 is_noise_path 供 Everything 兜底");
+        assert!(path_has_noise_pattern(
+            "C:\\Users\\me\\go\\pkg\\mod\\golang.org\\x\\sys@v0.30.0\\note"
+        ));
+        assert!(
+            path_has_noise_pattern("C:/Users/me/go/pkg/mod/cache/download"),
+            "正斜杠也认"
+        );
+        assert!(
+            is_noise_path("C:\\Users\\me\\go\\pkg\\mod\\x\\y.go"),
+            "并入 is_noise_path 供 Everything 兜底"
+        );
         // 不能误伤：Go 源码工作区 go\src、或只含单段 go/pkg/mod 之一的正常路径
-        assert!(!path_has_noise_pattern("C:\\Users\\me\\go\\src\\myproject\\main.go"), "go\\src 是用户代码，不能滤");
-        assert!(!path_has_noise_pattern("D:\\dev\\pkg\\mod.rs"), "pkg 后跟文件 mod.rs，非 go\\pkg\\mod 序列");
-        assert!(!path_has_noise_pattern("D:\\projects\\mod\\pkg\\go"), "段序颠倒不算");
+        assert!(
+            !path_has_noise_pattern("C:\\Users\\me\\go\\src\\myproject\\main.go"),
+            "go\\src 是用户代码，不能滤"
+        );
+        assert!(
+            !path_has_noise_pattern("D:\\dev\\pkg\\mod.rs"),
+            "pkg 后跟文件 mod.rs，非 go\\pkg\\mod 序列"
+        );
+        assert!(
+            !path_has_noise_pattern("D:\\projects\\mod\\pkg\\go"),
+            "段序颠倒不算"
+        );
         // Everything 查询排除句应包含该序列
         assert!(everything_query_with_exclusions("note").contains("!path:\"\\go\\pkg\\mod\\\""));
     }
@@ -1303,23 +1923,344 @@ mod tests {
         IndexEntry::new(format!("C:\\x\\{name}"), name, &ext, false, extra, mtime)
     }
 
+    fn ent_at(path: &str, name: &str, mtime: u64, extra: bool) -> IndexEntry {
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        IndexEntry::new(path.to_owned(), name, &ext, false, extra, mtime)
+    }
+
+    fn rank_names(query: &str, entries: &[IndexEntry], limit: usize) -> Vec<String> {
+        let query = SearchQuery::new(query);
+        rank_index(&query, entries, None, now_unix(), limit)
+            .into_iter()
+            .map(|hit| entries[hit.index].name().to_owned())
+            .collect()
+    }
+
+    /// V2 黄金语料直接走 IndexEntry → rank_index 的生产链路，不只测孤立 matcher。
+    #[test]
+    fn v2_golden_ranking_integration() {
+        let now = now_unix();
+        let entries = vec![
+            ent("app.exe", now, false),
+            ent("quarterly-wrapper-config-backup.xml", now, false),
+            ent("Advanced Photo Processor.exe", now, false),
+            ent_at("D:\\dev\\workbench-app\\report.md", "report.md", now, false),
+            ent_at("D:\\docs\\会议纪要.docx", "会议纪要.docx", now, false),
+        ];
+
+        let app = rank_names("app", &entries, 10);
+        assert_eq!(app.first().map(String::as_str), Some("app.exe"));
+        let acronym = app
+            .iter()
+            .position(|n| n == "Advanced Photo Processor.exe")
+            .expect("缩写候选必须召回");
+        let wrapper = app
+            .iter()
+            .position(|n| n == "quarterly-wrapper-config-backup.xml")
+            .expect("内部子串对照项必须召回");
+        assert!(acronym < wrapper, "词首缩写应排在长内部子串之前: {app:?}");
+        assert_eq!(
+            rank_names("workbench report", &entries, 10)
+                .first()
+                .map(String::as_str),
+            Some("report.md")
+        );
+        assert_eq!(
+            rank_names("huiyi", &entries, 10)
+                .first()
+                .map(String::as_str),
+            Some("会议纪要.docx")
+        );
+        assert_eq!(
+            rank_names("hyjy", &entries, 10).first().map(String::as_str),
+            Some("会议纪要.docx")
+        );
+    }
+
+    #[test]
+    fn v2_partial_results_only_fill_when_full_results_are_scarce() {
+        let now = now_unix();
+        let mut many_full: Vec<IndexEntry> = (0..8)
+            .map(|i| ent(&format!("report-2024-{i}.md"), now, false))
+            .collect();
+        many_full.push(ent("report-2023.md", now, false));
+        let names = rank_names("report 2024", &many_full, 20);
+        assert_eq!(
+            names.len(),
+            8,
+            "完整结果够 8 条时不应混入部分匹配: {names:?}"
+        );
+        assert!(!names.iter().any(|n| n == "report-2023.md"));
+
+        let scarce = vec![
+            ent("report-2024.md", now, false),
+            ent("report-2023.md", now, false),
+        ];
+        assert_eq!(
+            rank_names("report 2024", &scarce, 20),
+            vec!["report-2024.md", "report-2023.md"]
+        );
+    }
+
+    #[test]
+    fn v2_partial_fallback_is_decided_after_sources_are_merged() {
+        let score = |full_match| SearchScore {
+            full_match,
+            matched_tokens: if full_match { 2 } else { 1 },
+            weakest_tier: 8,
+            tier_sum: 16,
+            nucleo_sum: 100,
+        };
+        let mut enough_full: Vec<CombinedHit> = (0..PARTIAL_FALLBACK_TARGET)
+            .map(|idx| CombinedHit {
+                relevance: score(true),
+                bonus: 0,
+                source: CombinedSource::File(idx),
+            })
+            .collect();
+        enough_full.push(CombinedHit {
+            relevance: score(false),
+            bonus: i32::MAX,
+            source: CombinedSource::Dynamic(0),
+        });
+        apply_combined_partial_fallback(&mut enough_full, 20);
+        assert_eq!(enough_full.len(), PARTIAL_FALLBACK_TARGET);
+        assert!(enough_full.iter().all(|hit| hit.relevance.full_match));
+
+        let mut scarce = enough_full[..PARTIAL_FALLBACK_TARGET - 1].to_vec();
+        scarce.push(CombinedHit {
+            relevance: score(false),
+            bonus: 0,
+            source: CombinedSource::Dynamic(0),
+        });
+        apply_combined_partial_fallback(&mut scarce, 20);
+        assert!(scarce.iter().any(|hit| !hit.relevance.full_match));
+    }
+
+    #[test]
+    fn v2_usage_and_recency_never_cross_relevance_tiers() {
+        const DAY: u64 = 86_400;
+        let now = 20_000 * DAY;
+        let exact = ent("report.md", now - 1000 * DAY, false);
+        let mut weak = ent("oldreportbackup.md", now, true);
+        weak.depth = 1;
+        let entries = vec![exact, weak];
+        let mut usage = HashMap::new();
+        usage.insert(
+            usage_key(&entries[1].path),
+            FileUse {
+                count: 100,
+                last_used: now,
+            },
+        );
+        let query = SearchQuery::new("report");
+        let ranked = rank_index(&query, &entries, Some(&usage), now, 10);
+        assert_eq!(
+            entries[ranked[0].index].name(),
+            "report.md",
+            "再强的条目先验也不能让弱模糊匹配越过精确名称"
+        );
+    }
+
+    fn dynamic(kind: &str, key: &str, name: &str, path: &str) -> DynamicEntry {
+        dynamic_entry(DynamicSearchInput {
+            kind: kind.to_owned(),
+            key: key.to_owned(),
+            name: name.to_owned(),
+            path: Some(path.to_owned()),
+            ext: None,
+            is_dir: Some(false),
+            boost: Some(0),
+            keywords: None,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn v2_unified_search_ipc_contract_uses_frontend_field_names() {
+        let input: DynamicSearchInput = serde_json::from_value(serde_json::json!({
+            "kind": "app",
+            "key": "app:vscode",
+            "name": "Visual Studio Code",
+            "path": "C:\\Apps\\Visual Studio Code.lnk",
+            "isDir": false,
+            "boost": 120,
+            "keywords": ["应用", "application"]
+        }))
+        .unwrap();
+        assert_eq!(input.key, "app:vscode");
+        assert_eq!(input.is_dir, Some(false));
+
+        let response = UnifiedSearchResponse {
+            results: vec![
+                UnifiedSearchResult::App {
+                    key: "app:vscode".to_owned(),
+                },
+                UnifiedSearchResult::Fs {
+                    path: "C:\\Docs\\report.md".to_owned(),
+                    name: "report.md".to_owned(),
+                    ext: "md".to_owned(),
+                    is_dir: false,
+                    icon_key: "md".to_owned(),
+                },
+            ],
+            icons: HashMap::new(),
+        };
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["results"][0]["kind"], "app");
+        assert_eq!(json["results"][0]["key"], "app:vscode");
+        assert_eq!(json["results"][1]["kind"], "fs");
+        assert_eq!(json["results"][1]["isDir"], false);
+        assert_eq!(json["results"][1]["iconKey"], "md");
+    }
+
+    #[test]
+    fn v2_cross_source_order_uses_one_relevance_scale() {
+        let now = now_unix();
+        let files = vec![
+            ent("VscMgrPS.dll", now, false),
+            ent("report.md", now - 1000 * 86_400, false),
+            ent("app.exe", now, false),
+        ];
+        let dynamic = vec![
+            dynamic(
+                "app",
+                "app:vscode",
+                "Visual Studio Code",
+                "C:\\Apps\\Visual Studio Code.lnk",
+            ),
+            dynamic(
+                "app",
+                "app:report-manager",
+                "Report Manager",
+                "C:\\Apps\\Report Manager.lnk",
+            ),
+            dynamic(
+                "app",
+                "app:advanced-photo-processor",
+                "Advanced Photo Processor",
+                "C:\\Apps\\Advanced Photo Processor.lnk",
+            ),
+        ];
+
+        let query = SearchQuery::new("vsc");
+        let file_hit = rank_index(&query, &files, None, now, 10)[0];
+        let dynamic_hit = rank_dynamic(&query, &dynamic, 10)[0];
+        let mut combined = [
+            CombinedHit {
+                relevance: file_hit.relevance,
+                bonus: file_hit.bonus,
+                source: CombinedSource::File(file_hit.index),
+            },
+            CombinedHit {
+                relevance: dynamic_hit.relevance,
+                bonus: dynamic_hit.bonus,
+                source: CombinedSource::Dynamic(dynamic_hit.index),
+            },
+        ];
+        combined.sort_unstable_by(|a, b| compare_combined_hits(a, b, &files, &dynamic));
+        assert!(
+            matches!(combined[0].source, CombinedSource::Dynamic(0)),
+            "VSC 缩写应用应排在同字母系统文件前"
+        );
+
+        let query = SearchQuery::new("app");
+        let file_hit = rank_index(&query, &files, None, now, 10)
+            .into_iter()
+            .find(|hit| files[hit.index].name() == "app.exe")
+            .unwrap();
+        let dynamic_hit = rank_dynamic(&query, &dynamic, 10)
+            .into_iter()
+            .find(|hit| dynamic[hit.index].name.as_ref() == "Advanced Photo Processor")
+            .unwrap();
+        let mut combined = [
+            CombinedHit {
+                relevance: file_hit.relevance,
+                bonus: file_hit.bonus,
+                source: CombinedSource::File(file_hit.index),
+            },
+            CombinedHit {
+                relevance: dynamic_hit.relevance,
+                bonus: dynamic_hit.bonus,
+                source: CombinedSource::Dynamic(dynamic_hit.index),
+            },
+        ];
+        combined.sort_unstable_by(|a, b| compare_combined_hits(a, b, &files, &dynamic));
+        assert!(
+            matches!(combined[0].source, CombinedSource::Dynamic(2)),
+            "完整词首缩写应用应排在普通工程 app 文件前"
+        );
+
+        let query = SearchQuery::new("report");
+        let file_hit = rank_index(&query, &files, None, now, 10)
+            .into_iter()
+            .find(|hit| files[hit.index].name() == "report.md")
+            .unwrap();
+        let dynamic_hit = rank_dynamic(&query, &dynamic, 10)
+            .into_iter()
+            .find(|hit| dynamic[hit.index].name.as_ref() == "Report Manager")
+            .unwrap();
+        let mut combined = [
+            CombinedHit {
+                relevance: file_hit.relevance,
+                bonus: file_hit.bonus,
+                source: CombinedSource::File(file_hit.index),
+            },
+            CombinedHit {
+                relevance: dynamic_hit.relevance,
+                bonus: dynamic_hit.bonus,
+                source: CombinedSource::Dynamic(dynamic_hit.index),
+            },
+        ];
+        combined.sort_unstable_by(|a, b| compare_combined_hits(a, b, &files, &dynamic));
+        assert!(
+            matches!(combined[0].source, CombinedSource::File(1)),
+            "精确文件名必须压过只有前缀命中的应用"
+        );
+    }
+
     /// `name()`/`ext()` 的切片派生必须与「独立存字符串」时代完全等价（续126）。
     /// 这是内存瘦身的正确性基石：偏移量算错不会 panic，只会静默地让搜索结果显示错误的名字
     /// 或把图标归错类——比崩溃更难发现，所以要钉死。
     #[test]
     fn index_entry_derives_name_and_ext() {
-        let e = IndexEntry::new("C:\\dev\\App\\Report.MD".into(), "Report.MD", "md", false, false, 0);
+        let e = IndexEntry::new(
+            "C:\\dev\\App\\Report.MD".into(),
+            "Report.MD",
+            "md",
+            false,
+            false,
+            0,
+        );
         assert_eq!(e.name(), "Report.MD", "name 必须保持原始大小写");
         assert_eq!(e.name_lower.as_ref(), "report.md");
         assert_eq!(e.ext(), "md");
 
         // 无扩展名 → ext 为空串（而非 panic 或越界）
-        let d = IndexEntry::new("C:\\dev\\workbench-app".into(), "workbench-app", "", true, false, 0);
+        let d = IndexEntry::new(
+            "C:\\dev\\workbench-app".into(),
+            "workbench-app",
+            "",
+            true,
+            false,
+            0,
+        );
         assert_eq!(d.name(), "workbench-app");
         assert_eq!(d.ext(), "", "无扩展名应切出空串");
 
         // 中文名（多字节）：偏移量按字节算，切片必须落在字符边界上
-        let c = IndexEntry::new("D:\\项目\\报告.txt".into(), "报告.txt", "txt", false, false, 0);
+        let c = IndexEntry::new(
+            "D:\\项目\\报告.txt".into(),
+            "报告.txt",
+            "txt",
+            false,
+            false,
+            0,
+        );
         assert_eq!(c.name(), "报告.txt");
         assert_eq!(c.ext(), "txt");
 
@@ -1329,7 +2270,10 @@ mod tests {
 
         // 退化路径：to_lowercase 改变字节长度时 ext 关系可能不成立 → 退化为空串，不 panic
         let t = IndexEntry::new("C:\\x\\İ.TXT".into(), "İ.TXT", "TXT", false, false, 0);
-        assert!(t.ext() == "txt" || t.ext().is_empty(), "要么正确派生、要么干净退化，不得越界");
+        assert!(
+            t.ext() == "txt" || t.ext().is_empty(),
+            "要么正确派生、要么干净退化，不得越界"
+        );
     }
 
     /// 图标缓存增量复用（续128）：上一轮已有的 key 必须原样搬过来，
@@ -1350,8 +2294,15 @@ mod tests {
         prev.insert("zzz-gone".to_string(), Some("stale".to_string()));
 
         let out = build_icon_cache(&idx, &prev);
-        assert_eq!(out.get("txt"), Some(&sentinel), "命中的 key 必须复用、不重新提取");
-        assert!(!out.contains_key("zzz-gone"), "本轮索引里没有的 key 不得留下（防无限增长）");
+        assert_eq!(
+            out.get("txt"),
+            Some(&sentinel),
+            "命中的 key 必须复用、不重新提取"
+        );
+        assert!(
+            !out.contains_key("zzz-gone"),
+            "本轮索引里没有的 key 不得留下（防无限增长）"
+        );
         assert_eq!(out.len(), 1, "两个 .txt 去重后只应有一个 key");
 
         // 空基线 = 全量提取路径（首轮 / 周期性全刷）。这里只验证它不 panic 且 key 齐全，
@@ -1384,15 +2335,20 @@ mod tests {
         let fresh = again.keys().filter(|k| !cache.contains_key(*k)).count();
         println!(
             "图标缓存（热，增量）: {} key / {:.2?} / 需新提 {} 个 → 省下 {:.0}%",
-            again.len(), warm, fresh,
+            again.len(),
+            warm,
+            fresh,
             (1.0 - warm.as_secs_f64() / cold.as_secs_f64().max(1e-9)) * 100.0
         );
         // 缓存本身的常驻内存（base64 字符串 + key）
-        let bytes: usize = cache.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, |s| s.len())).sum();
+        let bytes: usize = cache
+            .iter()
+            .map(|(k, v)| k.len() + v.as_ref().map_or(0, |s| s.len()))
+            .sum();
         println!("图标缓存常驻内存: 约 {:.1} MB", bytes as f64 / 1_048_576.0);
 
-        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
-        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+        FILE_INDEX.get_or_init(|| Mutex::new(Arc::from(Vec::<IndexEntry>::new())));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = Arc::from(idx);
         ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
         *ICON_CACHE.get().unwrap().lock().unwrap() = cache;
 
@@ -1405,7 +2361,9 @@ mod tests {
             let keyed = serde_json::to_string(&resp).unwrap_or_default().len();
 
             // ① 改前的等价载荷：把去重表摊回每条结果里内联
-            let inline: usize = serde_json::to_string(&resp.results).unwrap_or_default().len()
+            let inline: usize = serde_json::to_string(&resp.results)
+                .unwrap_or_default()
+                .len()
                 + resp
                     .results
                     .iter()
@@ -1414,12 +2372,15 @@ mod tests {
 
             println!(
                 "\n[{q}] {} 条 / 去重后图标 {} 张",
-                resp.results.len(), resp.icons.len()
+                resp.results.len(),
+                resp.icons.len()
             );
             println!("  ① 内联（改前）:   {:>8.1} KB", inline as f64 / 1024.0);
-            println!("  ② key+表（现行）: {:>8.1} KB   → 削减 {:.0}%",
+            println!(
+                "  ② key+表（现行）: {:>8.1} KB   → 削减 {:.0}%",
                 keyed as f64 / 1024.0,
-                (1.0 - keyed as f64 / inline as f64) * 100.0);
+                (1.0 - keyed as f64 / inline as f64) * 100.0
+            );
         }
         println!();
     }
@@ -1431,15 +2392,33 @@ mod tests {
     fn token_score_layer_bounds_hold() {
         // 各层用**真实字符串**验证是否落在预期的带里。只看常量的检算（上一个测试）
         // 在 token_score 内部改动导致层归属变化时会漏检。
-        assert_eq!(token_score("report", "report"), Some(L_EXACT), "名字原样相等");
-        assert_eq!(token_score("report", "report.md"), Some(L_EXACT), "去掉扩展名的词干相等");
-        assert_eq!(token_score("report", "report_draft.md"), Some(L_PREFIX), "前缀匹配");
+        assert_eq!(
+            token_score("report", "report"),
+            Some(L_EXACT),
+            "名字原样相等"
+        );
+        assert_eq!(
+            token_score("report", "report.md"),
+            Some(L_EXACT),
+            "去掉扩展名的词干相等"
+        );
+        assert_eq!(
+            token_score("report", "report_draft.md"),
+            Some(L_PREFIX),
+            "前缀匹配"
+        );
         // 单词边界（紧跟 _ 之后）。会比 L_WORD 低一个位置罚分
         let word = token_score("report", "my_report.md").expect("应当命中");
-        assert!(word <= L_WORD && word > L_WORD - POS_PENALTY_MAX, "落在词首带之外: {word}");
+        assert!(
+            word <= L_WORD && word > L_WORD - POS_PENALTY_MAX,
+            "落在词首带之外: {word}"
+        );
         // 非边界位置（紧跟字母之后）
         let sub = token_score("report", "xreport.md").expect("应当命中");
-        assert!(sub <= L_SUBSTR && sub > L_SUBSTR - POS_PENALTY_MAX, "落在子串带之外: {sub}");
+        assert!(
+            sub <= L_SUBSTR && sub > L_SUBSTR - POS_PENALTY_MAX,
+            "落在子串带之外: {sub}"
+        );
 
         // 位置罚分的饱和：查询词出现在 500 字符之后也不会跌破下端
         let far = format!("{}rpt.md", "x".repeat(600));
@@ -1451,12 +2430,19 @@ mod tests {
         let q = "a".repeat(60);
         let name = "a_".repeat(60);
         let hi = token_score(&q, &name).expect("应当作为子序列命中");
-        assert_eq!(hi, SUBSEQ_CAP, "这个输入应当触到封顶（没触到说明测试太松）: {hi}");
+        assert_eq!(
+            hi, SUBSEQ_CAP,
+            "这个输入应当触到封顶（没触到说明测试太松）: {hi}"
+        );
 
         // 续120 暴露的真实案例：`Windows` 被 `amd64_microsoft-windows-cng_…` 淹没。
         // 有了完全一致带之后，即使把条目加分全用上也不该被反超。
         let win = token_score("windows", "windows").unwrap();
-        let sxs = token_score("windows", "amd64_microsoft-windows-cng_31bf3856ad364e35_10.0.22621.4746").unwrap();
+        let sxs = token_score(
+            "windows",
+            "amd64_microsoft-windows-cng_31bf3856ad364e35_10.0.22621.4746",
+        )
+        .unwrap();
         assert!(
             win > sxs + ENTRY_BONUS_BUDGET,
             "完全一致 {win} 没有超过 长名词首一致 {sxs} + 加分上限 {ENTRY_BONUS_BUDGET}"
@@ -1479,10 +2465,19 @@ mod tests {
             "d…a…n…g 散乱命中应被剔除"
         );
         // 真实的模糊输入必须仍然命中（门槛只杀散乱、不误伤紧凑）：
-        assert!(token_score("cfg", "config.toml").is_some(), "cfg→config 是紧凑模糊，应保留");
-        assert!(token_score("wbnch", "workbench").is_some(), "wbnch→workbench 应保留");
+        assert!(
+            token_score("cfg", "config.toml").is_some(),
+            "cfg→config 是紧凑模糊，应保留"
+        );
+        assert!(
+            token_score("wbnch", "workbench").is_some(),
+            "wbnch→workbench 应保留"
+        );
         // 子串命中不受影响（走的是另一条路，根本不进 subseq）：
-        assert!(token_score("win", "windows").is_some(), "子串命中与门槛无关");
+        assert!(
+            token_score("win", "windows").is_some(),
+            "子串命中与门槛无关"
+        );
         // 层内次序：更紧凑的子序列得分更高。
         let tight = token_score("abc", "abc_x").unwrap(); // 连续命中
         let loose = token_score("abc", "a_b_c").unwrap(); // 每个之间有空隙
@@ -1514,7 +2509,11 @@ mod tests {
         let fuzzy_fresh = ent(&"a_".repeat(60), now, true);
 
         // 子串侧：查询词出现在第 600 字符（位置罚分饱和）+ 10 年前 + 普通目录
-        let exact_old = ent(&format!("{}{}.md", "x".repeat(600), q), now - 3650 * DAY, false);
+        let exact_old = ent(
+            &format!("{}{}.md", "x".repeat(600), q),
+            now - 3650 * DAY,
+            false,
+        );
 
         let f = entry_score(&tokens, &fuzzy_fresh, now).expect("子序列应当命中");
         let x = entry_score(&tokens, &exact_old, now).expect("子串应当命中");
@@ -1553,7 +2552,11 @@ mod tests {
         let a = entry_score(&["report"], &fresh, now).unwrap();
         let b = entry_score(&["report"], &stale, now).unwrap();
         assert!(a > b, "同名同层下新的应当在前（{a} vs {b}）");
-        assert_eq!(a - b, RECENCY_BONUS_MAX, "差值应恰为新鲜度加分（其余因素完全相同）");
+        assert_eq!(
+            a - b,
+            RECENCY_BONUS_MAX,
+            "差值应恰为新鲜度加分（其余因素完全相同）"
+        );
     }
 
     /// mtime 取不到（0）时排名也不能坏。网络盘等场景真实存在。
@@ -1588,19 +2591,46 @@ mod tests {
         assert_eq!(open_bonus(None, now), 0, "没有使用记录不应加分");
         // 恒落在 [0, OPEN_BONUS_MAX]
         for (count, age_days) in [(1u32, 0u64), (1, 30), (1, 90), (3, 0), (10, 0), (10, 180)] {
-            let u = FileUse { count, last_used: now - age_days * DAY };
+            let u = FileUse {
+                count,
+                last_used: now - age_days * DAY,
+            };
             let b = open_bonus(Some(&u), now);
-            assert!((0..=OPEN_BONUS_MAX).contains(&b), "越界: count={count} age={age_days}d → {b}");
+            assert!(
+                (0..=OPEN_BONUS_MAX).contains(&b),
+                "越界: count={count} age={age_days}d → {b}"
+            );
         }
         // 今日打开一次 → 有实打实的加分（s=1.0 落入 200 档）
-        let today_once = FileUse { count: 1, last_used: now };
-        assert_eq!(open_bonus(Some(&today_once), now), OPEN_BONUS_MAX / 2, "今日打开一次应给中档");
+        let today_once = FileUse {
+            count: 1,
+            last_used: now,
+        };
+        assert_eq!(
+            open_bonus(Some(&today_once), now),
+            OPEN_BONUS_MAX / 2,
+            "今日打开一次应给中档"
+        );
         // 高频打开 → 满档
-        let frequent = FileUse { count: 10, last_used: now };
-        assert_eq!(open_bonus(Some(&frequent), now), OPEN_BONUS_MAX, "高频打开应给满档");
+        let frequent = FileUse {
+            count: 10,
+            last_used: now,
+        };
+        assert_eq!(
+            open_bonus(Some(&frequent), now),
+            OPEN_BONUS_MAX,
+            "高频打开应给满档"
+        );
         // 单次打开、久未再碰（90 天 > 2 个半衰期）→ 淡出为 0，不再长期占加分
-        let stale_once = FileUse { count: 1, last_used: now - 90 * DAY };
-        assert_eq!(open_bonus(Some(&stale_once), now), 0, "久未再碰的单次打开应淡出");
+        let stale_once = FileUse {
+            count: 1,
+            last_used: now - 90 * DAY,
+        };
+        assert_eq!(
+            open_bonus(Some(&stale_once), now),
+            0,
+            "久未再碰的单次打开应淡出"
+        );
         // 频次越高、越近，分越高（单调性抽样）
         assert!(open_bonus(Some(&frequent), now) >= open_bonus(Some(&today_once), now));
         assert!(open_bonus(Some(&today_once), now) >= open_bonus(Some(&stale_once), now));
@@ -1614,11 +2644,18 @@ mod tests {
         let now = 20_000 * DAY;
         let opened = ent("config.toml", now - 2 * DAY, false);
         let never = ent("config.toml", now - 2 * DAY, false); // mtime 相同，唯一差别是使用记录
-        let u = FileUse { count: 5, last_used: now }; // 衰减分 5.0 ≥ 4 → 满档
+        let u = FileUse {
+            count: 5,
+            last_used: now,
+        }; // 衰减分 5.0 ≥ 4 → 满档
         let a = entry_score(&["config"], &opened, now).unwrap() + open_bonus(Some(&u), now);
         let b = entry_score(&["config"], &never, now).unwrap() + open_bonus(None, now);
         assert!(a > b, "亲手打开过的同名文件应排在前（{a} vs {b}）");
-        assert_eq!(a - b, OPEN_BONUS_MAX, "差值应恰为使用加分（其余因素完全相同）");
+        assert_eq!(
+            a - b,
+            OPEN_BONUS_MAX,
+            "差值应恰为使用加分（其余因素完全相同）"
+        );
     }
 
     fn res(name: &str, mtime: u64) -> FileSearchResult {
@@ -1639,11 +2676,14 @@ mod tests {
         let now = now_unix();
         // 模拟 Everything 的默认顺序（如名字序），故意把「好候选放在后面」再传进去
         let input = vec![
-            res("zzz_unrelated_but_contains_report_deep_in_name.md", now - 900 * DAY),
-            res("r_e_p_o_r_t.md", now),            // 只能子序列命中（再新也该垫底）
-            res("report.md", now - 900 * DAY),     // **完全一致**、旧（续121 起升到最上）
+            res(
+                "zzz_unrelated_but_contains_report_deep_in_name.md",
+                now - 900 * DAY,
+            ),
+            res("r_e_p_o_r_t.md", now), // 只能子序列命中（再新也该垫底）
+            res("report.md", now - 900 * DAY), // **完全一致**、旧（续121 起升到最上）
             res("report_final.md", now - 900 * DAY), // 前缀、旧
-            res("report_draft.md", now - DAY),     // 前缀、本周（同为前缀时新的在前）
+            res("report_draft.md", now - DAY), // 前缀、本周（同为前缀时新的在前）
         ];
         let out = rerank_everything(input, "report");
         let names: Vec<&str> = out.iter().map(|r| r.name.as_str()).collect();
@@ -1658,7 +2698,10 @@ mod tests {
         let i_rep = names.iter().position(|n| *n == "report.md").unwrap();
         let i_draft = names.iter().position(|n| *n == "report_draft.md").unwrap();
         let i_final = names.iter().position(|n| *n == "report_final.md").unwrap();
-        assert!(i_draft < i_zzz && i_final < i_zzz, "前缀匹配排在了位置罚分组之后: {names:?}");
+        assert!(
+            i_draft < i_zzz && i_final < i_zzz,
+            "前缀匹配排在了位置罚分组之后: {names:?}"
+        );
         // ③ **完全一致必须最上**（续121）。哪怕它旧，也不能被更新的前缀匹配挤下去。
         //    续117~120 期间两者同层，而短名加分的差距(很小)不敌新鲜度(120)，
         //    于是 `report_draft.md`(本周) 反超了 `report.md`(900天前)。
@@ -1693,7 +2736,8 @@ mod tests {
         ranked.truncate(10); // 只返回 10 条
 
         assert_eq!(
-            ranked[0].name, "report.md",
+            ranked[0].name,
+            "report.md",
             "位于候选池末尾的最优解没被捞到——说明在评估之前就截断了: {:?}",
             ranked.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
         );
@@ -1724,15 +2768,31 @@ mod tests {
         let now = 20_000 * DAY; // 足够大的基准时刻（减去 10 年也不会变负）
         assert_eq!(recency_bonus(0, now), 0, "mtime 取不到则不加分");
         assert_eq!(recency_bonus(now, now), RECENCY_BONUS_MAX, "此刻 = 最高档");
-        assert_eq!(recency_bonus(now - 7 * DAY, now), RECENCY_BONUS_MAX, "恰好 7 天仍属最高档");
-        assert_eq!(recency_bonus(now - 7 * DAY - 1, now), 70, "超过 7 天落到下一档");
+        assert_eq!(
+            recency_bonus(now - 7 * DAY, now),
+            RECENCY_BONUS_MAX,
+            "恰好 7 天仍属最高档"
+        );
+        assert_eq!(
+            recency_bonus(now - 7 * DAY - 1, now),
+            70,
+            "超过 7 天落到下一档"
+        );
         assert_eq!(recency_bonus(now - 30 * DAY, now), 70);
         assert_eq!(recency_bonus(now - 30 * DAY - 1, now), 25);
         assert_eq!(recency_bonus(now - 365 * DAY, now), 25);
-        assert_eq!(recency_bonus(now - 365 * DAY - 1, now), 0, "超过 1 年不加分");
+        assert_eq!(
+            recency_bonus(now - 365 * DAY - 1, now),
+            0,
+            "超过 1 年不加分"
+        );
         // 时钟偏差 / 网络盘导致时间戳在未来，这是真实会发生的。
         // saturating_sub 让 age 饱和到 0 → 最高档。既不 panic 也不会出现负加分。
-        assert_eq!(recency_bonus(now + 9999 * DAY, now), RECENCY_BONUS_MAX, "未来时间饱和到最高档");
+        assert_eq!(
+            recency_bonus(now + 9999 * DAY, now),
+            RECENCY_BONUS_MAX,
+            "未来时间饱和到最高档"
+        );
     }
 
     /// 嵌套根不得产生重复条目（续131c）。
@@ -1754,7 +2814,10 @@ mod tests {
         fs::write(extra.join("src").join("deep").join("deep.txt"), b"x").unwrap();
 
         // 盘符根那样的浅遍历在前，额外目录（深）在后 —— scan_dirs 的真实顺序
-        let dirs = vec![(base.clone(), false, 3), (extra.clone(), true, MAX_WALK_DEPTH)];
+        let dirs = vec![
+            (base.clone(), false, 3),
+            (extra.clone(), true, MAX_WALK_DEPTH),
+        ];
         let idx = build_index(&dirs);
 
         let paths: Vec<String> = idx.iter().map(|e| e.path.to_string()).collect();
@@ -1813,8 +2876,14 @@ mod tests {
         *EXTRA_DIRS.get().unwrap().lock().unwrap() = vec![extra.clone()];
         let idx = build_index(&scan_dirs());
         let names: Vec<&str> = idx.iter().map(|e| e.name()).collect();
-        assert!(names.contains(&"home_marker.txt"), "USERPROFILE 未进索引: {names:?}");
-        assert!(names.contains(&"zzmarker_extra.txt"), "额外目录未进索引: {names:?}");
+        assert!(
+            names.contains(&"home_marker.txt"),
+            "USERPROFILE 未进索引: {names:?}"
+        );
+        assert!(
+            names.contains(&"zzmarker_extra.txt"),
+            "额外目录未进索引: {names:?}"
+        );
 
         // ② 命令层：set_search_dirs 的后台重建是否真把新目录换进 FILE_INDEX
         *EXTRA_DIRS.get().unwrap().lock().unwrap() = Vec::new();
@@ -1867,7 +2936,11 @@ mod tests {
         let q = "readme";
         let raw = crate::everything::query(q, 30).expect("Everything 查询失败");
         let with_mtime = raw.iter().filter(|r| r.mtime > 0).count();
-        println!("\n[{q}] Everything 原始结果 {} 条 / 其中带 mtime 的 {}", raw.len(), with_mtime);
+        println!(
+            "\n[{q}] Everything 原始结果 {} 条 / 其中带 mtime 的 {}",
+            raw.len(),
+            with_mtime
+        );
         assert!(
             raw.is_empty() || with_mtime > 0,
             "有结果却全部 mtime=0——DATE_MODIFIED 请求没生效（新鲜度加分整体失效）"
@@ -1877,7 +2950,11 @@ mod tests {
         println!("  ── rerank 后的前 10（[层] 名字 / 修改） ──");
         let ranked = rerank_everything(raw, q);
         for r in ranked.iter().take(10) {
-            let layer = if r.name.to_lowercase().contains(q) { "子串  " } else { "子序列" };
+            let layer = if r.name.to_lowercase().contains(q) {
+                "子串  "
+            } else {
+                "子序列"
+            };
             let age = if r.mtime > 0 {
                 format!("{}天前", now.saturating_sub(r.mtime) / 86_400)
             } else {
@@ -1886,10 +2963,17 @@ mod tests {
             println!("    [{layer}] {:<44} {age}", r.name);
         }
         // ② 分层不变量：子串匹配必在子序列匹配之上
-        let first_subseq = ranked.iter().position(|r| !r.name.to_lowercase().contains(q));
-        let last_substr = ranked.iter().rposition(|r| r.name.to_lowercase().contains(q));
+        let first_subseq = ranked
+            .iter()
+            .position(|r| !r.name.to_lowercase().contains(q));
+        let last_substr = ranked
+            .iter()
+            .rposition(|r| r.name.to_lowercase().contains(q));
         if let (Some(fs), Some(ls)) = (first_subseq, last_substr) {
-            assert!(ls < fs, "分层不变量被破坏：子序列匹配({fs}) 排在了子串匹配({ls}) 之上");
+            assert!(
+                ls < fs,
+                "分层不变量被破坏：子序列匹配({fs}) 排在了子串匹配({ls}) 之上"
+            );
             println!("  ✓ 分层不变量 OK（子串到第 {ls} 位 / 子序列从第 {fs} 位开始）");
         }
 
@@ -1927,22 +3011,34 @@ mod tests {
                 continue;
             }
             let covered = dirs.iter().any(|(d, _, _)| d.starts_with(&root));
-            println!("   {}:\\  {}", letter, if covered { "部分覆盖" } else { "★未覆盖" });
+            println!(
+                "   {}:\\  {}",
+                letter,
+                if covered {
+                    "部分覆盖"
+                } else {
+                    "★未覆盖"
+                }
+            );
         }
 
         let idx = build_index(&dirs);
         println!("\n③ 索引 {} 条。特定路径是否在其中:", idx.len());
-        for probe in [
-            "D:\\dev\\workbench-app",
-            "D:\\dev",
-            "C:\\Windows",
-        ] {
+        for probe in ["D:\\dev\\workbench-app", "D:\\dev", "C:\\Windows"] {
             let hit = idx.iter().any(|e| e.path.eq_ignore_ascii_case(probe));
-            println!("   {:<32} {}", probe, if hit { "在索引里" } else { "★不在索引里" });
+            println!(
+                "   {:<32} {}",
+                probe,
+                if hit {
+                    "在索引里"
+                } else {
+                    "★不在索引里"
+                }
+            );
         }
 
-        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
-        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+        FILE_INDEX.get_or_init(|| Mutex::new(Arc::from(Vec::<IndexEntry>::new())));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = Arc::from(idx);
         for q in ["workbench", "workbench-app", "dev"] {
             let r = builtin_search(q, 5);
             println!("\n   [{q}] → {} 条", r.len());
@@ -1961,7 +3057,10 @@ mod tests {
     #[ignore]
     fn measure_drive_cost() {
         println!("\n按深度索引驱动器根时的条数（已应用剪枝规则）");
-        println!("{:<8} | {:>9} | {:>9} | {:>9} | {:>9}", "根", "深度3", "深度4", "深度5", "深度6");
+        println!(
+            "{:<8} | {:>9} | {:>9} | {:>9} | {:>9}",
+            "根", "深度3", "深度4", "深度5", "深度6"
+        );
         println!("{}", "-".repeat(56));
         for letter in 'A'..='Z' {
             let root = PathBuf::from(format!("{letter}:\\"));
@@ -2017,14 +3116,19 @@ mod tests {
         let idx = build_index(&dirs);
         let build_ms = t.elapsed();
         let bytes: usize = std::mem::size_of::<IndexEntry>() * idx.len()
-            + idx.iter().map(|e| e.path.len() + e.name_lower.len()).sum::<usize>();
+            + idx
+                .iter()
+                .map(|e| e.path.len() + e.name_lower.len())
+                .sum::<usize>();
         println!(
             "\n索引: {} 条 / 构建 {:.2?} / 估算 {:.1} MB",
-            idx.len(), build_ms, bytes as f64 / 1_048_576.0
+            idx.len(),
+            build_ms,
+            bytes as f64 / 1_048_576.0
         );
 
-        FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
-        *FILE_INDEX.get().unwrap().lock().unwrap() = idx;
+        FILE_INDEX.get_or_init(|| Mutex::new(Arc::from(Vec::<IndexEntry>::new())));
+        *FILE_INDEX.get().unwrap().lock().unwrap() = Arc::from(idx);
 
         for q in ["windows", "program files", "system32"] {
             let r = builtin_search(q, 8);
@@ -2044,16 +3148,15 @@ mod tests {
     ///
     /// 扩范围有两个约束，这里都要测：
     ///   ① 遍历耗时（虽在后台，但每 30 分钟跑一次）
-    ///   ② **内存**——整个应用的目标是 ~30MB。IndexEntry 把同一份字符串
-    ///      在 path/name/name_lower/ext 里存了三四遍，条数直接换算成内存。
+    ///   ② **内存**——整个应用的目标是 ~30MB，条数仍会直接换算成索引内存。
     #[test]
     #[ignore]
     fn measure_index_scope() {
-        // 单条 IndexEntry 的堆占用实测（结构体本身 + 两个 Box<str> 缓冲区；续126 起 name/ext 是切片，不占额外内存）
+        // 结构体本身 + path/name_lower/aliases 三个 Box<str> 缓冲区；name/ext 是切片，不占额外内存。
         let est = |v: &Vec<IndexEntry>| -> usize {
             std::mem::size_of::<IndexEntry>() * v.len()
                 + v.iter()
-                    .map(|e| e.path.len() + e.name_lower.len())
+                    .map(|e| e.path.len() + e.name_lower.len() + e.aliases.len())
                     .sum::<usize>()
         };
 
@@ -2062,12 +3165,18 @@ mod tests {
             ("%USERPROFILE%（现状）", PathBuf::from(&home)),
             ("C:\\Windows", PathBuf::from("C:\\Windows")),
             ("C:\\Program Files", PathBuf::from("C:\\Program Files")),
-            ("C:\\Program Files (x86)", PathBuf::from("C:\\Program Files (x86)")),
+            (
+                "C:\\Program Files (x86)",
+                PathBuf::from("C:\\Program Files (x86)"),
+            ),
             ("C:\\ProgramData", PathBuf::from("C:\\ProgramData")),
         ];
 
         println!("\n索引范围候选（应用现行剪枝规则 should_skip_dir / 深度 {MAX_WALK_DEPTH}）");
-        println!("{:<26} | {:>9} | {:>9} | {:>10}", "根", "条数", "遍历", "估算内存");
+        println!(
+            "{:<26} | {:>9} | {:>9} | {:>10}",
+            "根", "条数", "遍历", "估算内存"
+        );
         println!("{}", "-".repeat(64));
         let mut total_n = 0usize;
         let mut total_b = 0usize;
@@ -2083,7 +3192,9 @@ mod tests {
             let bytes = est(&idx);
             println!(
                 "{label:<26} | {:>9} | {:>7.2?} | {:>7.1} MB",
-                idx.len(), el, bytes as f64 / 1_048_576.0
+                idx.len(),
+                el,
+                bytes as f64 / 1_048_576.0
             );
             total_n += idx.len();
             total_b += bytes;
@@ -2092,7 +3203,10 @@ mod tests {
         println!("{}", "-".repeat(64));
         println!(
             "{:<26} | {:>9} | {:>7.2?} | {:>7.1} MB   ← 全部加起来",
-            "合计", total_n, total_t, total_b as f64 / 1_048_576.0
+            "合计",
+            total_n,
+            total_t,
+            total_b as f64 / 1_048_576.0
         );
         println!("  当前上限 MAX_INDEX_ENTRIES = {MAX_INDEX_ENTRIES}");
 
@@ -2102,7 +3216,10 @@ mod tests {
         // `C:\Windows\System32\drivers\etc\hosts`。
         // 收窄深度应该能让条数＝内存骤降。这里验证它。
         println!("\n把系统根浅索引时的条数（按深度）");
-        println!("{:<26} | {:>8} | {:>8} | {:>8} | {:>8}", "根", "深度2", "深度3", "深度4", "深度10");
+        println!(
+            "{:<26} | {:>8} | {:>8} | {:>8} | {:>8}",
+            "根", "深度2", "深度3", "深度4", "深度10"
+        );
         println!("{}", "-".repeat(70));
         for (label, dir) in candidates.iter().skip(1) {
             if !dir.exists() {
@@ -2128,9 +3245,7 @@ mod tests {
             );
         }
         // ※ 用行连接符（\ 换行）会让全角空格留在行首被 clippy 报警，故拆成多条输出
-        println!("  ※ IndexEntry 在 path/name/name_lower/ext 里重复存了同一份字符串。");
-        println!("     name 是 path 的后缀，ext 是 name 的后缀，name_lower 是 name 的副本——");
-        println!("     压缩表示后，同样条数可以显著降低内存占用。\n");
+        println!("  ※ 当前 name/ext 已由偏移量派生；估算同时包含 V2 缩写/拼音紧凑别名。\n");
     }
 
     /// 诊断用（默认 #[ignore]：cargo test --lib probe_everything_exclude -- --ignored --nocapture）
@@ -2153,7 +3268,10 @@ mod tests {
         //     必须像 `\target\` 那样按完整路径段括起来
         //  ③ 含空格的名字（system volume information）需要引号
         //  ④ 用实际的完整排除句集时，`C:\Windows` 能否进入候选
-        let full: String = NOISE_DIRS.iter().map(|d| format!(" !path:\"\\{d}\\\"")).collect();
+        let full: String = NOISE_DIRS
+            .iter()
+            .map(|d| format!(" !path:\"\\{d}\\\""))
+            .collect();
         for q in [
             "windows".to_string(),
             "windows !path:winsxs".to_string(),
@@ -2200,13 +3318,19 @@ mod tests {
         let q = "windows"; // 用户反馈里的查询（Everything 侧有 7 万条以上）
 
         println!("\n各条数上限下的代价（查询: {q:?}）");
-        println!("{:>7} | {:>9} | {:>9} | {:>9} | {:>11}", "上限", "查询", "rerank", "JSON化", "JSON大小");
+        println!(
+            "{:>7} | {:>9} | {:>9} | {:>9} | {:>11}",
+            "上限", "查询", "rerank", "JSON化", "JSON大小"
+        );
         println!("{}", "-".repeat(60));
         for &n in &[200usize, 500, 1000, 5000, 20000] {
             let t0 = Instant::now();
             let raw = match crate::everything::query(q, n) {
                 Ok(r) => r,
-                Err(e) => { println!("{n:>7} | 查询失败: {e}"); continue; }
+                Err(e) => {
+                    println!("{n:>7} | 查询失败: {e}");
+                    continue;
+                }
             };
             let got = raw.len();
             let t_query = t0.elapsed();
@@ -2221,7 +3345,10 @@ mod tests {
 
             println!(
                 "{got:>7} | {:>9.2?} | {:>9.2?} | {:>9.2?} | {:>8.1} KB",
-                t_query, t_rank, t_json, json.len() as f64 / 1024.0
+                t_query,
+                t_rank,
+                t_json,
+                json.len() as f64 / 1024.0
             );
         }
 
@@ -2270,7 +3397,10 @@ mod tests {
         let t1 = Instant::now();
         let idx = build_index(&[(home, false, MAX_WALK_DEPTH)]);
         let walk = t1.elapsed();
-        let exe_lnk = idx.iter().filter(|e| e.ext() == "exe" || e.ext() == "lnk").count();
+        let exe_lnk = idx
+            .iter()
+            .filter(|e| e.ext() == "exe" || e.ext() == "lnk")
+            .count();
         let t2 = Instant::now();
         let icons = build_icon_cache(&idx, &HashMap::new());
         println!(
@@ -2307,9 +3437,7 @@ mod tests {
         }
         let missed: Vec<&str> = entries
             .iter()
-            .filter(|e| {
-                entry_score(&tokens, e, now).is_none()
-            })
+            .filter(|e| entry_score(&tokens, e, now).is_none())
             .map(|e| e.name())
             .collect();
         if !missed.is_empty() {
@@ -2324,11 +3452,11 @@ mod tests {
         const DAY: u64 = 86_400;
         let now = 20_000 * DAY;
         let set = vec![
-            ent("app.exe", now, false),                            // 完全一致 → L_EXACT
-            ent("MyApp.ini", now, false),                          // 中段子串 → L_SUBSTR
-            ent("quarterly-wrapper-config-backup.xml", now, false),// wr[app]er 字面子串 → L_SUBSTR
-            ent("Advanced Photo Processor.exe", now, false),       // 词缩写 app（直觉命中）
-            ent("App Store Helper.log", now, false),               // 前缀 → L_PREFIX
+            ent("app.exe", now, false),   // 完全一致 → L_EXACT
+            ent("MyApp.ini", now, false), // 中段子串 → L_SUBSTR
+            ent("quarterly-wrapper-config-backup.xml", now, false), // wr[app]er 字面子串 → L_SUBSTR
+            ent("Advanced Photo Processor.exe", now, false), // 词缩写 app（直觉命中）
+            ent("App Store Helper.log", now, false), // 前缀 → L_PREFIX
         ];
         rank_and_print("B1/A2 短 token", "app", &set, now);
         println!("\n   —— A2：词缩写被 gate 判定（subseq 直接看跨度）——");
@@ -2338,7 +3466,10 @@ mod tests {
             ("psd", "photoshop design.psd"),
             ("cfg", "config.toml"), // 紧凑，应保留作对照
         ] {
-            println!("   subseq(\"{q}\", \"{name}\") = {:?}", subseq_score(q, name));
+            println!(
+                "   subseq(\"{q}\", \"{name}\") = {:?}",
+                subseq_score(q, name)
+            );
         }
     }
 
@@ -2356,7 +3487,10 @@ mod tests {
         println!("\n── [B2 质量不表达] 查询 \"report\" ──");
         println!("   贴合好 6/7:  score={a}  {}", tight.name());
         println!("   贴合差 6/29: score={b}  {}", loose.name());
-        println!("   两者同带 L_SUBSTR={L_SUBSTR}，差值 {} 全来自短名加分，与「匹配多贴合」无关", a - b);
+        println!(
+            "   两者同带 L_SUBSTR={L_SUBSTR}，差值 {} 全来自短名加分，与「匹配多贴合」无关",
+            a - b
+        );
     }
 
     /// A1：中文文件 + 拼音查询 = 完全搜不到；对照 pinyin_util::derive 证明「本可命中」。
@@ -2366,16 +3500,23 @@ mod tests {
         const DAY: u64 = 86_400;
         let now = 20_000 * DAY;
         println!("\n── [A1 中文无拼音] ──");
-        for (q, name) in [("huiyi", "会议纪要.docx"), ("hyjy", "会议纪要.docx"), ("yinyue", "网易云音乐歌单.txt")] {
+        for (q, name) in [
+            ("huiyi", "会议纪要.docx"),
+            ("hyjy", "会议纪要.docx"),
+            ("yinyue", "网易云音乐歌单.txt"),
+        ] {
             let e = IndexEntry::new(format!("C:\\x\\{name}"), name, "", false, false, now);
-            println!("   token_score(\"{q}\", \"{name}\") = {:?}  ← 文件路径的结局", token_score(q, &e.name_lower));
+            println!(
+                "   token_score(\"{q}\", \"{name}\") = {:?}  ← 文件路径的结局",
+                token_score(q, &e.name_lower)
+            );
         }
         // 对照：拼音派生本可命中
         for name in ["会议纪要", "网易云音乐歌单"] {
             let vs = crate::pinyin_util::derive(name);
             let inits: Vec<String> = vs.iter().map(|v| v.initials.clone()).collect();
             let fulls: Vec<String> = vs.iter().map(|v| v.full.clone()).collect();
-            println!("   derive(\"{name}\") 首字母={inits:?} 全拼={fulls:?}  ← 接上就能搜到", );
+            println!("   derive(\"{name}\") 首字母={inits:?} 全拼={fulls:?}  ← 接上就能搜到",);
         }
     }
 
@@ -2388,7 +3529,11 @@ mod tests {
         println!("\n── [A3 路径被忽略] 查询 \"workbench report\" ──");
         let e = IndexEntry::new(
             "D:\\dev\\workbench-app\\report.md".into(),
-            "report.md", "md", false, false, now,
+            "report.md",
+            "md",
+            false,
+            false,
+            now,
         );
         println!(
             "   entry_score = {:?}  （文件在 workbench-app\\ 里，却因 basename 无 'workbench' 被淘汰）",
@@ -2402,6 +3547,83 @@ mod tests {
         );
     }
 
+    /// V2 真机质量 + 延迟基线。默认忽略，算法/索引字段变化后手动跑：
+    ///   cargo test --release --lib probe_v2_real_index -- --ignored --nocapture
+    ///
+    /// 不预热图标、不碰 FILE_INDEX 全局；测量范围严格是 build_index 与 rank_index。
+    #[test]
+    #[ignore]
+    fn probe_v2_real_index() {
+        let build_started = Instant::now();
+        let idx = build_index(&scan_dirs());
+        let build_elapsed = build_started.elapsed();
+        let estimated_bytes: usize = std::mem::size_of::<IndexEntry>() * idx.len()
+            + idx
+                .iter()
+                .map(|e| e.path.len() + e.name_lower.len() + e.aliases.len())
+                .sum::<usize>();
+        println!(
+            "\nV2 真实索引 {} 条 / 构建 {:?} / 估算 {:.1} MB",
+            idx.len(),
+            build_elapsed,
+            estimated_bytes as f64 / 1_048_576.0
+        );
+
+        let queries = [
+            "app",
+            "vsc",
+            "con",
+            "config",
+            "note",
+            "wen dang",
+            "huiyi",
+            "hyjy",
+            "workbench report",
+            "pdf",
+        ];
+        let now = now_unix();
+        let mut all_samples = Vec::new();
+        for text in queries {
+            let query = SearchQuery::new(text);
+            // 首次用于人眼核对；后面的延迟样本复用同一个 query 和线程本地 Matcher scratch。
+            let top = rank_index(&query, &idx, None, now, 15);
+            println!("\n── V2 \"{text}\" —— top {} ──", top.len());
+            for (rank, hit) in top.iter().enumerate() {
+                let e = &idx[hit.index];
+                println!(
+                    "   #{:<2} full={} cover={} weak={} sum={} nucleo={} prior={}  {}",
+                    rank + 1,
+                    hit.relevance.full_match,
+                    hit.relevance.matched_tokens,
+                    hit.relevance.weakest_tier,
+                    hit.relevance.tier_sum,
+                    hit.relevance.nucleo_sum,
+                    hit.bonus,
+                    e.path
+                );
+            }
+
+            let mut samples = Vec::with_capacity(25);
+            for _ in 0..25 {
+                let started = Instant::now();
+                std::hint::black_box(rank_index(&query, &idx, None, now, 15));
+                samples.push(started.elapsed());
+            }
+            samples.sort_unstable();
+            let p50 = samples[samples.len() / 2];
+            let p95 = samples[samples.len() * 95 / 100];
+            println!("   latency p50={p50:?} / p95={p95:?}");
+            all_samples.extend(samples);
+        }
+        all_samples.sort_unstable();
+        println!(
+            "\n全部查询 latency p50={:?} / p95={:?} / max={:?}",
+            all_samples[all_samples.len() / 2],
+            all_samples[all_samples.len() * 95 / 100],
+            all_samples.last().unwrap()
+        );
+    }
+
     /// 真机索引上的真实垃圾（最有说服力）：建真实索引，对几个短查询打印 top 15。
     /// 只用 entry_score（不含 open_bonus 使用学习，与真实排序略有出入，已注明）。
     ///   cargo test --lib probe_real_index -- --ignored --nocapture
@@ -2411,7 +3633,11 @@ mod tests {
         let now = now_unix();
         let started = Instant::now();
         let idx = build_index(&scan_dirs());
-        println!("\n真实索引 {} 条 / {:?}（不含 open_bonus 使用学习）", idx.len(), started.elapsed());
+        println!(
+            "\n真实索引 {} 条 / {:?}（不含 open_bonus 使用学习）",
+            idx.len(),
+            started.elapsed()
+        );
         for query in ["app", "con", "date", "config", "note", "wen dang"] {
             let q = query.to_lowercase();
             let tokens: Vec<&str> = q.split_whitespace().collect();
@@ -2441,17 +3667,20 @@ pub fn set_search_dirs(dirs: Vec<String>) {
         *guard = parsed;
     }
     // 立刻在后台重建一次（不持锁遍历，建完原子替换），让新目录马上可搜。
-    FILE_INDEX.get_or_init(|| Mutex::new(Vec::new()));
+    FILE_INDEX.get_or_init(|| Mutex::new(Arc::from(Vec::<IndexEntry>::new())));
     ICON_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     std::thread::spawn(|| {
         let started = Instant::now();
         let dirs = scan_dirs();
         let new_index = build_index(&dirs);
         let new_icons = build_icon_cache(&new_index, &HashMap::new()); // 同步预热图标，与索引一起换入
-        let (total, extra) = (new_index.len(), new_index.iter().filter(|e| e.extra).count());
+        let (total, extra) = (
+            new_index.len(),
+            new_index.iter().filter(|e| e.extra).count(),
+        );
         if let Some(lock) = FILE_INDEX.get() {
             if let Ok(mut guard) = lock.lock() {
-                *guard = new_index;
+                *guard = Arc::from(new_index);
             }
         }
         if let Some(lock) = ICON_CACHE.get() {

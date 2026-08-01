@@ -1,6 +1,6 @@
 [package]
 name = "workbench-app"
-version = "0.20.1"
+version = "0.21.0"
 description = "Windows Desktop Workbench Utility"
 authors = ["you"]
 edition = "2021"
@@ -61,6 +61,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # `heteronym` = 多音字全读音：没它「音乐」只会派生出首选读音 yinle，
 # 用户搜 yinyue / 网易云音乐搜 wyyyy 全都落空（实测踩到）。
 pinyin = { version = "0.11.0", default-features = false, features = ["heteronym", "plain"] }
+# 交互式模糊匹配内核。只使用低层 matcher：Workbench 自己掌控索引、跨字段排序与线程模型，
+# 避免高层 nucleo 再维护一份 item store / Rayon 线程池。
+nucleo-matcher = "0.3.1"
 
 # release 构建优化：对齐 ~5MB 包体目标。lto=fat + 单 codegen unit 换更小体积 + 更强内联；
 # opt-level="z" 优先体积（本应用无计算密集热路径，热键/焦点轮询开销在系统调用不在算术）；

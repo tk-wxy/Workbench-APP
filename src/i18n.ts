@@ -61,6 +61,7 @@ export const EN_DICT: Record<string, string> = {
   // 增强搜索结果分段标题（续114b）。「应用程序」不能复用既有的「应用」——那个 key 是设置里
   // 「应用」按钮的**动词**（译作 Apply），拿来当段标题会显示成 "Apply"。
   "应用程序": "Apps",
+  "最佳匹配": "Best matches",
   "压缩包": "Archives",
   "文档": "Documents",
   "代码": "Code",
