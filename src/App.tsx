@@ -87,7 +87,7 @@ const ENH_FILE_LIMIT_BUILTIN = 150;
 const ENH_FILE_LIMIT_EVERYTHING = 500;
 // 文件查询的防抖，**按引擎分档**（续131）。防抖的目的是压住"每敲一键一次查询"的开销，
 // 那个开销两个引擎差着数量级，用同一个值必然有一边配错：
-//   内置 = 纯内存读索引，实测 <5ms，加 IPC 往返也就百微秒级 → 150ms 里绝大部分是白等；
+//   内置 = 纯内存读索引，V2 真机 4.47 万项总体 p95≈29ms → 150ms 里绝大部分仍是白等；
 //   Everything = 跨进程 IPC + 全盘查询 + 5000 条候选池重排，量级完全不同，150ms 是它的保险。
 // 故内置降到 50ms（仍能吃掉连续击键，正常打字相邻间隔 80~200ms），Everything 保持 150ms。
 const ENH_DEBOUNCE_BUILTIN_MS = 50;
@@ -180,6 +180,11 @@ const USAGE_HALFLIFE_S = 30 * 24 * 3600;
 function usageScore(u: AppUsage | undefined, nowS: number): number {
   if (!u || u.count <= 0) return 0;
   return u.count * Math.pow(0.5, (nowS - u.last_used) / USAGE_HALFLIFE_S);
+}
+// 与 Rust 文件使用学习同档：动态搜索投影只同步 0..400 的同层 tie-break，不参与跨匹配层翻转。
+function searchUsageBoost(u: AppUsage | undefined, nowS: number): number {
+  const score = usageScore(u, nowS);
+  return score < 0.25 ? 0 : score < 1 ? 100 : score < 2 ? 200 : score < 4 ? 300 : 400;
 }
 
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
@@ -328,6 +333,10 @@ type EnhResult =
   // 文件系统结果（无 ranges，Rust 侧已打分排序）。iconKey = Rust 算好的「图标身份」
   // （目录 / 扩展名 / exe·lnk 用自身路径），续126 起随结果返回；预览大图标按它去重，见 largeIconRef。
   | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null; iconKey?: string };
+
+type BuiltinSearchHit =
+  | { kind: "app" | "stage" | "clip"; key: string }
+  | { kind: "fs"; path: string; name: string; ext: string; isDir: boolean; iconKey: string; icon?: string | null };
 
 // 结果唯一键：渲染 key + 预览缓存键 + 预览竞态守卫共用一套，避免三处各写一份跑偏
 const enhKey = (r: EnhResult) =>
@@ -493,6 +502,11 @@ export default function App() {
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
   // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
   const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null; iconKey?: string }[]>([]);
+  // 内置模式由 Rust 返回应用/中转/剪贴板/文件的严格全局顺序；动态项只带稳定 key，在 useMemo 中映回现有对象。
+  const [builtinHits, setBuiltinHits] = useState<BuiltinSearchHit[]>([]);
+  const [searchItemsRevision, setSearchItemsRevision] = useState(0);
+  // 以时间作 epoch，WebView 在同一 Rust 进程内重载时 revision 也不会从 0 倒退。
+  const searchItemsSyncRef = useRef(Date.now());
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
   // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
@@ -1016,6 +1030,44 @@ export default function App() {
     })();
   }, [apps, stage, clipboard, t]);
 
+  // ── 内置统一搜索的动态投影同步 ──────────────────────────────────────────────
+  // 只在源列表/使用记录变化时发送轻量 name/key/path；逐键查询不重复传整批对象，更不传图标或正文。
+  // revision 由 Rust 一并校验，防异步 invoke 乱序时旧列表反盖新列表。
+  useEffect(() => {
+    const revision = ++searchItemsSyncRef.current;
+    const nowS = Math.floor(Date.now() / 1000);
+    const items = [
+      ...apps.map(app => ({
+        kind: "app", key: app.path, name: app.name, path: app.path,
+        ext: "", isDir: false, boost: searchUsageBoost(appUsage[app.path], nowS),
+        keywords: ["应用", "app", "application"],
+      })),
+      ...stage.filter(item => item.type === "file").map(item => ({
+        kind: "stage", key: String(item.id), name: stageDisplayName(item, t),
+        path: item.items?.[0]?.path ?? "", ext: item.ext ?? item.items?.[0]?.ext ?? "",
+        isDir: !!item.isDir, boost: item.pinned ? 100 : 0,
+        keywords: item.isDir
+          ? ["文件夹", "folder", "dir"]
+          : typeKeywords({ type: "file", ext: item.ext ?? item.items?.[0]?.ext, isImage: item.items?.[0]?.isImage }),
+      })),
+      ...clipboard.map(item => ({
+        kind: "clip", key: String(item.time), name: clipDisplayName(item, t),
+        path: item.items?.[0]?.path ?? "", ext: item.items?.[0]?.ext ?? "",
+        isDir: false, boost: 0,
+        keywords: typeKeywords({ type: item.type, ext: item.items?.[0]?.ext, isImage: item.items?.[0]?.isImage }),
+      })),
+    ];
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const applied = await invoke<number>("set_search_items", { revision, items });
+        if (revision === searchItemsSyncRef.current) setSearchItemsRevision(applied);
+      } catch (e) {
+        console.warn("[search] 动态搜索投影同步失败：", e);
+      }
+    })();
+  }, [apps, stage, clipboard, appUsage, t]);
+
   // ── 增强搜索 Tier 1（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
   // 有查询时上限 10（D5）；空查询兜底仍给 30 常用应用（此时无文件结果，总数 ≤30 不超）。
   const enhTier1 = useMemo<EnhResult[]>(() => {
@@ -1040,7 +1092,34 @@ export default function App() {
       .map(({ score, ...rest }) => rest as EnhResult);
   }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t, pinyin]);
 
-  // ── 文件查询：防抖后 invoke（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
+  const builtinEnhResults = useMemo<EnhResult[]>(() => {
+    if (searchEngine !== "builtin" || !enhQuery.trim()) return [];
+    const appByKey = new Map(apps.map(app => [app.path, app]));
+    const stageByKey = new Map(stage.map(item => [String(item.id), item]));
+    const clipByKey = new Map(clipboard.map(item => [String(item.time), item]));
+    const out: EnhResult[] = [];
+    for (const hit of builtinHits) {
+      if (hit.kind === "fs") {
+        out.push({ kind: "fs", path: hit.path, name: hit.name, ext: hit.ext, isDir: hit.isDir, icon: hit.icon, iconKey: hit.iconKey });
+        continue;
+      }
+      if (hit.kind === "app") {
+        const app = appByKey.get(hit.key); if (!app) continue;
+        out.push({ kind: "app", app, ranges: matchName(enhQuery, app.name, pinyin).ranges });
+      } else if (hit.kind === "stage") {
+        const item = stageByKey.get(hit.key); if (!item) continue;
+        const name = stageDisplayName(item, t);
+        out.push({ kind: "stage", item, name, ranges: matchName(enhQuery, name, pinyin).ranges });
+      } else {
+        const item = clipByKey.get(hit.key); if (!item) continue;
+        const name = clipDisplayName(item, t);
+        out.push({ kind: "clip", item, name, ranges: matchName(enhQuery, name, pinyin).ranges });
+      }
+    }
+    return out;
+  }, [searchEngine, enhQuery, builtinHits, apps, stage, clipboard, pinyin, t]);
+
+  // ── 增强查询：内置走跨来源统一排序；Everything 保留文件全盘查询 + 前端 Tier1 ──
   // 防抖时长按引擎分档，见 ENH_DEBOUNCE_* 常量注释（续131）
   //
   // ⚠️ **必须有竞态守卫**（续131c）：`clearTimeout` 只能取消还没发出的查询，一旦 invoke 在途就拦不住了，
@@ -1052,28 +1131,35 @@ export default function App() {
     // 续136：关闭增强搜索时清掉 fsResults（原先只清 enhQuery、不清结果 →
     // 上一次搜索最多 500 条结果 + 图标 base64 引用一直滞留 JS 堆到下次搜索）。
     // 占一个 token 让在途查询作废（否则关闭瞬间在途的旧查询会把结果写回已清空的列表）。
-    if (!enhOpen) { fsReqRef.current++; setFsResults([]); return; }
+    if (!enhOpen) { fsReqRef.current++; setFsResults([]); setBuiltinHits([]); return; }
     const q = enhQuery.trim();
     // 清空也要占一个 token，否则在途的旧查询会把结果写回已清空的列表
-    if (!q) { fsReqRef.current++; setFsResults([]); return; }
-    // Everything 覆盖全盘、结果量大，给更高 limit；内置仅用户目录，50 足够
+    if (!q) { fsReqRef.current++; setFsResults([]); setBuiltinHits([]); return; }
+    // 查询一变化就立刻让旧 invoke 失效，不能等到 debounce 到点才占 token。
+    const token = ++fsReqRef.current;
     const ev = searchEngine==="everything";
     const lim = ev ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
     const t = setTimeout(async () => {
-      const token = ++fsReqRef.current;
       try {
         const { invoke } = await import("@tauri-apps/api/core");
-        // 续126 ③：Rust 侧不再给每条结果内联 base64 图标，而是返回「结果（只带 iconKey）+ 去重后的图标表」。
-        // 实测查询 "windows" 的 IPC 载荷 660KB → 79KB（-88%）——同一张扩展名图标此前被重复送了 500 遍。
-        // 这里**收到后立刻回填成原来的形状**：下游 4 个消费点（EnhResult 构造 / 预览面板 / 加入启动台 / 列表渲染）
-        // 一行都不用改。回填不产生拷贝——JS 字符串不可变，同扩展名的各行共享同一个引用。
-        const r = await invoke<{ results: { path: string; name: string; ext: string; isDir: boolean; iconKey: string }[]; icons: Record<string, string> }>("search_files", { query: q, limit: lim });
-        if (token !== fsReqRef.current) return; // 已有更新的查询发出，本次结果作废
-        setFsResults(r.results.map(x => ({ ...x, icon: r.icons[x.iconKey] ?? null })));
-      } catch { if (token === fsReqRef.current) setFsResults([]); }
+        if (ev) {
+          const r = await invoke<{ results: { path: string; name: string; ext: string; isDir: boolean; iconKey: string }[]; icons: Record<string, string> }>("search_files", { query: q, limit: lim });
+          if (token !== fsReqRef.current) return;
+          setBuiltinHits([]);
+          setFsResults(r.results.map(x => ({ ...x, icon: r.icons[x.iconKey] ?? null })));
+        } else {
+          const r = await invoke<{ results: BuiltinSearchHit[]; icons: Record<string, string> }>("search_builtin_all", { query: q, limit: lim });
+          if (token !== fsReqRef.current) return;
+          setFsResults([]);
+          setBuiltinHits(r.results.map(hit => hit.kind === "fs" ? { ...hit, icon: r.icons[hit.iconKey] ?? null } : hit));
+        }
+      } catch {
+        if (token !== fsReqRef.current) return;
+        if (ev) setFsResults([]); else setBuiltinHits([]);
+      }
     }, ev ? ENH_DEBOUNCE_EVERYTHING_MS : ENH_DEBOUNCE_BUILTIN_MS);
     return () => clearTimeout(t);
-  }, [enhQuery, enhOpen, searchEngine]);
+  }, [enhQuery, enhOpen, searchEngine, searchItemsRevision]);
 
   // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
   useEffect(() => {
@@ -1142,14 +1228,14 @@ export default function App() {
   // ── 增强搜索结果分段（续114b）──
   // 结构：先建 sections，再由它**派生**扁平数组与段边界；渲染/导航都读派生值，段的增删不用改它们。
   //
-  // 段序 = 「段内最靠前条目的排名」（数组下标最小者优先）——含最佳匹配的段排最前，
-  // 故 `enhResults[0]` 与分段前完全一致，**Enter 的行为不变**。用排名而非分数是因为：
-  // Tier1 打分后在 enhTier1 末尾就把 score 剥掉了，Tier2 来自 Rust 压根没有分数字段，
-  // 两个数组本身已是排好序的，用下标等价且无需把分数透出来。
-  //
-  // Tier1 整块恒在 Tier2 之上，**不跨层按名次混排**：Tier1 用 JS fuzzyScore、Tier2 用 Rust
-  // token_score，两套标尺的数值不可比，混排出来的名次没有意义。
+  // 内置模式的非空查询已经由 Rust 跨来源统一排序，必须原样保留，不能再按类别二次改序。
+  // Everything 仍沿用旧的 Tier1 + 文件分段，因为其候选语法和相关性来自外部引擎。
   const enhSections = useMemo<{ key: string; label: string; items: EnhResult[] }[]>(() => {
+    if (searchEngine === "builtin" && enhQuery.trim()) {
+      return builtinEnhResults.length
+        ? [{ key: "builtin-best", label: t("最佳匹配"), items: builtinEnhResults }]
+        : [];
+    }
     const out: { key: string; label: string; items: EnhResult[] }[] = [];
 
     // Tier1：应用 / 中转 / 剪贴板 各自成段（此前三者混在一起，只靠徽标区分）
@@ -1176,7 +1262,7 @@ export default function App() {
     }
 
     return out;
-  }, [enhTier1, fsResults, t]);
+  }, [searchEngine, enhQuery, builtinEnhResults, enhTier1, fsResults, t]);
 
   // 扁平结果：↑↓/Enter/激活全部照旧读它，分段对这些路径完全透明
   const enhResults = useMemo<EnhResult[]>(() => enhSections.flatMap(s => s.items), [enhSections]);
@@ -1426,7 +1512,10 @@ export default function App() {
     // 它才有「从可见淡出」的前值可插值；若与高清同帧挂载，它带着 is-hidden 出生，过渡根本不会发生。
     // hi 只在**确实比 low 更好**时才有值（两者相同则为 null，免得同一张图白叠两层）。
     const hi = big && big !== low ? big : null;
-    return { r, key, title, badge, cat, group: catToGroup(cat), low, hi, photo, glyph, text, loc, stats, rows, path: enhPath(r) };
+    // 卡片骨架始终保留“位置/来源”槽位：无真实路径的文本/图片条目显示来源，
+    // 不让不同来源切换时把下面的内容整体顶上去。
+    const locText = loc ?? (r.kind === "clip" ? t("剪贴板历史") : r.kind === "stage" ? t("中转站") : badge);
+    return { r, key, title, badge, cat, group: catToGroup(cat), low, hi, photo, glyph, text, loc, locText, stats, rows, path: enhPath(r) };
   }, [enhResults, enhSelIdx, previewMeta, stageThumbs, clipThumbs, t]);
 
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
@@ -3257,7 +3346,7 @@ export default function App() {
         </div>
         {/* ── 预览面板（续115）：当前选中项的详情 + 快捷操作 ── */}
         {enhPreview && (
-          <aside className="enh-preview">
+          <aside className="enh-preview" data-kind={enhPreview.r.kind}>
             <div className="enh-pv-head">
               <div className={`enh-pv-icon${enhPreview.photo?" enh-pv-icon-img":""}`}>
                 {/* 低清→高清的替换做成「下层淡出」而非直接对调（续131d）。
@@ -3273,41 +3362,42 @@ export default function App() {
                 {enhPreview.hi && <img src={enhPreview.hi} alt="" draggable={false}/>}
                 {!enhPreview.low && !enhPreview.hi && <FileGlyph size={56} {...(enhPreview.glyph ?? {})}/>}
               </div>
-              <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
-              {/* 用 data-group 取色（续116）：颜色是分类而非装饰——
-                  与搜索结果分段用同一份映射，故「徽标颜色 == 所属段落」恒定一致 */}
-              <div className="enh-pv-badge" data-group={enhPreview.group}>{enhPreview.badge}</div>
+              <div className="enh-pv-identity">
+                <div className="enh-pv-title" title={enhPreview.title}>{enhPreview.title}</div>
+                {/* 用 data-group 取色：颜色是分类而非装饰。 */}
+                <div className="enh-pv-badge" data-group={enhPreview.group}>{enhPreview.badge}</div>
+              </div>
             </div>
-            {/* 位置＝这个面板的主角（续116）。同名文件认错是搜索里最常见的歧义，
-                而解开它的几乎总是路径。所以从 dt/dd 的一行升格为独立区块。 */}
-            {enhPreview.loc && (
-              <div className="enh-pv-loc" title={enhPreview.loc}>
+            {/* 中段独立滚动：不同条目的文本/字段数量不再改变卡片外框或操作栏位置。 */}
+            <div className="enh-pv-content">
+              {/* 位置＝文件的主要消歧依据；无路径时固定显示来源，占住同一槽位。 */}
+              <div className={`enh-pv-loc${enhPreview.loc ? "" : " enh-pv-loc-source"}`} title={enhPreview.locText}>
                 <IconExplorer size={13} className="enh-pv-loc-ic"/>
-                <span className="enh-pv-loc-t">{enhPreview.loc}</span>
+                <span className="enh-pv-loc-t">{enhPreview.locText}</span>
               </div>
-            )}
-            {/* 文本类条目：给一段真正的内容预览，比任何元信息都有用 */}
-            {enhPreview.text && <div className="enh-pv-text">{enhPreview.text.slice(0, 600)}</div>}
-            {enhPreview.stats.length > 0 && (
-              <div className="enh-pv-stats">
-                {enhPreview.stats.map((s,i)=>(
-                  <div className="enh-pv-stat" key={i} title={s.title}>
-                    <div className={`enh-pv-stat-v${s.pending?" enh-pv-pending":""}`}>{s.value}</div>
-                    <div className="enh-pv-stat-l">{s.label}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {enhPreview.rows.length > 0 && (
-              <dl className="enh-pv-rows">
-                {enhPreview.rows.map((row,i)=>(
-                  <Fragment key={i}>
-                    <dt>{row.label}</dt>
-                    <dd className={`${row.rtl?"enh-pv-rtl":""}${row.pending?" enh-pv-pending":""}`.trim()||undefined} title={row.title ?? row.value}>{row.value}</dd>
-                  </Fragment>
-                ))}
-              </dl>
-            )}
+              {/* 文本类条目：给一段真正的内容预览，比任何元信息都有用 */}
+              {enhPreview.text && <div className="enh-pv-text">{enhPreview.text.slice(0, 600)}</div>}
+              {enhPreview.stats.length > 0 && (
+                <div className="enh-pv-stats">
+                  {enhPreview.stats.map((s,i)=>(
+                    <div className="enh-pv-stat" key={i} title={s.title}>
+                      <div className={`enh-pv-stat-v${s.pending?" enh-pv-pending":""}`}>{s.value}</div>
+                      <div className="enh-pv-stat-l">{s.label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {enhPreview.rows.length > 0 && (
+                <dl className="enh-pv-rows">
+                  {enhPreview.rows.map((row,i)=>(
+                    <Fragment key={i}>
+                      <dt>{row.label}</dt>
+                      <dd className={`${row.rtl?"enh-pv-rtl":""}${row.pending?" enh-pv-pending":""}`.trim()||undefined} title={row.title ?? row.value}>{row.value}</dd>
+                    </Fragment>
+                  ))}
+                </dl>
+              )}
+            </div>
             <div className="enh-pv-actions">
               <button className="enh-pv-btn enh-pv-btn-primary" onClick={()=>activateEnh(enhPreview.r)}>
                 {enhPreview.r.kind==="clip" ? t("取走粘贴") : t("打开")}

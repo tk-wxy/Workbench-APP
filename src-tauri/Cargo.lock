@@ -2096,6 +2096,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4988,13 +4998,14 @@ dependencies = [
 
 [[package]]
 name = "workbench-app"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "arboard",
  "enigo",
  "flate2",
  "image",
  "libloading 0.8.9",
+ "nucleo-matcher",
  "pinyin",
  "serde",
  "serde_json",

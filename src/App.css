@@ -513,31 +513,28 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-body{position:relative;width:min(640px,80%);margin-top:12px;flex:1;min-height:0;display:flex;}
 .enh-results{flex:1;min-width:0;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:2px;}
 
-/* ── 预览面板（续115）──
-   「大图标 + 名称 + 元信息 + 快捷操作」的纵向叙事：先认出是什么，再看细节，最后动手。
-   ⚠ 背景用实色（--card-bg）而非 backdrop-filter：面板背后本就不透明（--card-bg + 外层 --bg 0.97），
-     再叠 backdrop-filter 是纯浪费的重复合成（续102/续109 的老账；续136 起外层 .enh-layer 也已去 blur）。
-   位置：绝对定位在列表容器**左外侧**（right:100%+间距），故不占布局流、列表保持居中。
-   高度：**随内容**（不铺满）——信息只有几行时铺满整屏会显得空旷失衡；长内容才滚动。 */
-.enh-preview{position:absolute;right:calc(100% + 16px);top:0;width:300px;
-  max-height:100%;overflow-y:auto;padding:20px 18px;
-  background:var(--card-bg);border:1px solid var(--card-border-c);border-radius:12px;
-  display:flex;flex-direction:column;gap:16px;
+/* ── 预览面板 ──
+   固定三段骨架：身份头 / 可滚动详情 / 操作栏。不同类型的字段再多也只在中段滚动，
+   外框、底部按钮和列表相对位置绝不随选中项上下跳。 */
+.enh-preview{position:absolute;right:calc(100% + 18px);top:0;width:336px;height:min(540px,100%);
+  overflow:hidden;background:var(--card-bg);border:1px solid var(--card-border-c);border-radius:16px;
+  display:grid;grid-template-rows:auto minmax(0,1fr) auto;box-shadow:0 18px 44px rgba(0,0,0,0.16);
   animation:enh-pv-in 140ms ease;}
 /* 窗口不够宽时（列表按 80% 撑开后左侧余量放不下 300px 面板）直接不显示，
    否则面板会被推出屏幕左边缘。开发机 3200px 宽远超此阈值，仅作兜底。 */
-@media (max-width:1180px){ .enh-preview{display:none;} }
+@media (max-width:1240px){ .enh-preview{display:none;} }
 /* 仅**首次挂载**播一次（面板本身出现时）。⚠ 别给 <aside> 加 key={选中项}——那会让每次
    ↑↓ 都重挂节点、从 opacity:0 重放，按住方向键时整个面板频闪。内容原地更新即可，
    「选中变了」由列表里的高亮负责表达。 */
 @keyframes enh-pv-in{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:none;}}
 
-.enh-pv-head{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center;}
+.enh-pv-head{display:flex;align-items:center;gap:13px;padding:18px 16px 15px;
+  border-bottom:1px solid var(--border);background:linear-gradient(135deg,var(--fill-2),transparent 68%);}
 /* 图标框（续127 改为「外框恒定、内边距区分形态」）：
    此前图标态写 img{width:72px}、照片态写 img{width:100%}，两者一翻就是 72→88 的几何跳变。
    现在 img 恒为 100%，形态只由**容器的 padding + object-fit** 区分——外框 88px 始终不动，
    内框尺寸也由同步已知的 photo 在第一帧定死（见 App.tsx photoExt 处的注释）。 */
-.enh-pv-icon{width:88px;height:88px;border-radius:16px;background:var(--fill-1);
+.enh-pv-icon{width:72px;height:72px;border-radius:14px;background:var(--fill-1);
   display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;
   position:relative;}
 /* 图标绝对定位、由 inset 表达原来的 8px 内边距（续131d）：低清与高清两张要**叠在同一位置**
@@ -551,8 +548,9 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
    首帧就带 is-hidden 时不会有过渡（无前值可插值）→ 命中缓存的即时呈现不受影响。 */
 .enh-pv-ic-low{transition:opacity 160ms ease-out;}
 .enh-pv-ic-low.is-hidden{opacity:0;}
-.enh-pv-title{font-size:15px;font-weight:600;color:var(--text);line-height:1.35;
-  word-break:break-all;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.enh-pv-identity{min-width:0;flex:1;display:flex;flex-direction:column;align-items:flex-start;gap:8px;}
+.enh-pv-title{font-size:15px;font-weight:650;color:var(--text);line-height:1.35;text-align:left;
+  word-break:break-all;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 /* 徽标（续116 上分类色）：改版前它是这个面板里**对比度最低**的元素（--text3 + 淡边框），
    却承担着「这到底是个什么东西」这条最有价值的信号。给它分类色，兼两个职责：
    ①成为面板唯一的彩度来源 ②↑↓ 逐条翻看时同类同色、形成节奏。
@@ -568,12 +566,15 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 .enh-pv-badge[data-group="code"]   {color:var(--c-code);   border-color:color-mix(in srgb,var(--c-code) 30%,transparent);   background:color-mix(in srgb,var(--c-code) 13%,transparent);}
 .enh-pv-badge[data-group="exe"]    {color:var(--c-exe);    border-color:color-mix(in srgb,var(--c-exe) 30%,transparent);    background:color-mix(in srgb,var(--c-exe) 13%,transparent);}
 
+.enh-pv-content{min-height:0;overflow-y:auto;padding:14px 16px 16px;display:flex;flex-direction:column;gap:12px;}
+
 /* 位置块（续116）：这个面板的主角。从 dt/dd 的一行升格为独立块，
    用字号/留白/背景把它放在「第一眼就看到」的位置。路径用 direction:rtl **省头留尾**
    （靠近文件名那一侧对识别更有用）—— 与 dd 的 .enh-pv-rtl 同一手法。
    ⚠ rtl 仅限这一块：时间/大小含中性字符，RTL 整形会把标点顺序弄乱。 */
-.enh-pv-loc{display:flex;align-items:center;gap:7px;min-width:0;
-  background:var(--fill-1);border-radius:7px;padding:7px 9px;}
+.enh-pv-loc{display:flex;align-items:center;gap:8px;min-width:0;min-height:38px;
+  background:var(--fill-1);border:1px solid var(--border);border-radius:9px;padding:7px 9px;}
+.enh-pv-loc-source{border-style:dashed;}
 .enh-pv-loc-ic{color:var(--text3);flex-shrink:0;}
 .enh-pv-loc-t{direction:rtl;text-align:left;font-size:11.5px;line-height:1.4;color:var(--text2);
   min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -593,7 +594,7 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
 
 /* 文本条目的内容预览：等宽字体 + 保留换行，比任何元信息都有用 */
 .enh-pv-text{font-size:11px;line-height:1.6;color:var(--text2);background:var(--fill-1);
-  border-radius:8px;padding:10px 12px;max-height:160px;overflow:hidden;
+  border:1px solid var(--border);border-radius:9px;padding:10px 12px;min-height:112px;overflow:hidden;
   white-space:pre-wrap;word-break:break-word;font-family:Consolas,'Cascadia Mono',monospace;}
 
 /* 元信息表：标签列定宽、值列可省略，长路径不会把面板撑爆 */
@@ -607,9 +608,10 @@ kbd{display:inline-block;padding:1px 5px;font-size:10px;font-family:var(--font);
    这里只把未到位的值调淡，避免「…」看起来像真实内容。 */
 .enh-pv-pending{color:var(--text3);}
 
-.enh-pv-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:auto;padding-top:4px;}
+.enh-pv-actions{display:flex;flex-wrap:wrap;gap:6px;padding:12px 16px 14px;
+  border-top:1px solid var(--border);background:var(--fill-1);}
 .enh-pv-btn{flex:1 1 calc(50% - 3px);font-size:11px;color:var(--text2);background:var(--fill-2);
-  border:1px solid var(--border);border-radius:6px;padding:7px 8px;cursor:pointer;font-family:var(--font);
+  border:1px solid var(--border);border-radius:7px;min-height:32px;padding:7px 8px;cursor:pointer;font-family:var(--font);
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:color 80ms,border-color 80ms,background 80ms;}
 .enh-pv-btn:hover{color:var(--text);border-color:var(--accent);background:var(--accent-soft);}
 /* 主按钮：常驻用 strong 档与次按钮的 --fill-2 静止态拉开层次；hover 再抬一档并盖过 .enh-pv-btn:hover。 */
