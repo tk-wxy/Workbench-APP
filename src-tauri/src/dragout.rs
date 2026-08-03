@@ -49,6 +49,7 @@ const TEMP_CLEANUP_DELAY_SECS: u64 = 5;
 // 隐藏会释放鼠标 capture → DoDragDrop 起手 SetCapture 失败 → 拖拽根本不启动（续71 首版踩坑）。
 const HIDE_AFTER_START_MS: u64 = 60;
 const SW_HIDE: i32 = 0;
+const SW_SHOWNOACTIVATE: i32 = 4;
 // "保持界面"模式：拖动中轮询热键键态的间隔（用户按热键→手动隐藏 overlay 去外部应用）。
 // 与 lib.rs 的 HOTKEY_POLL_MS 同量级；那个是私有 const，此处独立取值、互不依赖。
 const DRAG_HOTKEY_POLL_MS: u64 = 20;
@@ -63,6 +64,10 @@ static DRAGOUT_AUTO_CLOSE: AtomicBool = AtomicBool::new(true);
 // monitor 会误把这次按键当普通 toggle 处理、并发操作窗口可见性，导致隐藏后松手落地时白闪。
 // 窗口可见性在拖动期间由 dragout 独占（自动隐藏 / 自轮询手动隐藏），monitor 只管拖动之外的 show/hide。
 static DRAG_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+fn finish_hidden(auto_close: bool, overlay_hidden: bool, reshown_during_drag: bool) -> bool {
+    overlay_hidden || (auto_close && !reshown_during_drag)
+}
 
 /// 是否正处于一次拖出的生命周期内（供 lib.rs 热键 monitor 判定是否让路）。
 pub fn drag_in_progress() -> bool {
@@ -609,53 +614,58 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
     STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
     CLIP_DRAG_ACTIVE.store(false, Ordering::Relaxed); // 续110：clip 来源同理无缝交接（先置 DRAG_IN_PROGRESS 再清此处），幂等
 
-    // "保持界面"模式的拖动中手动隐藏协调：manually_hidden=用户按热键触发过 SW_HIDE（去外部应用）；
-    // drag_done=DoDragDrop 已返回、通知自轮询线程退出。
-    let manually_hidden = std::sync::Arc::new(AtomicBool::new(false));
+    // 原生拖动期间普通 hotkey monitor 按 R13 让路；可见性切换始终由 dragout 自己独占。
+    // overlay_hidden 表示裸 ShowWindow 后的真实状态，drag_done 通知自轮询线程退出。
+    let overlay_hidden = std::sync::Arc::new(AtomicBool::new(false));
     let drag_done = std::sync::Arc::new(AtomicBool::new(false));
-
-    if auto_close {
-        // "拖出即隐藏"模式（默认）：拖拽建立 capture 后 60ms 隐藏 overlay（DoDragDrop 模态循环泵该消息），
-        //   让出底层窗口做 drop 目标。
-        let app2 = app.clone();
-        std::thread::spawn(move || {
+    // 自动关闭只负责拖动起手时隐藏。用户在同一次拖动中主动重新呼出后，
+    // 这次显式意图优先于设置，落回 WB 时不得在收尾阶段再次关掉。
+    let reshown_during_drag = std::sync::Arc::new(AtomicBool::new(false));
+    let app2 = app.clone();
+    let hidden = overlay_hidden.clone();
+    let dd = drag_done.clone();
+    let reshown = reshown_during_drag.clone();
+    std::thread::spawn(move || {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        if auto_close {
+            // DoDragDrop 建立 capture 后再隐藏；若极快取消已经结束，则不能让延迟线程事后误关窗口。
             std::thread::sleep(std::time::Duration::from_millis(HIDE_AFTER_START_MS));
-            unsafe {
-                ShowWindow(hwnd, SW_HIDE);
+            if dd.load(Ordering::Relaxed) {
+                return;
             }
+            unsafe { ShowWindow(hwnd, SW_HIDE); }
+            hidden.store(true, Ordering::Relaxed);
             let _ = app2.emit("hotkey-hide", ());
-        });
-    } else {
-        // "保持界面"模式：全程不自动隐藏。后台轮询当前热键键态——用户拖动中**按下热键** → 立即 SW_HIDE
-        //   让出底层窗口做 drop 目标（拖到外部应用）；不按热键则窗口始终可见、区内落点交给自身 IDropTarget。
-        // 只在上升沿触发一次即退出；DoDragDrop 返回后 drag_done 也会让它退出（未按热键的区内/取消场景）。
-        let app2 = app.clone();
-        let mh = manually_hidden.clone();
-        let dd = drag_done.clone();
-        std::thread::spawn(move || {
-            use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-            let is_down = |vk: u16| -> bool { unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000u16) != 0 } };
-            let mut prev = true; // 起手视作"已按下"：要求先看到松开再看上升沿，避免拖动起手残留键位误触发
-            loop {
-                if dd.load(Ordering::Relaxed) {
-                    break;
-                }
-                let keys = crate::current_hotkey_vks();
-                let combo = !keys.is_empty() && keys.iter().all(|vk| is_down(*vk));
-                if combo && !prev {
-                    unsafe {
-                        ShowWindow(hwnd, SW_HIDE);
-                    }
-                    mh.store(true, Ordering::Relaxed);
-                    let _ = app2.emit("hotkey-hide", ());
-                    println!("[dragout] 保持界面模式：拖动中按热键 → 手动隐藏 overlay");
-                    break;
-                }
-                prev = combo;
-                std::thread::sleep(std::time::Duration::from_millis(DRAG_HOTKEY_POLL_MS));
+        }
+
+        let is_down = |vk: u16| -> bool { unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000u16) != 0 } };
+        // 起手视作已按下：force_hide 通常正由这组热键触发，必须先看到松开才接受下一次切换。
+        let mut prev = true;
+        loop {
+            if dd.load(Ordering::Relaxed) {
+                break;
             }
-        });
-    }
+            let keys = crate::current_hotkey_vks();
+            let combo = !keys.is_empty() && keys.iter().all(|vk| is_down(*vk));
+            if combo && !prev {
+                if hidden.load(Ordering::Relaxed) {
+                    // 只显示、不激活：鼠标仍由 OLE drag capture 持有，overlay 重新成为可投放目标。
+                    unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE); }
+                    hidden.store(false, Ordering::Relaxed);
+                    reshown.store(true, Ordering::Relaxed);
+                    let _ = app2.emit("hotkey-show", ());
+                    println!("[dragout] 拖动中按热键 → 重新显示 overlay（可拖回 WB）");
+                } else {
+                    unsafe { ShowWindow(hwnd, SW_HIDE); }
+                    hidden.store(true, Ordering::Relaxed);
+                    let _ = app2.emit("hotkey-hide", ());
+                    println!("[dragout] 拖动中按热键 → 隐藏 overlay");
+                }
+            }
+            prev = combo;
+            std::thread::sleep(std::time::Duration::from_millis(DRAG_HOTKEY_POLL_MS));
+        }
+    });
 
     // 剪贴板来源只许 COPY（理由见 is_clip_sourced）：Explorer 同盘落点的默认效果是 move，
     // 一旦许 MOVE 它会把 clip_images/ 原图这类「条目还在引用的文件」直接搬走。
@@ -685,9 +695,10 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
     };
     println!("[dragout] DoDragDrop end hr={hr:?} effect={} → {effect_str}", effect.0);
 
-    let manually_hidden = manually_hidden.load(Ordering::Relaxed);
-    if auto_close || manually_hidden {
-        // 窗口应以隐藏收场（自动隐藏 / "保持界面"模式下用户拖动中手动隐藏去外部应用）：
+    let overlay_hidden = overlay_hidden.load(Ordering::Relaxed);
+    let reshown_during_drag = reshown_during_drag.load(Ordering::Relaxed);
+    if finish_hidden(auto_close, overlay_hidden, reshown_during_drag) {
+        // 窗口应以隐藏收场（自动关闭且未被用户重新呼出 / 当前仍处于隐藏态）：
         // 收尾隐藏 **必须走 Tauri window.hide()**（此刻 DoDragDrop 已返回、主线程空闲）。不能再用裸
         // ShowWindow(SW_HIDE)：裸 FFI 绕过 tao 的可见性状态缓存 → tao 仍以为窗口可见 → 下次热键
         // window.show() 被 tao diff 成 no-op → 窗口再也呼不出（“卡死、须重启”）。拖拽中那个裸 ShowWindow
@@ -704,7 +715,8 @@ fn do_drag_on_main(app: AppHandle, formats: Vec<(u16, Vec<u8>)>, temp_files: Vec
             activate_drop_target(hwnd);
         }
     } else {
-        // "保持界面"模式且未手动隐藏（区内落点/取消）：窗口全程可见（tao 缓存与真实一致，无需 hide 同步），
+        // "保持界面"模式且收尾时可见（可能全程可见，也可能隐藏后又重新呼出）：
+        // 实际状态已回到 tao 原先记录的 visible，无需额外 show 同步；
         //   不发 hotkey-hide（前端保持 visible）。只发 drag-out-done 让前端按 effect 处理条目（copy/none
         //   保留、move 移除）；区内落点（启动台/重排）由窗口 IDropTarget 的 files-dropped 分支处理。
         // 轻量 set_focus 确保 OLE 拖拽结束后 Esc 仍可用（窗口本就可见、未隐藏，无白闪风险；仍延迟+守卫，
@@ -744,6 +756,15 @@ mod tests {
             orig_path: None,
             time,
         }
+    }
+
+    #[test]
+    fn drag_finish_visibility_respects_mode_and_current_overlay_state() {
+        assert!(finish_hidden(true, false, false), "自动关闭开启且未重新呼出时，收尾应隐藏");
+        assert!(finish_hidden(false, true, false), "保持界面模式下，若当前仍隐藏，收尾必须同步为隐藏");
+        assert!(!finish_hidden(false, false, false), "保持界面模式且当前可见时，应保持可见");
+        assert!(!finish_hidden(true, false, true), "拖动中主动重新呼出后，自动关闭不得再次覆盖用户意图");
+        assert!(finish_hidden(true, true, true), "重新呼出后若又主动隐藏，仍应以当前隐藏状态收尾");
     }
 
     /// 续148：剪贴板来源（带 time）→ COPY-only；中转来源（time=None）→ 维持 COPY|MOVE。

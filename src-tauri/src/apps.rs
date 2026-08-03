@@ -698,6 +698,15 @@ fn base64_encode(data: &[u8]) -> String {
     r
 }
 
+fn stage_thumb_cache_name(path: &str, len: u64, modified: Option<std::time::SystemTime>) -> String {
+    let modified_ns = modified
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let hash = crc32(b"THMB", path.as_bytes());
+    format!("{hash:08x}_{modified_ns}_{len}.png")
+}
+
 // ── 中转区图片缩略图（续99b：解内存/卡顿；续99c：落盘缓存重启秒开）──────────
 /// 为中转区的图片文件生成小缩略图（base64 PNG data URL）。
 /// 背景：前端若用 asset 协议直接 `<img src=原图>`，WebView 会把每张原图全分辨率解码位图常驻内存
@@ -708,18 +717,17 @@ fn base64_encode(data: &[u8]) -> String {
 /// 直接读小 PNG（**零解码原图**）→ 重启后前端逐张 invoke 也只是读几十 KB 小文件，秒开；未命中才解码。
 /// 缓存目录未初始化（降级）时退化为纯内存生成、不落盘。失败（文件不存在/非图片/解码错误）返回 Err，
 /// 前端回退 emoji 兜底。总量上限由 sweep_stage_thumb_cache 后台管，写路径本身不做清理（同 clip janitor 解耦思路）。
-#[tauri::command]
-pub fn get_stage_thumbnail(path: String) -> Result<String, String> {
-    // 源文件 mtime（秒）：作为缓存键一部分，源图被改后旧缓存自动失效
-    let mtime = std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+fn get_stage_thumbnail_blocking(path: String) -> Result<String, String> {
+    // 源文件的纳秒级 mtime + 长度共同参与缓存身份。旧实现只取整秒，用户在一秒内用另一张图
+    // 覆盖同一路径时会命中旧缩略图；加入长度也覆盖“保留时间但尺寸改变”的常见复制工具行为。
+    let source_meta = std::fs::metadata(&path).ok();
+    let cache_name = stage_thumb_cache_name(
+        &path,
+        source_meta.as_ref().map_or(0, std::fs::Metadata::len),
+        source_meta.as_ref().and_then(|meta| meta.modified().ok()),
+    );
     let cache_file = STAGE_THUMB_DIR.get().map(|dir| {
-        let hash = crc32(b"THMB", path.as_bytes());
-        dir.join(format!("{:08x}_{}.png", hash, mtime))
+        dir.join(&cache_name)
     });
     // ① 命中磁盘缓存：直接读小 PNG，零解码
     if let Some(cf) = &cache_file {
@@ -741,6 +749,16 @@ pub fn get_stage_thumbnail(path: String) -> Result<String, String> {
         let _ = std::fs::write(cf, &png_bytes);
     }
     Ok(format!("data:image/png;base64,{}", base64_encode(&png_bytes)))
+}
+
+/// 图片读盘、全分辨率解码、缩放与 PNG 编码都属于阻塞型 CPU/I/O 重活。
+/// Tauri 的同步 command 会占住命令调度线程；真机一张高分辨率图片就足以让窗口短时无法响应
+/// 热键、关闭和点击。命令入口必须是 async，并把整段冷路径交给 blocking worker。
+#[tauri::command]
+pub async fn get_stage_thumbnail(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || get_stage_thumbnail_blocking(path))
+        .await
+        .map_err(|e| format!("缩略图任务失败: {e}"))?
 }
 
 /// 初始化缩略图落盘缓存：建目录 + 起后台 sweep 线程。setup 时调用一次。
@@ -952,13 +970,13 @@ pub fn get_stage_image_content(file: String) -> Result<String, String> {
 /// 而 `get_stage_thumbnail` 是按路径工作的。续146b 把 content 落成了 stage_images/ 下的 PNG，
 /// 这条路才通——于是 image 类终于能复用同一套缩略图机制。
 #[tauri::command]
-pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
+pub async fn get_stage_image_thumb(file: String) -> Result<String, String> {
     let dir = STAGE_IMAGE_DIR.get().ok_or("stage_images 目录未初始化")?;
     let p = asset_path(dir, &file)?;
     if !p.is_file() {
         return Err("文件不存在".into());
     }
-    get_stage_thumbnail(p.to_string_lossy().into_owned())
+    get_stage_thumbnail(p.to_string_lossy().into_owned()).await
 }
 
 /// 剪贴板图片条目的**小缩略图**（性能优化步骤1）。
@@ -971,8 +989,7 @@ pub fn get_stage_image_thumb(file: String) -> Result<String, String> {
 /// 故不能走按路径的 `get_stage_thumbnail`。**性能优化步骤2**：改为按 `time` 从 CLIP_CACHE 取 content
 /// （前端 image 条目已不再常驻 content），只取 CLIP_CACHE 锁、不碰剪贴板 OS 句柄（不违反 R20）。
 /// 复用 `stage_thumbs/` 磁盘缓存（键 = crc32(content)，内容不变则跨会话命中、零解码）与其容量 janitor。
-#[tauri::command]
-pub fn get_clip_thumbnail(time: i64) -> Result<String, String> {
+fn get_clip_thumbnail_blocking(time: i64) -> Result<String, String> {
     let content = crate::clipboard::clip_content_by_time(time).ok_or("条目不存在或无内容")?;
     // 接受 data URL（`data:image/png;base64,xxx`）或裸 base64
     let b64 = match content.find(',') {
@@ -1009,6 +1026,13 @@ pub fn get_clip_thumbnail(time: i64) -> Result<String, String> {
         let _ = std::fs::write(cf, &png_bytes);
     }
     Ok(format!("data:image/png;base64,{}", base64_encode(&png_bytes)))
+}
+
+#[tauri::command]
+pub async fn get_clip_thumbnail(time: i64) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || get_clip_thumbnail_blocking(time))
+        .await
+        .map_err(|e| format!("剪贴板缩略图任务失败: {e}"))?
 }
 
 /// 初始化启动台/中转站资产目录 + 起孤儿回收线程。setup 时调用一次。
@@ -1539,6 +1563,18 @@ mod tests {
         assert!(image_dims("C:\\x\\a.zip", "zip").is_none());
         assert!(image_dims("C:\\x\\a.txt", "txt").is_none());
         assert!(image_dims("C:\\x\\nonexistent.png", "png").is_none(), "文件不存在应返回 None");
+    }
+
+    #[test]
+    fn stage_thumb_cache_identity_tracks_subsecond_replacement_and_size() {
+        // Windows SystemTime 的表示精度不是 1ns；用同一秒内 1ms 的真实文件时间差。
+        let first = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_001);
+        let replaced = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_002);
+        let a = stage_thumb_cache_name("C:\\x\\same.png", 100, Some(first));
+        let b = stage_thumb_cache_name("C:\\x\\same.png", 100, Some(replaced));
+        let c = stage_thumb_cache_name("C:\\x\\same.png", 101, Some(first));
+        assert_ne!(a, b, "同一秒内覆盖同一路径也必须失效旧缩略图");
+        assert_ne!(a, c, "文件长度变化也必须失效旧缩略图");
     }
 
     /// AUMID 判定（续125）：只认 `PFN!AppId`，AppsFolder 里的 Win32 项一律排除。

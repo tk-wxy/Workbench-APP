@@ -1,10 +1,23 @@
 // 展示层纯函数（尺寸格式化 / 相对时间 / 扩展名→类别 / 父目录提取）。
 // 不依赖 React、无副作用。从 App.tsx 抽出的单一真相源（搜索结果 + 剪贴板 + 中转条目共用）。
 import { makeT } from "../i18n";
+import type { ClipItem } from "../types";
 type TFunc = ReturnType<typeof makeT>;
 
 // 视为图片的扩展名（中转条目 / 搜索结果的 isImage 判定共用）
 export const IMG_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"];
+
+export type FileGlyphArgs = { cat?: FileCat; ext?: string; isDir?: boolean; isImage?: boolean };
+
+// Clipboard item → the minimal FileGlyph input shared by list, search and drag ghost views.
+export function fileGlyphFor(item: ClipItem): FileGlyphArgs {
+  const items = item.items ?? [];
+  if (items.length > 1) return { cat: "box" };
+  const first = items[0];
+  if (!first) return { cat: "generic" };
+  if (first.isImage) return { isImage: true };
+  return { ext: first.ext || first.path.split(".").pop() || "" };
+}
 
 export function fmtSize(b: number) {
   if (!b) return "0 B";

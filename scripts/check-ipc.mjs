@@ -14,7 +14,7 @@
 //     故扫「首个实参子串」再从中取全部字符串字面量；
 //   · 三元条件会掺非命令串（kind==="folder"）：真命令一律 snake_case 且**含下划线**，据此把
 //     "folder"/"en"/"zh-CN" 这类噪声滤掉。
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -41,7 +41,12 @@ const rustCmds = new Set(
 );
 
 // ── 2. 前端集：扫 invoke(…) 首参里的命令名字面量 ──
-const tsFiles = ["src/App.tsx", "src/main.tsx"].map(r => join(root, r));
+const collectSourceFiles = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+  const path = join(dir, entry.name);
+  if (entry.isDirectory()) return collectSourceFiles(path);
+  return /\.tsx?$/.test(entry.name) ? [path] : [];
+});
+const tsFiles = collectSourceFiles(join(root, "src"));
 const tsCode = tsFiles.map(p => { try { return readFileSync(p, "utf8"); } catch { return ""; } }).join("\n");
 
 const feCmds = new Set();
