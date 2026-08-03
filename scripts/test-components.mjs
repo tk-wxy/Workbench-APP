@@ -17,6 +17,7 @@ await build({
       'export { default as ClipboardPanel } from "./src/components/ClipboardPanel";',
       'export { StageGridCard, StageListRow } from "./src/components/StageItems";',
       'export { default as EnhancedSearchLayer } from "./src/components/EnhancedSearchLayer";',
+      'export { WorkbenchSearchHeader, WorkbenchFooter } from "./src/components/WorkbenchChrome";',
     ].join("\n"),
     resolveDir: root,
     sourcefile: "component-contracts.ts",
@@ -28,7 +29,7 @@ await build({
   outfile,
   logLevel: "error",
 });
-const { LauncherPanel, ClipboardPanel, StageGridCard, StageListRow, EnhancedSearchLayer } = await import(pathToFileURL(outfile).href);
+const { LauncherPanel, ClipboardPanel, StageGridCard, StageListRow, EnhancedSearchLayer, WorkbenchSearchHeader, WorkbenchFooter } = await import(pathToFileURL(outfile).href);
 
 const noop = () => {};
 const t = (zh, vars) => vars ? zh.replace(/\{(\w+)\}/g, (_, key) => String(vars[key])) : zh;
@@ -110,6 +111,23 @@ const enhancedHtml = renderToStaticMarkup(createElement(EnhancedSearchLayer, {
   onResultsMouseMove: noop,
 }));
 check("增强搜索关闭时仍保持 enh-layer 挂载", enhancedHtml.includes('class="enh-layer"') && enhancedHtml.includes("输入以搜索"), enhancedHtml);
+
+const headerHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
+  search: "query",
+  searchRef: { current: null },
+  t,
+  onSearchChange: noop,
+}));
+check("顶栏抽取后保留品牌与搜索选择器", headerHtml.includes('class="top-left"') && headerHtml.includes('class="global-search"') && headerHtml.includes('value="query"'), headerHtml);
+
+const footerHtml = renderToStaticMarkup(createElement(WorkbenchFooter, {
+  hotkeyCombo: "ctrl+space",
+  enhancedHotkey: "ctrl+k",
+  enhancedOpen: false,
+  version: "0.22.0",
+  t,
+}));
+check("底栏抽取后保留快捷键与版本信息", footerHtml.includes('class="bottom-bar"') && footerHtml.includes("Ctrl+Space") && footerHtml.includes("Workbench v0.22.0"), footerHtml);
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");
