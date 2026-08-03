@@ -285,6 +285,39 @@ pub struct FileUse {
 static FILE_USAGE: OnceLock<Mutex<HashMap<String, FileUse>>> = OnceLock::new();
 /// 使用记录的落盘路径（file-usage.json），init_file_usage 时设定。
 static FILE_USAGE_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// file-usage.json 的单写者队列：正在写的快照之外只保留最新一份待写快照。
+/// 既避免多个 detached 线程互踩同一个 .tmp，也保证最终落盘的一定是最新状态。
+#[derive(Default)]
+struct FileUsageSaveQueue {
+    pending: Option<HashMap<String, FileUse>>,
+    worker_running: bool,
+}
+
+impl FileUsageSaveQueue {
+    /// 放入最新快照；返回 true 表示调用方需要启动唯一 writer。
+    fn enqueue(&mut self, snapshot: HashMap<String, FileUse>) -> bool {
+        self.pending = Some(snapshot);
+        if self.worker_running {
+            false
+        } else {
+            self.worker_running = true;
+            true
+        }
+    }
+
+    /// writer 每轮取走当前最新快照；无待写项时在同一把锁内解除 running 标志。
+    fn take_next(&mut self) -> Option<HashMap<String, FileUse>> {
+        match self.pending.take() {
+            Some(snapshot) => Some(snapshot),
+            None => {
+                self.worker_running = false;
+                None
+            }
+        }
+    }
+}
+
+static FILE_USAGE_SAVE_QUEUE: OnceLock<Mutex<FileUsageSaveQueue>> = OnceLock::new();
 
 const ENGINE_BUILTIN: u8 = 0;
 const ENGINE_EVERYTHING: u8 = 1;
@@ -520,8 +553,8 @@ fn open_bonus(u: Option<&FileUse>, now: u64) -> i32 {
 }
 
 /// 记录一次文件/文件夹打开（续132）。lib.rs 的 open_file 命令调用。
-/// 内存 bump 同步（下一次查询立刻反映），落盘异步（detached 线程，快照入参），
-/// 与 save_clip_history 同款「不在命令路径上做磁盘 I/O」纪律。
+/// 内存 bump 同步（下一次查询立刻反映），落盘交给单写者线程；等待区只保留最新快照，
+/// 与 save_clip_history 同款「不在命令路径上做磁盘 I/O、旧快照不得后写覆盖」纪律。
 pub fn record_file_open(path: &str) {
     let key = usage_key(path);
     if key.is_empty() {
@@ -553,10 +586,31 @@ pub fn record_file_open(path: &str) {
         }
         map.clone()
     };
-    std::thread::spawn(move || save_file_usage(snapshot));
+    let should_spawn = {
+        let lock = FILE_USAGE_SAVE_QUEUE.get_or_init(|| Mutex::new(FileUsageSaveQueue::default()));
+        let Ok(mut queue) = lock.lock() else { return };
+        queue.enqueue(snapshot)
+    };
+    if should_spawn {
+        std::thread::spawn(file_usage_save_worker);
+    }
 }
 
-/// 把使用记录快照原子写盘（tmp→rename）。接快照入参、自身不持锁；失败只 eprintln。
+/// 单写者循环。写盘期间不持 FILE_USAGE / FILE_USAGE_SAVE_QUEUE；期间到来的更新覆盖 pending，
+/// 当前轮结束后立刻写最新快照。pending 为空与 running=false 在同一锁块内完成，不留丢唤醒窗口。
+fn file_usage_save_worker() {
+    loop {
+        let next = {
+            let lock = FILE_USAGE_SAVE_QUEUE.get_or_init(|| Mutex::new(FileUsageSaveQueue::default()));
+            let Ok(mut queue) = lock.lock() else { return };
+            queue.take_next()
+        };
+        let Some(snapshot) = next else { return };
+        save_file_usage(snapshot);
+    }
+}
+
+/// 把使用记录快照原子写盘（tmp→rename）。只由单写者调用、自身不持锁；失败只 eprintln。
 fn save_file_usage(snapshot: HashMap<String, FileUse>) {
     let Some(path) = FILE_USAGE_PATH.get() else {
         return;
@@ -1718,6 +1772,34 @@ pub fn set_search_engine(engine: String) {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn file_usage_save_queue_has_one_writer_and_keeps_latest_pending_snapshot() {
+        let snapshot = |count| {
+            HashMap::from([(
+                "c:\\work\\report.txt".to_string(),
+                FileUse { count, last_used: count as u64 },
+            )])
+        };
+        let count_of = |map: &HashMap<String, FileUse>| {
+            map.get("c:\\work\\report.txt").map(|u| u.count)
+        };
+
+        let mut queue = FileUsageSaveQueue::default();
+        assert!(queue.enqueue(snapshot(1)), "首个快照必须启动 writer");
+        let first = queue.take_next().expect("writer 应取到首个快照");
+        assert_eq!(count_of(&first), Some(1));
+
+        // writer 正在写 first 时，后续调用不得再启动线程，pending 只保留最新的 count=3。
+        assert!(!queue.enqueue(snapshot(2)));
+        assert!(!queue.enqueue(snapshot(3)));
+        let latest = queue.take_next().expect("应保留最新 pending 快照");
+        assert_eq!(count_of(&latest), Some(3));
+
+        assert!(queue.take_next().is_none());
+        assert!(!queue.worker_running, "队列排空时必须原子解除 running 标志");
+        assert!(queue.enqueue(snapshot(4)), "排空后的下一次写入必须能重启 writer");
+    }
 
     /// 分层预算的检算（续117）。条目级加分的合计不得超过层间间隙。
     /// **动了常量最先挂的就是它**——一旦超出，就会出现「模糊匹配盖过精确匹配」这种

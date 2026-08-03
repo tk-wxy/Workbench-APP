@@ -17,7 +17,7 @@ await build({
   entryPoints: ["src/lib/enhSections.ts"],
   bundle: true, format: "esm", platform: "node", outfile, logLevel: "error",
 });
-const { groupFiles } = await import(pathToFileURL(outfile).href);
+const { groupFiles, groupRanked } = await import(pathToFileURL(outfile).href);
 
 let failed = 0;
 const eq = (name, actual, expected) => {
@@ -89,6 +89,21 @@ eq("目录按 isDir 归组",
 
 // ⑧ 空输入
 eq("空输入返回空段", shape(groupFiles([], 3)), []);
+
+console.log("\ngroupRanked —— 统一排名结果恢复可导航分段");
+const ranked = [
+  { id: "best-file", kind: "file" },
+  { id: "app-1", kind: "app" },
+  { id: "file-2", kind: "file" },
+  { id: "clip-1", kind: "clip" },
+  { id: "app-2", kind: "app" },
+];
+const groupedRanked = groupRanked(ranked, item => item.kind);
+eq("段序按首次名次且段内稳定",
+  groupedRanked.map(s => [s.group, s.items.map(i => i.id)]),
+  [["file", ["best-file", "file-2"]], ["app", ["app-1", "app-2"]], ["clip", ["clip-1"]]]);
+eq("最佳匹配仍是扁平结果第一项", groupedRanked.flatMap(s => s.items)[0]?.id, "best-file");
+eq("空统一结果返回空段", groupRanked([], item => item.kind), []);
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");

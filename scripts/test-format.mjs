@@ -22,7 +22,7 @@ await build({
   entryPoints: ["src/lib/format.ts"],
   bundle: true, format: "esm", platform: "node", outfile, logLevel: "error",
 });
-const { ago, agoSec, catToGroup, fileGroup } = await import(pathToFileURL(outfile).href);
+const { ago, agoSec, catToGroup, fileGroup, fileGlyphFor } = await import(pathToFileURL(outfile).href);
 
 // 代替 makeT 的最小 t()：原样返回中文 key，只展开 {n}（词典不在本测试范围内）
 const t = (zh, vars) => zh.replace(/\{(\w+)\}/g, (_, k) => vars[k]);
@@ -85,6 +85,11 @@ eq(".mp4",        fileGroup("mp4", false), "media");
 eq(".exe",        fileGroup("exe", false), "exe");
 eq(".ttf → other", fileGroup("ttf", false), "other");
 eq("未知扩展名",   fileGroup("qqq", false), "other");
+
+console.log("\nfileGlyphFor() —— 剪贴板列表 / 搜索 / 拖拽共享映射");
+eq("多文件", fileGlyphFor({ type:"file", time:1, items:[{path:"a.txt",name:"a",ext:"txt",isImage:false},{path:"b.txt",name:"b",ext:"txt",isImage:false}] }).cat, "box");
+eq("图片文件", fileGlyphFor({ type:"file", time:1, items:[{path:"a",name:"a",ext:"",isImage:true}] }).isImage, true);
+eq("扩展名回退", fileGlyphFor({ type:"file", time:1, items:[{path:"a.pdf",name:"a",ext:"",isImage:false}] }).ext, "pdf");
 
 rmSync(dir, { recursive: true, force: true });
 if (failed) { console.error(`\n${failed} 处失败\n`); process.exit(1); }

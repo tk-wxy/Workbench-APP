@@ -6,6 +6,27 @@ import { fileGroup, type FileGroup } from "./format";
 export type FileLike = { path: string; ext: string; isDir: boolean };
 
 /**
+ * 按来源/类别把一份已经排好名次的结果切成段。
+ * 段序由该段第一次出现的名次决定，段内也保持原顺序；因此输入第 1 名
+ * 永远仍是输出第 1 名，同时 Ctrl+↑↓ 能获得真实的多个段首。
+ */
+export function groupRanked<T, K extends string>(
+  items: T[],
+  groupOf: (item: T) => K,
+): { group: K; items: T[] }[] {
+  const groups = new Map<K, { rank: number; items: T[] }>();
+  items.forEach((item, rank) => {
+    const group = groupOf(item);
+    const existing = groups.get(group);
+    if (existing) existing.items.push(item);
+    else groups.set(group, { rank, items: [item] });
+  });
+  return [...groups]
+    .sort(([, a], [, b]) => a.rank - b.rank)
+    .map(([group, value]) => ({ group, items: value.items }));
+}
+
+/**
  * 把文件结果折叠成按大类划分的段落。
  *
  * 不变量（已被测试钉死，破坏它 Enter 就会坏）：

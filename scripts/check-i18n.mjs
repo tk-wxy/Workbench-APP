@@ -24,10 +24,16 @@ const dictKeys = new Set();
 for (const m of dictBody.matchAll(/"((?:[^"\\]|\\.)*)"\s*:/g)) dictKeys.add(JSON.parse(`"${m[1]}"`));
 
 // ── 2. 收集源码 ──
-const tsFiles = [
-  "src/App.tsx", "src/icons.tsx", "src/main.tsx",
-  "src/lib/format.ts", "src/lib/fuzzy.ts", "src/lib/enhSections.ts", "src/lib/pinyin.ts",
-].map(r => join(root, r));
+const collectSourceFiles = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap(entry => {
+  const path = join(dir, entry.name);
+  if (entry.isDirectory()) return collectSourceFiles(path);
+  return /\.tsx?$/.test(entry.name) ? [path] : [];
+});
+// Components and feature modules are intentionally free to move; scan the whole source tree so
+// extracting code from App.tsx cannot turn live translations into false-positive dead keys.
+// Exclude the dictionary itself, otherwise every key would count as its own usage.
+const i18nPath = join(root, "src/i18n.ts");
+const tsFiles = collectSourceFiles(join(root, "src")).filter(path => path !== i18nPath);
 const rustDir = join(root, "src-tauri/src");
 const rustFiles = readdirSync(rustDir).filter(f => f.endsWith(".rs")).map(f => join(rustDir, f));
 const readSafe = (p) => { try { return readFileSync(p, "utf8"); } catch { return ""; } };
