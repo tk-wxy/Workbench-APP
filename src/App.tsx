@@ -11,9 +11,15 @@ import ClipboardPanel, { type ClipboardPanelActions, type ClipboardPanelDragHand
 import { StageGridCard, StageListRow, type StageItemActions, type StageItemPointerHandlers } from "./components/StageItems";
 import EnhancedSearchLayer, { type EnhancedSearchActions, type EnhancedSearchPreview } from "./components/EnhancedSearchLayer";
 import { Clock, WorkbenchFooter, WorkbenchSearchHeader } from "./components/WorkbenchChrome";
+import HighlightText from "./components/HighlightText";
+import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog";
+import { LauncherManagerDialog, LauncherPickerDialog, StageRecoveryDialog } from "./components/WorkbenchDialogs";
 import { buildLauncherLayoutExport, createLauncherId, LAUNCHER_MAX, previewLauncherImport } from "./domain/launcherLayout";
+import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
 import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
 import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
+import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
+import { cacheApi } from "./platform/cacheApi";
 import { clipboardApi } from "./platform/clipboardApi";
 import { subscribeNativeEvents } from "./platform/nativeEvents";
 import { openWorkbenchStore, runStartupStep, startupNative, type WorkbenchStore } from "./platform/workbenchStartup";
@@ -22,7 +28,6 @@ import { resolveEscapeTarget, resolveHideResetPlan } from "./shell/uiPolicies";
 import type {
   AppInfo,
   AppUsage,
-  BuiltinSearchHit,
   ClipItem,
   EnhResult,
   FileEntry,
@@ -32,9 +37,8 @@ import type {
   Pasteable,
   StageItem,
 } from "./types";
-import { IconCheck, IconSearch,
-         IconSettings, IconRocket, IconBox, IconClipboard, IconKeyboard, IconInfo, FileGlyph,
-         IconWarn, IconClose, IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconDrop } from "./icons";
+import { IconCheck, IconSettings, FileGlyph,
+         IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconDrop } from "./icons";
 
 // ── 类型 ──
 type TFn = ReturnType<typeof makeT>;
@@ -59,7 +63,6 @@ const clipDisplayName = (c: ClipItem, t: TFn) =>
   : c.type === "image" ? t("图片")
   : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
-const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
 // 失效扫描只是提示补全，绝不能占用工作台呼出的关键路径。
 // 每批很小；预算到即停，下一次呼出再续扫。
 const STAGE_MISSING_SCAN_DELAY_MS = 250;
@@ -153,35 +156,9 @@ async function writeItemToClipboard(item: Pasteable) {
   else await invoke("copy_image_to_clipboard", { base64: (await hydrateContent(item)) ?? "", origPath: item.orig_path ?? null, time: item.time ?? null });
 }
 
-// 高亮命中字符（色用 --accent 兜底，贴合主题系统）
-function HighlightText({ text, ranges }: { text: string; ranges: [number, number][] }) {
-  if (!ranges.length) return <>{text}</>;
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  for (const [start, end] of ranges) {
-    if (start > cursor) parts.push(text.slice(cursor, start));
-    parts.push(<span key={start} style={{ color: "var(--accent)", fontWeight: 600 }}>{text.slice(start, end + 1)}</span>);
-    cursor = end + 1;
-  }
-  if (cursor < text.length) parts.push(text.slice(cursor));
-  return <>{parts}</>;
-}
-
 // 自定义右键菜单（浮层）
 type CtxMenuItem = { label: string; action: () => void; disabled?: boolean };
 type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
-
-// 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
-const SETTINGS_TABS = [
-  { id: "general",   Icon: IconSettings,  label: "常规" },
-  { id: "launcher",  Icon: IconRocket,    label: "启动台" },
-  { id: "stage",     Icon: IconBox,       label: "中转站" },
-  { id: "clipboard", Icon: IconClipboard, label: "剪贴板" },
-  { id: "search",    Icon: IconSearch,    label: "搜索" },
-  { id: "hotkeys",   Icon: IconKeyboard,  label: "快捷键" },
-  { id: "about",     Icon: IconInfo,      label: "关于" },
-] as const;
-type SettingsTab = typeof SETTINGS_TABS[number]["id"];
 
 const SHORTCUTS = [
   { l: "文件管理器", Icon: IconExplorer,   a: "explorer.exe"    },
@@ -371,16 +348,23 @@ export default function App() {
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
   const enhPinnedRef = useRef(false); enhPinnedRef.current = enhPinned; // 供 onChange 闭包读最新 pinned 状态
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
-  // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
-  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null; iconKey?: string }[]>([]);
-  // 内置模式由 Rust 返回应用/中转/剪贴板/文件的严格全局顺序；动态项只带稳定 key，在 useMemo 中映回现有对象。
-  const [builtinHits, setBuiltinHits] = useState<BuiltinSearchHit[]>([]);
+  // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
+  const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
   const [searchItemsRevision, setSearchItemsRevision] = useState(0);
+  // 双引擎查询、分档防抖和迟到响应守卫由查询控制器统一持有；App 只消费两种结果投影。
+  const { fileResults: fsResults, builtinHits, clearResults: clearEnhancedSearchResults } = useEnhancedSearchQuery({
+    open: enhOpen,
+    query: enhQuery,
+    engine: searchEngine,
+    itemsRevision: searchItemsRevision,
+    builtinLimit: ENH_FILE_LIMIT_BUILTIN,
+    everythingLimit: ENH_FILE_LIMIT_EVERYTHING,
+    builtinDebounceMs: ENH_DEBOUNCE_BUILTIN_MS,
+    everythingDebounceMs: ENH_DEBOUNCE_EVERYTHING_MS,
+  });
   // 以时间作 epoch，WebView 在同一 Rust 进程内重载时 revision 也不会从 0 倒退。
   const searchItemsSyncRef = useRef(Date.now());
   const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
-  // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
-  const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
   const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
   const [launcherPicking, setLauncherPicking] = useState(false); // 启动台「浏览…」选择框是否已弹出（同上，防重入叠弹）
@@ -717,7 +701,7 @@ export default function App() {
     let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
     let uiKeepTimer: ReturnType<typeof setTimeout> | null = null;
     // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
-    const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setSearch(""); pageSearchForcedRef.current = false; };
+    const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); clearEnhancedSearchResults(); setSearch(""); pageSearchForcedRef.current = false; };
     // 可恢复工作现场与危险瞬态分开：多选/管理弹层保留 10 秒；拖拽、框选、菜单仍在 hide 当场清。
     const resetRetainedUiState = () => {
       setStageSel(new Set<number>());
@@ -1178,48 +1162,6 @@ export default function App() {
     }
     return out;
   }, [searchEngine, enhQuery, builtinHits, apps, stage, clipboard, pinyin, t]);
-
-  // ── 增强查询：内置走跨来源统一排序；Everything 保留文件全盘查询 + 前端 Tier1 ──
-  // 防抖时长按引擎分档，见 ENH_DEBOUNCE_* 常量注释（续131）
-  //
-  // ⚠️ **必须有竞态守卫**（续131c）：`clearTimeout` 只能取消还没发出的查询，一旦 invoke 在途就拦不住了，
-  // 而后发的查询完全可能先返回（词越短候选越多、越慢）——旧结果就会盖掉新结果，
-  // 症状是「搜 ste 却列出一堆只配 s 的结果」。防抖从 150ms 降到 50ms 后两次请求叠在一起的概率大增，
-  // 这个一直存在的漏洞才被实测撞出来。守卫用自增 token：只有最后一次发出的查询有权写结果。
-  const fsReqRef = useRef(0);
-  useEffect(() => {
-    // 续136：关闭增强搜索时清掉 fsResults（原先只清 enhQuery、不清结果 →
-    // 上一次搜索最多 500 条结果 + 图标 base64 引用一直滞留 JS 堆到下次搜索）。
-    // 占一个 token 让在途查询作废（否则关闭瞬间在途的旧查询会把结果写回已清空的列表）。
-    if (!enhOpen) { fsReqRef.current++; setFsResults([]); setBuiltinHits([]); return; }
-    const q = enhQuery.trim();
-    // 清空也要占一个 token，否则在途的旧查询会把结果写回已清空的列表
-    if (!q) { fsReqRef.current++; setFsResults([]); setBuiltinHits([]); return; }
-    // 查询一变化就立刻让旧 invoke 失效，不能等到 debounce 到点才占 token。
-    const token = ++fsReqRef.current;
-    const ev = searchEngine==="everything";
-    const lim = ev ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
-    const t = setTimeout(async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        if (ev) {
-          const r = await invoke<{ results: { path: string; name: string; ext: string; isDir: boolean; iconKey: string }[]; icons: Record<string, string> }>("search_files", { query: q, limit: lim });
-          if (token !== fsReqRef.current) return;
-          setBuiltinHits([]);
-          setFsResults(r.results.map(x => ({ ...x, icon: r.icons[x.iconKey] ?? null })));
-        } else {
-          const r = await invoke<{ results: BuiltinSearchHit[]; icons: Record<string, string> }>("search_builtin_all", { query: q, limit: lim });
-          if (token !== fsReqRef.current) return;
-          setFsResults([]);
-          setBuiltinHits(r.results.map(hit => hit.kind === "fs" ? { ...hit, icon: r.icons[hit.iconKey] ?? null } : hit));
-        }
-      } catch {
-        if (token !== fsReqRef.current) return;
-        if (ev) setFsResults([]); else setBuiltinHits([]);
-      }
-    }, ev ? ENH_DEBOUNCE_EVERYTHING_MS : ENH_DEBOUNCE_BUILTIN_MS);
-    return () => clearTimeout(t);
-  }, [enhQuery, enhOpen, searchEngine, searchItemsRevision]);
 
   // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
   useEffect(() => {
@@ -2582,6 +2524,27 @@ export default function App() {
   const refreshClipboard = useCallback(async () => {
     setClipboard(normalizeClipboardHistory(await clipboardApi.getHistory()));
   }, []);
+  const openStageThumbnailDirectory = useCallback(() => {
+    cacheApi.openStageThumbnailDirectory().catch(() => {});
+  }, []);
+  const clearStageThumbnailCache = useCallback(async () => {
+    try {
+      await cacheApi.clearStageThumbnailCache();
+      setThumbCacheCleared(true);
+      setTimeout(() => setThumbCacheCleared(false), 1500);
+    } catch {}
+  }, []);
+  const openClipboardImageDirectory = useCallback(() => {
+    cacheApi.openClipboardImageDirectory().catch(() => {});
+  }, []);
+  const clearClipboardImageCache = useCallback(async () => {
+    try {
+      await cacheApi.clearClipboardImageCache();
+      await refreshClipboard();
+      setImgCacheCleared(true);
+      setTimeout(() => setImgCacheCleared(false), 1500);
+    } catch {}
+  }, [refreshClipboard]);
   const deleteClipItem = useCallback(async (time:number) => {
     setClipboard(prev => prev.filter(c => c.time !== time)); // 乐观：先从界面移除
     try {
@@ -3353,360 +3316,131 @@ export default function App() {
       />
       {/* ── 启动器「添加应用」picker（复用 settings-modal 样式 + enh-result 列表项）── */}
       {pickerOpen && (
-        <div className="settings-mask" onClick={()=>{setPickerOpen(false);setPickerQuery("");}}>
-          <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("添加到启动台")}</span>
-              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
-            </div>
-            <div className="picker-search">
-              <IconSearch size={16}/>
-              <input ref={pickerInputRef} className="picker-search-input" autoFocus placeholder={t("搜索要添加的应用…")} value={pickerQuery} onChange={e=>setPickerQuery(e.target.value)} spellCheck={false}/>
-            </div>
-            {/* 列表只含扫描到的「应用」；任意文件/文件夹走系统选择框（索引外路径搜索命中不了） */}
-            <div className="picker-browse">
-              <span className="picker-browse-label">{t("或收藏任意文件 / 文件夹：")}</span>
-              <button className="settings-action" onClick={()=>pickLauncherPath("file")} disabled={launcherPicking}>{t("浏览文件…")}</button>
-              <button className="settings-action" onClick={()=>pickLauncherPath("folder")} disabled={launcherPicking}>{t("浏览文件夹…")}</button>
-            </div>
-            <div className="picker-list">
-              {pickerResults.length ? pickerResults.map(({app,ranges})=>(
-                <div key={app.path} className="enh-result" onClick={()=>addAppToLauncher(app)} title={t("点击添加到启动器")}>
-                  <div className="enh-result-icon">{app.icon? <img src={app.icon} alt=""/> : <span>{app.name[0]}</span>}</div>
-                  <span className="enh-result-label"><HighlightText text={app.name} ranges={ranges}/></span>
-                </div>
-              )) : <p className="empty-hint">{pickerQuery.trim()?t("无匹配应用"):t("暂无可添加应用")}</p>}
-            </div>
-            <div className="picker-foot">{t("点击添加，可连续添加；")}<kbd>Esc</kbd> {t("关闭")}</div>
-          </div>
-        </div>
+        <LauncherPickerDialog
+          query={pickerQuery}
+          inputRef={pickerInputRef}
+          results={pickerResults}
+          launcherPicking={launcherPicking}
+          t={t}
+          onClose={() => { setPickerOpen(false); setPickerQuery(""); }}
+          onQueryChange={setPickerQuery}
+          onPickPath={pickLauncherPath}
+          onAddApp={addAppToLauncher}
+        />
       )}
       {/* 失效项不再随扫描静默消失：集中列出并让用户决定重新定位或删除整个条目。 */}
       {stageRecoveryOpen && (
-        <div className="settings-mask" onClick={()=>setStageRecoveryOpen(false)}>
-          <div className="settings-modal stage-recovery-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("处理中转站失效项")}</span>
-              <button className="settings-close" onClick={()=>setStageRecoveryOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
-            </div>
-            <div className="stage-recovery-list">
-              {missingStageItems.map(s => {
-                const lost = (s.items ?? []).filter(f => missingPaths.has(f.path));
-                const singleLost = s.type === "file" && s.items?.length === 1 && lost.length === 1;
-                const label = s.name || s.items?.[0]?.name || t("文件");
-                return <div key={s.id} className="stage-recovery-item">
-                  <div className="stage-recovery-main">
-                    <IconWarn size={16}/>
-                    <div>
-                      <div className="stage-recovery-name" title={label}>{label}</div>
-                      <div className="stage-recovery-meta">{t("原文件已失踪（可能被删除或移动）")}</div>
-                      {lost.map(f => <div key={f.path} className="stage-recovery-path" title={f.path}>{f.path}</div>)}
-                    </div>
-                  </div>
-                  <div className="stage-recovery-actions">
-                    {singleLost && <button className="settings-action" onClick={()=>relinkStageItem(s)}>{t("重新定位…")}</button>}
-                    {lost[0] && <button className="settings-action" onClick={()=>copyMissingStagePath(lost[0].path)}>{t("复制原路径")}</button>}
-                    <button className="settings-action danger" onClick={()=>removeStage(s.id)}>{t("删除该项目")}</button>
-                  </div>
-                </div>;
-              })}
-              {!missingStageItems.length && <p className="empty-hint">{t("暂无失效条目")}</p>}
-            </div>
-            <div className="picker-foot">{t("失效条目会保留在中转站，直到你主动处理。")}</div>
-          </div>
-        </div>
+        <StageRecoveryDialog
+          items={missingStageItems}
+          missingPaths={missingPaths}
+          t={t}
+          onClose={() => setStageRecoveryOpen(false)}
+          onRelink={relinkStageItem}
+          onCopyPath={copyMissingStagePath}
+          onRemove={removeStage}
+        />
       )}
       {/* 启动台批量管理：选择态只存在于此，不干扰主启动台的打开和拖拽排序。 */}
       {launcherManageOpen && (
-        <div className="settings-mask" onClick={()=>{setLauncherManageOpen(false);setLauncherImportPreview(null);}}>
-          <div className="settings-modal launcher-manager-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("启动台批量管理")}</span>
-              <button className="settings-close" onClick={()=>{setLauncherManageOpen(false);setLauncherImportPreview(null);}} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
-            </div>
-            {launcherImportPreview ? (
-              <div className="launcher-import-preview">
-                <div className="settings-panel-title">{t("导入预览")}</div>
-                <p>{t("将新增 {n} 项", { n: launcherImportPreview.items.length })}</p>
-                {launcherImportPreview.duplicates > 0 && <p>{t("跳过重复 {n} 项", { n: launcherImportPreview.duplicates })}</p>}
-                {launcherImportPreview.invalid > 0 && <p>{t("忽略无效 {n} 项", { n: launcherImportPreview.invalid })}</p>}
-                {launcherImportPreview.overCapacity > 0 && <p>{t("受上限影响，未导入 {n} 项", { n: launcherImportPreview.overCapacity })}</p>}
-                <p className="settings-hint">{t("导入采用合并方式，不会覆盖已有收藏。")}</p>
-                <div className="launcher-manager-actions">
-                  <button className="settings-action" onClick={()=>setLauncherImportPreview(null)}>{t("返回")}</button>
-                  <button className="settings-action" onClick={confirmLauncherLayoutImport} disabled={!launcherImportPreview.items.length}>{t("确认导入")}</button>
-                </div>
-              </div>
-            ) : (<>
-              <div className="launcher-manager-toolbar">
-                <span>{t("已选 {n} 项", { n: launcherManageSelected.size })}</span>
-                <div className="settings-inline-actions">
-                  <button className="settings-action" onClick={toggleLauncherManageAll} disabled={!launcher.length}>{launcherManageSelected.size === launcher.length && launcher.length ? t("取消全选") : t("全选")}</button>
-                  <button className="settings-action danger" onClick={deleteSelectedLauncherItems} disabled={!launcherManageSelected.size}>{t("删除已选（{n}）", { n: launcherManageSelected.size })}</button>
-                </div>
-              </div>
-              <div className="launcher-manager-list">
-                {launcher.length ? launcher.map(it=>(
-                  <label key={it.id} className={`launcher-manager-item${launcherManageSelected.has(it.id)?" selected":""}`}>
-                    <input type="checkbox" checked={launcherManageSelected.has(it.id)} onChange={()=>toggleLauncherManageItem(it.id)}/>
-                    <div className="launcher-manager-icon">{it.icon ? <img src={it.icon} alt=""/> : <FileGlyph ext={it.ext} isDir={it.kind==="folder"}/>}</div>
-                    <span className="launcher-manager-name" title={it.name}>{it.name}</span>
-                    <span className="launcher-manager-kind">{t(it.kind === "app" ? "应用程序" : it.kind === "folder" ? "文件夹" : "文件")}</span>
-                  </label>
-                )) : <p className="empty-hint">{t("暂无收藏条目")}</p>}
-              </div>
-              <div className="launcher-manager-foot">
-                <span className="settings-hint">{t("布局文件可用于备份或迁移；导入不会覆盖已有收藏。")}</span>
-                <div className="settings-inline-actions">
-                  <button className="settings-action" onClick={chooseLauncherLayoutImport} disabled={launcherLayoutBusy}>{t("导入布局")}</button>
-                  <button className="settings-action" onClick={exportLauncherLayout} disabled={!launcher.length || launcherLayoutBusy}>{t("导出布局")}</button>
-                </div>
-              </div>
-            </>)}
-          </div>
-        </div>
+        <LauncherManagerDialog
+          items={launcher}
+          selected={launcherManageSelected}
+          preview={launcherImportPreview}
+          busy={launcherLayoutBusy}
+          t={t}
+          onClose={() => { setLauncherManageOpen(false); setLauncherImportPreview(null); }}
+          onBackFromPreview={() => setLauncherImportPreview(null)}
+          onConfirmImport={confirmLauncherLayoutImport}
+          onToggleAll={toggleLauncherManageAll}
+          onToggleItem={toggleLauncherManageItem}
+          onDeleteSelected={deleteSelectedLauncherItems}
+          onChooseImport={chooseLauncherLayoutImport}
+          onExport={exportLauncherLayout}
+        />
       )}
       {settingsOpen && (
-        <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
-          <div className="settings-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("设置")}</span>
-              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}><IconClose size={20}/></button>
-            </div>
-            <div className="settings-layout">
-              <nav className="settings-nav">
-                {SETTINGS_TABS.map(tab=>(
-                  <button key={tab.id} className={`settings-nav-item${settingsTab===tab.id?" settings-nav-active":""}`} onClick={()=>setSettingsTab(tab.id)}>
-                    <span className="settings-nav-icon"><tab.Icon size={16}/></span>{t(tab.label)}
-                  </button>
-                ))}
-              </nav>
-              <div className="settings-panel">
-                {settingsTab==="general" && (<>
-                  <div className="settings-panel-title">{t("常规")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("背景主题")}</span>
-                    <div className="seg">
-                      {([["dark","深色"],["light","浅色"],["system","系统"]] as const).map(([v,l])=>(
-                        <button key={v} className={`seg-btn${theme===v?" seg-active":""}`} onClick={()=>changeTheme(v)}>{t(l)}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("语言")}</span>
-                    <div className="seg">
-                      {([["zh","中文"],["en","English"]] as const).map(([v,label])=>(
-                        <button key={v} className={`seg-btn${lang===v?" seg-active":""}`} onClick={()=>changeLang(v)}>{label}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("开机自启")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("这里仅保留全局外观与启动行为；启动台、中转站、剪贴板和搜索分别在独立条目中设置。")}</p>
-                </>)}
-                {settingsTab==="launcher" && (<>
-                  <div className="settings-panel-title">{t("启动台")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("收藏条目")}<span className="settings-row-sub">{launcher.length} / {LAUNCHER_MAX}</span></span>
-                    <div className="settings-inline-actions">
-                      <button className="settings-action" onClick={openLauncherPicker}>{t("添加到启动台")}</button>
-                      <button className="settings-action" onClick={openLauncherManager}>{t("批量管理")}</button>
-                      <button className="settings-action danger" onClick={clearLauncher} disabled={!launcher.length}>{t("清空")}</button>
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("排序方式")}<span className="settings-row-sub">{t("拖拽调整")}</span></span>
-                    <span className="settings-row-value">{t("手动排序")}</span>
-                  </div>
-                  <p className="settings-hint">{t("启动台只负责打开应用、文件或文件夹；与中转站的取走粘贴动作保持分离。")}</p>
-                </>)}
-                {settingsTab==="stage" && (<>
-                  <div className="settings-panel-title">{t("中转站")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("显示布局")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${stageLayout==="list"?" seg-active":""}`} onClick={()=>changeStageLayout("list")}>{t("列表")}</button>
-                      <button className={`seg-btn${stageLayout==="grid"?" seg-active":""}`} onClick={()=>changeStageLayout("grid")}>{t("方格")}</button>
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("中转条目")}<span className="settings-row-sub">{stage.length} / {stageMax}</span></span>
-                    <button className="settings-action danger" onClick={clearStage} disabled={!stage.length}>{t("清空")}</button>
-                  </div>
-                  {missingStageItems.length>0 && (
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("失效条目")}<span className="settings-row-sub">{t("{n} 条", {n: missingStageItems.length})}</span></span>
-                      <div className="settings-inline-actions">
-                        <button className="settings-action" onClick={openStageRecovery}>{t("处理失效项")}</button>
-                        <button className="settings-action danger" onClick={cleanupMissingStage}>{t("清理失效")}</button>
-                      </div>
-                    </div>
-                  )}
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("上限条数")}</span>
-                    <div className="seg">
-                      {STAGE_MAX_OPTIONS.map(n=>(
-                        <button key={n} className={`seg-btn${stageMax===n?" seg-active":""}`} onClick={()=>changeStageMax(n)}>{n}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("拖出后自动关闭")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${dragoutAutoClose?" seg-active":""}`} onClick={()=>changeDragoutAutoClose(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!dragoutAutoClose?" seg-active":""}`} onClick={()=>changeDragoutAutoClose(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("持久化")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${stagePersist?" seg-active":""}`} onClick={()=>changeStagePersist(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!stagePersist?" seg-active":""}`} onClick={()=>changeStagePersist(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("「关闭」（默认）：条目确认成功移出/拖出后自动从中转区移除。「开启」：条目移出/拖出后仍保留在中转区，除非手动删除。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("底部快捷入口")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${showShortcuts?" seg-active":""}`} onClick={()=>changeShowShortcuts(true)}>{lang==="en"?"Show":"显示"}</button>
-                      <button className={`seg-btn${!showShortcuts?" seg-active":""}`} onClick={()=>changeShowShortcuts(false)}>{lang==="en"?"Hide":"隐藏"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转区下方的截屏 / 文件管理器 / 下载等快捷按钮。隐藏后这块空间归还给中转区，可容纳更多条目。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("缩略图缓存")}</span>
-                    <div style={{display:"flex",gap:4}}>
-                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_stage_thumb_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${thumbCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_stage_thumb_cache");setThumbCacheCleared(true);setTimeout(()=>setThumbCacheCleared(false),1500);}catch{}}}>{thumbCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转区图片文件的缩略图缓存，命中后重启秒开。清空后下次显示会按需重新生成，不影响原文件。")}</p>
-                </>)}
-                {settingsTab==="clipboard" && (<>
-                  <div className="settings-panel-title">{t("剪贴板")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("历史保存条数")}</span>
-                    <div className="seg">
-                      {([10, 20, 50, 100] as const).map(n=>(
-                        <button key={n} className={`seg-btn${clipCacheMax===n?" seg-active":""}`} onClick={()=>changeClipCacheMax(n)}>{n}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("剪贴板历史")}<span className="settings-row-sub">{t("{n} 条", {n: clipboard.length})}</span></span>
-                    <button className="settings-action danger" onClick={clearClipboard} disabled={!clipboard.length}>{t("清空")}</button>
-                  </div>
-                  <p className="settings-hint">{t("复制的文本、图片、文件会自动记录，最多保留 {n} 条。", {n: clipCacheMax})}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("图片原图缓存")}</span>
-                    <div style={{display:"flex",gap:4}}>
-                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");await refreshClipboard();setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?<><IconCheck size={12}/> {t("已清空")}</>:t("清空缓存")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。")}</p>
-                </>)}
-                {settingsTab==="search" && (<>
-                  <div className="settings-panel-title">{t("搜索")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("呼出默认搜索")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${searchDefaultMode==="page"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("page")}>{t("界面搜索")}</button>
-                      <button className={`seg-btn${searchDefaultMode==="enhanced"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("enhanced")}>{t("增强搜索")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{searchDefaultMode==="enhanced"?t("呼出后顶栏输入直接进入增强搜索；{combo}切换为界面搜索。",{combo:comboLabel(enhHotkey)}):t("呼出后顶栏搜索过滤界面内容；{combo}进入增强搜索（共用顶栏）。",{combo:comboLabel(enhHotkey)})}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("搜索引擎")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${searchEngine==="builtin"?" seg-active":""}`} onClick={()=>changeSearchEngine("builtin")}>{t("内置")}</button>
-                      <button className={`seg-btn${searchEngine==="everything"?" seg-active":""}`} onClick={()=>changeSearchEngine("everything")}>Everything</button>
-                    </div>
-                  </div>
-                  {searchEngine==="everything" && (
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("连接状态")}<span className="settings-row-sub">{everythingAvailable?t("已连接"):t("未连接")}</span></span>
-                      <button className={`settings-action${evtRedetected?" copied":""}`} onClick={redetectEverything}>{evtRedetected?<><IconCheck size={12}/> {t("已检测")}</>:t("重新检测")}</button>
-                    </div>
-                  )}
-                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">{t("未检测到 Everything（需安装 Everything 并保持其后台运行，DLL 已随应用内置）。查询将自动回退到内置引擎。换 DLL / 启动 Everything 后点「重新检测」即可热更新，无需重启。")}</p>}
-                  {searchEngine==="everything" && everythingAvailable && <p className="settings-hint">{t("已连接 Everything，查询覆盖全盘、即时。")}</p>}
-                  <p className="settings-hint">{t("内置引擎扫描整个用户目录（含下方额外目录），无需任何外部依赖；Everything 覆盖全盘但需另装。")}</p>
-                  {searchEngine==="builtin" && (<>
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("额外扫描目录")}</span>
-                      <button className="settings-action" onClick={pickSearchDir} disabled={dirPicking}>{t("浏览…")}</button>
-                    </div>
-                    {searchDirs.length>0 ? <div className="search-dir-list">{searchDirs.map(d=>(
-                      <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title={t("移除")}><IconClose size={14}/></button></div>
-                    ))}</div> : <p className="settings-hint">{t("默认仅扫描用户目录（桌面/下载/文档…）。如需搜其他盘符，在此添加根目录。")}</p>}
-                    <p className="settings-hint">{t("添加目录后约几秒完成后台重建即可搜到；node_modules / .git 等噪音目录自动跳过。")}</p>
-                  </>)}
-                </>)}
-                {settingsTab==="hotkeys" && (<>
-                  <div className="settings-panel-title">{t("快捷键")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("呼出 / 隐藏")}</span>
-                    <div style={{display:"flex",gap:6}}>
-                      <input
-                        className="hotkey-input"
-                        value={hotkeyInput}
-                        onChange={e=>setHotkeyInput(e.target.value)}
-                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeHotkey(hotkeyInput);}}}
-                        placeholder={t("如 ctrl+shift+f")}
-                        spellCheck={false}
-                        readOnly={recording==="main"}
-                      />
-                      <button className={"settings-action"+(recording==="main"?" recording":"")} onClick={()=>{setHotkeyError("");setRecording(r=>r==="main"?null:"main");}}>{recording==="main"?t("按下快捷键…"):t("录制")}</button>
-                      <button className="settings-action" onClick={()=>changeHotkey(hotkeyInput)}>{t("应用")}</button>
-                    </div>
-                  </div>
-                  {hotkeyError && <p className="settings-hint settings-hint-error">{t(hotkeyError)}</p>}
-                  {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>{t("恢复默认")}</button>}
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("增强搜索")}</span>
-                    <div style={{display:"flex",gap:6}}>
-                      <input
-                        className="hotkey-input"
-                        value={enhHotkeyInput}
-                        onChange={e=>setEnhHotkeyInput(e.target.value)}
-                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeEnhHotkey(enhHotkeyInput);}}}
-                        placeholder={t("如 ctrl+k")}
-                        spellCheck={false}
-                        readOnly={recording==="enh"}
-                      />
-                      <button className={"settings-action"+(recording==="enh"?" recording":"")} onClick={()=>{setEnhHotkeyError("");setRecording(r=>r==="enh"?null:"enh");}}>{recording==="enh"?t("按下快捷键…"):t("录制")}</button>
-                      <button className="settings-action" onClick={()=>changeEnhHotkey(enhHotkeyInput)}>{t("应用")}</button>
-                    </div>
-                  </div>
-                  {enhHotkeyError && <p className="settings-hint settings-hint-error">{t(enhHotkeyError)}</p>}
-                  {enhHotkey!=="ctrl+k" && <button className="settings-action" onClick={()=>changeEnhHotkey("ctrl+k")}>{t("恢复默认")}</button>}
-                  <p className="settings-hint">{t("点「录制」后直接按下组合键自动填入；也可手动输入。")}</p>
-                  <p className="settings-hint" style={{marginTop: '4px'}}>{t("格式：ctrl+x · alt+q · ctrl+shift+x · f9")}</p>
-                  <p className="settings-hint" style={{marginTop: '4px'}}>{t("· 不支持 Win 键及 Alt+Space / Alt+F4（系统保留）")}<br/>{t("· 修饰键 Ctrl / Shift / Alt 可选；纯主键会全局抢占该键，慎设")}<br/>{t("· 中文输入法下录制前请先切换到英文输入法")}</p>
-                  <div className="settings-row"><span className="settings-row-label">{t("关闭面板")}</span><kbd>Esc</kbd></div>
-                  <div className="settings-row"><span className="settings-row-label">{t("应用导航")}</span><kbd>↑↓</kbd></div>
-                  <div className="settings-row"><span className="settings-row-label">{t("启动选中应用")}</span><kbd>Enter</kbd></div>
-                  <p className="settings-hint">{t("长按 = 按住显示松开关闭；短按 = 切换显隐。")}</p>
-                </>)}
-                {settingsTab==="about" && (<>
-                  <div className="settings-panel-title">{t("关于")}</div>
-                  <div className="settings-about">
-                    <div>Workbench <b>v{__APP_VERSION__}</b></div>
-                    <div>{t("Windows 全屏「第二桌面」工具")}</div>
-                    <div>{t("应用启动器 · 文件中转 · 剪贴板历史")}</div>
-                  </div>
-                </>)}
-              </div>
-            </div>
-          </div>
-        </div>
+        <SettingsDialog
+          tab={settingsTab}
+          version={__APP_VERSION__}
+          t={t}
+          general={{
+            theme,
+            lang,
+            autostartEnabled,
+            onChangeTheme: changeTheme,
+            onChangeLang: changeLang,
+            onChangeAutostart: changeAutostart,
+          }}
+          launcher={{
+            count: launcher.length,
+            onOpenPicker: openLauncherPicker,
+            onOpenManager: openLauncherManager,
+            onClear: clearLauncher,
+          }}
+          stage={{
+            layout: stageLayout,
+            count: stage.length,
+            max: stageMax,
+            missingCount: missingStageItems.length,
+            dragoutAutoClose,
+            persist: stagePersist,
+            showShortcuts,
+            thumbnailCacheCleared: thumbCacheCleared,
+            onChangeLayout: changeStageLayout,
+            onClear: clearStage,
+            onOpenRecovery: openStageRecovery,
+            onCleanupMissing: cleanupMissingStage,
+            onChangeMax: changeStageMax,
+            onChangeDragoutAutoClose: changeDragoutAutoClose,
+            onChangePersist: changeStagePersist,
+            onChangeShowShortcuts: changeShowShortcuts,
+            onOpenThumbnailDirectory: openStageThumbnailDirectory,
+            onClearThumbnailCache: clearStageThumbnailCache,
+          }}
+          clipboard={{
+            count: clipboard.length,
+            max: clipCacheMax,
+            imageCacheCleared: imgCacheCleared,
+            onChangeMax: changeClipCacheMax,
+            onClear: clearClipboard,
+            onOpenImageDirectory: openClipboardImageDirectory,
+            onClearImageCache: clearClipboardImageCache,
+          }}
+          search={{
+            defaultMode: searchDefaultMode,
+            engine: searchEngine,
+            everythingAvailable,
+            redetected: evtRedetected,
+            dirs: searchDirs,
+            dirPicking,
+            enhancedHotkeyLabel: comboLabel(enhHotkey),
+            onChangeDefaultMode: changeSearchDefaultMode,
+            onChangeEngine: changeSearchEngine,
+            onRedetectEverything: redetectEverything,
+            onPickDir: pickSearchDir,
+            onRemoveDir: removeSearchDir,
+          }}
+          hotkeys={{
+            combo: hotkeyCombo,
+            input: hotkeyInput,
+            error: hotkeyError,
+            enhancedCombo: enhHotkey,
+            enhancedInput: enhHotkeyInput,
+            enhancedError: enhHotkeyError,
+            recording,
+            onInputChange: setHotkeyInput,
+            onEnhancedInputChange: setEnhHotkeyInput,
+            onApply: changeHotkey,
+            onApplyEnhanced: changeEnhHotkey,
+            onToggleRecording: target => {
+              if (target === "main") setHotkeyError("");
+              else setEnhHotkeyError("");
+              setRecording(current => current === target ? null : target);
+            },
+          }}
+          onTabChange={setSettingsTab}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
       <WorkbenchFooter
         hotkeyCombo={hotkeyCombo}
