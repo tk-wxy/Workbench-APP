@@ -18,6 +18,8 @@ await build({
       'export { StageGridCard, StageListRow } from "./src/components/StageItems";',
       'export { default as EnhancedSearchLayer } from "./src/components/EnhancedSearchLayer";',
       'export { WorkbenchSearchHeader, WorkbenchFooter } from "./src/components/WorkbenchChrome";',
+      'export { default as SettingsDialog } from "./src/components/SettingsDialog";',
+      'export { LauncherPickerDialog, StageRecoveryDialog, LauncherManagerDialog } from "./src/components/WorkbenchDialogs";',
     ].join("\n"),
     resolveDir: root,
     sourcefile: "component-contracts.ts",
@@ -29,7 +31,7 @@ await build({
   outfile,
   logLevel: "error",
 });
-const { LauncherPanel, ClipboardPanel, StageGridCard, StageListRow, EnhancedSearchLayer, WorkbenchSearchHeader, WorkbenchFooter } = await import(pathToFileURL(outfile).href);
+const { LauncherPanel, ClipboardPanel, StageGridCard, StageListRow, EnhancedSearchLayer, WorkbenchSearchHeader, WorkbenchFooter, SettingsDialog, LauncherPickerDialog, StageRecoveryDialog, LauncherManagerDialog } = await import(pathToFileURL(outfile).href);
 
 const noop = () => {};
 const t = (zh, vars) => vars ? zh.replace(/\{(\w+)\}/g, (_, key) => String(vars[key])) : zh;
@@ -128,6 +130,63 @@ const footerHtml = renderToStaticMarkup(createElement(WorkbenchFooter, {
   t,
 }));
 check("底栏抽取后保留快捷键与版本信息", footerHtml.includes('class="bottom-bar"') && footerHtml.includes("Ctrl+Space") && footerHtml.includes("Workbench v0.22.0"), footerHtml);
+
+const settingsHtml = renderToStaticMarkup(createElement(SettingsDialog, {
+  tab: "about",
+  version: "0.23.0",
+  t,
+  general: {},
+  launcher: {},
+  stage: {},
+  clipboard: {},
+  search: {},
+  hotkeys: {},
+  onTabChange: noop,
+  onClose: noop,
+}));
+check("设置弹层保留导航、面板和版本信息", settingsHtml.includes('class="settings-nav"') && settingsHtml.includes('class="settings-panel"') && settingsHtml.includes("Workbench <b>v0.23.0</b>"), settingsHtml);
+
+const pickerHtml = renderToStaticMarkup(createElement(LauncherPickerDialog, {
+  query: "cal",
+  inputRef: { current: null },
+  results: [{ app: { path: "C:/calc.exe", name: "Calculator", icon: null }, ranges: [[0, 2]] }],
+  launcherPicking: false,
+  t,
+  onClose: noop,
+  onQueryChange: noop,
+  onPickPath: noop,
+  onAddApp: noop,
+}));
+check("应用选择弹层保留搜索与浏览入口", pickerHtml.includes("picker-modal") && pickerHtml.includes("picker-search-input") && pickerHtml.includes("浏览文件夹"), pickerHtml);
+check("应用选择高亮保持闭区间范围", pickerHtml.includes(">Cal</span>culator"), pickerHtml);
+
+const recoveryHtml = renderToStaticMarkup(createElement(StageRecoveryDialog, {
+  items: [],
+  missingPaths: new Set(),
+  t,
+  onClose: noop,
+  onRelink: noop,
+  onCopyPath: noop,
+  onRemove: noop,
+}));
+check("失效恢复弹层保留空态与恢复容器", recoveryHtml.includes("stage-recovery-modal") && recoveryHtml.includes("暂无失效条目"), recoveryHtml);
+
+const managerHtml = renderToStaticMarkup(createElement(LauncherManagerDialog, {
+  items: [],
+  selected: new Set(),
+  preview: null,
+  busy: false,
+  t,
+  onClose: noop,
+  onBackFromPreview: noop,
+  onConfirmImport: noop,
+  onToggleAll: noop,
+  onToggleItem: noop,
+  onDeleteSelected: noop,
+  onChooseImport: noop,
+  onExport: noop,
+}));
+check("启动台管理弹层保留工具栏与布局动作", managerHtml.includes("launcher-manager-modal") && managerHtml.includes("导入布局") && managerHtml.includes("导出布局"), managerHtml);
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");
