@@ -1,10 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, dirOf, fileGroup, fileGlyphFor, type FileGroup } from "./lib/format";
-import { groupFiles, groupRanked } from "./lib/enhSections";
+import { IMG_EXTS, dirOf, fileGlyphFor } from "./lib/format";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
-import { matchName, type PinyinTable, type PinyinVariant } from "./lib/pinyin";
+import { type PinyinTable, type PinyinVariant } from "./lib/pinyin";
 import { tokenFromCode, parseComboStr, matchComboEvent, comboLabel } from "./lib/hotkey";
 import LauncherPanel from "./components/LauncherPanel";
 import ClipboardPanel, { type ClipboardPanelActions, type ClipboardPanelDragHandlers } from "./components/ClipboardPanel";
@@ -15,6 +14,8 @@ import HighlightText from "./components/HighlightText";
 import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog";
 import { LauncherManagerDialog, LauncherPickerDialog, StageRecoveryDialog } from "./components/WorkbenchDialogs";
 import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
+import { appUsageScore } from "./domain/appUsage";
+import { enhancedClipboardName, enhancedStageName } from "./domain/enhancedSearchResults";
 import { buildLauncherLayoutExport, createLauncherId, LAUNCHER_MAX, previewLauncherImport } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
 import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
@@ -22,6 +23,7 @@ import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCach
 import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
 import { useEnhancedSearchPreview } from "./hooks/useEnhancedSearchPreview";
 import { useEnhancedSearchSelection } from "./hooks/useEnhancedSearchSelection";
+import { useEnhancedSearchResults } from "./hooks/useEnhancedSearchResults";
 import { cacheApi } from "./platform/cacheApi";
 import { clipboardApi } from "./platform/clipboardApi";
 import { subscribeNativeEvents } from "./platform/nativeEvents";
@@ -49,7 +51,6 @@ import { IconCheck, IconSettings, FileGlyph,
          IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconDrop } from "./icons";
 
 // ── 类型 ──
-type TFn = ReturnType<typeof makeT>;
 // 只有含汉字的名字才需要派生拼音（纯英文名走直接匹配即可）。在前端先滤一道，
 // 免得把满屏英文文件名送去 Rust 白跑一趟。
 const HAS_CJK = /[一-鿿]/;
@@ -62,14 +63,8 @@ const pruneTable = (tbl: PinyinTable, keep: Set<string>): PinyinTable => {
   for (const k of keys) if (keep.has(k)) out[k] = tbl[k];
   return out;
 };
-// 中转 / 剪贴板条目在增强搜索里的「显示名」= 被搜索的那个串。
-// 抽成函数是因为它有**两个**消费者且必须一字不差（续131）：增强搜索 Tier1 的匹配、
-// 以及拼音派生的取名——两边算出不同的名字，派生表就会查不到、拼音匹配静默失效。
-const stageDisplayName = (s: StageItem, t: TFn) => s.name || s.items?.[0]?.name || t("文件");
-const clipDisplayName = (c: ClipItem, t: TFn) =>
-  c.type === "text" ? (c.content || "").trim().slice(0, 80)
-  : c.type === "image" ? t("图片")
-  : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
+// 中转 / 剪贴板的增强搜索显示名统一由 domain/enhancedSearchResults.ts 提供：
+// 结果匹配、动态投影与拼音派生必须共用同一名字，否则拼音会静默失效（续131）。
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
 // 失效扫描只是提示补全，绝不能占用工作台呼出的关键路径。
 // 每批很小；预算到即停，下一次呼出再续扫。
@@ -102,16 +97,10 @@ const SEARCH_KEEP_MS = 10_000;
 /// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
 /// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
 const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
-// ── 应用使用打分：频率为主 × 近期乘数（频率高且近期用过的排前）──
-// score = count × 0.5^(距上次使用 / 半衰期)。30 天没用，权重掉一半。要调"近期"敏感度改这个常量。
-const USAGE_HALFLIFE_S = 30 * 24 * 3600;
-function usageScore(u: AppUsage | undefined, nowS: number): number {
-  if (!u || u.count <= 0) return 0;
-  return u.count * Math.pow(0.5, (nowS - u.last_used) / USAGE_HALFLIFE_S);
-}
+// 应用使用分的公式与半衰期在 domain/appUsage.ts；页面、增强搜索和动态投影共用。
 // 与 Rust 文件使用学习同档：动态搜索投影只同步 0..400 的同层 tie-break，不参与跨匹配层翻转。
 function searchUsageBoost(u: AppUsage | undefined, nowS: number): number {
-  const score = usageScore(u, nowS);
+  const score = appUsageScore(u, nowS);
   return score < 0.25 ? 0 : score < 1 ? 100 : score < 2 ? 200 : score < 4 ? 300 : 400;
 }
 
@@ -967,7 +956,7 @@ export default function App() {
 
   // ── 按使用打分排序（频率为主×近期乘数：常用且近期用过的浮前；同分按名字兜底）──
   const sortedApps = useMemo(() => { const nowS=Math.floor(Date.now()/1000); return [...apps].sort((a,b) =>
-    usageScore(appUsage[b.path],nowS) - usageScore(appUsage[a.path],nowS) || a.name.localeCompare(b.name)
+    appUsageScore(appUsage[b.path],nowS) - appUsageScore(appUsage[a.path],nowS) || a.name.localeCompare(b.name)
   ); }, [apps, appUsage]);
 
   // ── 搜索过滤（模糊打分 + 相关度排序）。统一输出 {app, ranges}，空查询时 ranges 为空 ──
@@ -986,7 +975,7 @@ export default function App() {
       .filter(it => it.score > 0) // 子序列不成立的淘汰
       .sort((a, b) =>
         b.score - a.score                                                              // 相关度降序
-        || usageScore(appUsage[b.app.path],nowS) - usageScore(appUsage[a.app.path],nowS) // 同分按使用打分
+        || appUsageScore(appUsage[b.app.path],nowS) - appUsageScore(appUsage[a.app.path],nowS) // 同分按使用打分
         || a.app.name.localeCompare(b.app.name))                                       // 再按字母
       .slice(0, 200)
       .map(({ app, ranges }) => ({ app, ranges }));
@@ -1013,8 +1002,8 @@ export default function App() {
     const all = new Set<string>();
     const add = (n: string) => { if (n && HAS_CJK.test(n)) all.add(n); };
     for (const a of apps) add(a.name);
-    for (const s of stage) if (s.type === "file") add(stageDisplayName(s, t));
-    for (const c of clipboard) add(clipDisplayName(c, t));
+    for (const s of stage) if (s.type === "file") add(enhancedStageName(s, t));
+    for (const c of clipboard) add(enhancedClipboardName(c, t));
     // 裁剪表与已请求集（即使本轮无新名字也要做——条目只减不增时同样要收缩）。
     // 两者必须**一起**裁：只裁表不裁已请求集，条目被移除又加回来时会"认为已请求过"
     // 而不再请求，拼音就静默失效了。
@@ -1051,7 +1040,7 @@ export default function App() {
         keywords: ["应用", "app", "application"],
       })),
       ...stage.filter(item => item.type === "file").map(item => ({
-        kind: "stage", key: String(item.id), name: stageDisplayName(item, t),
+        kind: "stage", key: String(item.id), name: enhancedStageName(item, t),
         path: item.items?.[0]?.path ?? "", ext: item.ext ?? item.items?.[0]?.ext ?? "",
         isDir: !!item.isDir, boost: item.pinned ? 100 : 0,
         keywords: item.isDir
@@ -1059,7 +1048,7 @@ export default function App() {
           : typeKeywords({ type: "file", ext: item.ext ?? item.items?.[0]?.ext, isImage: item.items?.[0]?.isImage }),
       })),
       ...clipboard.map(item => ({
-        kind: "clip", key: String(item.time), name: clipDisplayName(item, t),
+        kind: "clip", key: String(item.time), name: enhancedClipboardName(item, t),
         path: item.items?.[0]?.path ?? "", ext: item.items?.[0]?.ext ?? "",
         isDir: false, boost: 0,
         keywords: typeKeywords({ type: item.type, ext: item.items?.[0]?.ext, isImage: item.items?.[0]?.isImage }),
@@ -1076,57 +1065,6 @@ export default function App() {
     })();
   }, [apps, stage, clipboard, appUsage, t]);
 
-  // ── 增强搜索 Tier 1（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
-  // 有查询时上限 10（D5）；空查询兜底仍给 30 常用应用（此时无文件结果，总数 ≤30 不超）。
-  const enhTier1 = useMemo<EnhResult[]>(() => {
-    const q = enhQuery.trim();
-    const nowS = Math.floor(Date.now() / 1000);
-    if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
-    // matchName = 直接模糊匹配 + 拼音匹配取优（续131）。三类条目共用它，口径一致。
-    const appHits = apps.map(app => { const r = matchName(q, app.name, pinyin); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = stageDisplayName(s, t); const r = matchName(q, nm, pinyin); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    // 剪贴板历史条目（续101）：名称=文本内容/文件名/图片标签；名称模糊未命中时用类型词（"图片""txt"）兜底给基础分。
-    const ql = q.toLowerCase();
-    const clipHits = clipboard.map(c => {
-      const nm = clipDisplayName(c, t);
-      const r = matchName(q, nm, pinyin);
-      let score = r.score, ranges = r.ranges;
-      if (score === 0 && typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }).some(k => k.toLowerCase().includes(ql))) { score = 5; ranges = []; }
-      return { kind: "clip" as const, item: c, name: nm, score, ranges };
-    }).filter(x => x.score > 0);
-    return [...appHits, ...stageHits, ...clipHits]
-      .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
-      .slice(0, 10)
-      .map(({ score, ...rest }) => rest as EnhResult);
-  }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t, pinyin]);
-
-  const builtinEnhResults = useMemo<EnhResult[]>(() => {
-    if (searchEngine !== "builtin" || !enhQuery.trim()) return [];
-    const appByKey = new Map(apps.map(app => [app.path, app]));
-    const stageByKey = new Map(stage.map(item => [String(item.id), item]));
-    const clipByKey = new Map(clipboard.map(item => [String(item.time), item]));
-    const out: EnhResult[] = [];
-    for (const hit of builtinHits) {
-      if (hit.kind === "fs") {
-        out.push({ kind: "fs", path: hit.path, name: hit.name, ext: hit.ext, isDir: hit.isDir, icon: hit.icon, iconKey: hit.iconKey });
-        continue;
-      }
-      if (hit.kind === "app") {
-        const app = appByKey.get(hit.key); if (!app) continue;
-        out.push({ kind: "app", app, ranges: matchName(enhQuery, app.name, pinyin).ranges });
-      } else if (hit.kind === "stage") {
-        const item = stageByKey.get(hit.key); if (!item) continue;
-        const name = stageDisplayName(item, t);
-        out.push({ kind: "stage", item, name, ranges: matchName(enhQuery, name, pinyin).ranges });
-      } else {
-        const item = clipByKey.get(hit.key); if (!item) continue;
-        const name = clipDisplayName(item, t);
-        out.push({ kind: "clip", item, name, ranges: matchName(enhQuery, name, pinyin).ranges });
-      }
-    }
-    return out;
-  }, [searchEngine, enhQuery, builtinHits, apps, stage, clipboard, pinyin, t]);
-
   // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
   useEffect(() => {
     if (!enhOpen && !settingsOpen) return;
@@ -1139,53 +1077,28 @@ export default function App() {
   }, [launcherSelIdx]);
   useEffect(() => { setLauncherSelIdx(-1); }, [visible, search]);
 
-  // ── 增强搜索结果分段（续114b）──
-  // 结构：先建 sections，再由它**派生**扁平数组与段边界；渲染/导航都读派生值，段的增删不用改它们。
-  //
-  // 内置模式的非空查询已经由 Rust 跨来源统一排序。按类别恢复段落时，段序取该类首次出现的
-  // 全局名次、段内保持原顺序，确保最佳匹配仍在第 1 项，同时让 Ctrl+↑↓ 有真实段首可跳。
-  // Everything 仍沿用旧的 Tier1 + 文件分段，因为其候选语法和相关性来自外部引擎。
-  const enhSections = useMemo<{ key: string; label: string; items: EnhResult[] }[]>(() => {
-    if (searchEngine === "builtin" && enhQuery.trim()) {
-      const labels: Record<string, string> = {
-        "t1-app": t("应用程序"), "t1-stage": t("中转站"), "t1-clip": t("剪贴板"),
-        "fs-folder": t("文件夹"), "fs-image": t("图片"), "fs-archive": t("压缩包"),
-        "fs-doc": t("文档"), "fs-code": t("代码"), "fs-media": t("媒体"),
-        "fs-exe": t("可执行文件"), "fs-other": t("其他文件"),
-      };
-      return groupRanked(builtinEnhResults, r => r.kind === "fs" ? `fs-${fileGroup(r.ext, r.isDir)}` : `t1-${r.kind}`)
-        .map(({ group, items }) => ({ key: `builtin-${group}`, label: labels[group] ?? t("最佳匹配"), items }));
-    }
-    const out: { key: string; label: string; items: EnhResult[] }[] = [];
-
-    // Tier1：应用 / 中转 / 剪贴板 各自成段（此前三者混在一起，只靠徽标区分）
-    const T1_LABEL: Record<string, string> = { app: t("应用程序"), stage: t("中转站"), clip: t("剪贴板") };
-    const t1Items = new Map<string, EnhResult[]>(); // Map 保持插入序 = 首次出现的名次序
-    for (const r of enhTier1) {
-      if (!t1Items.has(r.kind)) t1Items.set(r.kind, []);
-      t1Items.get(r.kind)!.push(r);
-    }
-    for (const [k, items] of t1Items) out.push({ key: `t1-${k}`, label: T1_LABEL[k] ?? k, items });
-
-    // Tier2：文件按大类分段
-    const G_LABEL: Record<FileGroup, string> = {
-      folder: t("文件夹"), image: t("图片"), archive: t("压缩包"), doc: t("文档"),
-      code: t("代码"), media: t("媒体"), exe: t("可执行文件"), other: t("其他文件"),
-    };
-    // 分组 + runt 合并 + 名次排序在 lib/enhSections.ts（纯函数，有回归测试；
-    // 「不可依赖 Map 插入序」这个坑的说明也在那里）
-    for (const { group, items } of groupFiles(fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING), ENH_MIN_SECTION)) {
-      out.push({
-        key: `fs-${group}`, label: G_LABEL[group],
-        items: items.map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon, iconKey: f.iconKey })),
-      });
-    }
-
-    return out;
-  }, [searchEngine, enhQuery, builtinEnhResults, enhTier1, fsResults, t]);
-
-  // 扁平结果：↑↓/Enter/激活全部照旧读它，分段对这些路径完全透明
-  const enhResults = useMemo<EnhResult[]>(() => enhSections.flatMap(s => s.items), [enhSections]);
+  // One model is shared by rows, preview, Enter and cross-section keyboard navigation.
+  // Built-in hit order remains Rust-authoritative; Everything keeps the legacy local Tier1.
+  const {
+    sections: enhSections,
+    results: enhResults,
+    sectionStarts: enhSectionStarts,
+    headingByIndex: enhHeadAt,
+  } = useEnhancedSearchResults({
+    engine: searchEngine,
+    query: enhQuery,
+    apps,
+    sortedApps,
+    stage,
+    clipboard,
+    appUsage,
+    pinyin,
+    builtinHits,
+    fileResults: fsResults,
+    everythingFileLimit: ENH_FILE_LIMIT_EVERYTHING,
+    minFileSection: ENH_MIN_SECTION,
+    t,
+  });
   const {
     selectedIndex: enhSelIdx,
     setSelectedIndex: setEnhSelIdx,
@@ -1194,19 +1107,7 @@ export default function App() {
     cancelPendingHover: cancelHoverSelect,
     trackPointer: trackEnhResultsPointer,
   } = useEnhancedSearchSelection(enhOpen, enhResults);
-  // 选中高亮 + 滚入视野的本体在 enhRows 定义之后——它必须依赖 enhRows（见那里的说明）。
-  // 每段首项的下标：Ctrl+↑↓ 跨段跳转的边界表（取代续114 硬编码的 enhTier1.length）
-  const enhSectionStarts = useMemo<number[]>(() => {
-    const starts: number[] = []; let acc = 0;
-    for (const s of enhSections) { starts.push(acc); acc += s.items.length; }
-    return starts;
-  }, [enhSections]);
-  // 下标 → 段标题，供渲染在该行之前插入表头
-  const enhHeadAt = useMemo<Map<number, string>>(() => {
-    const m = new Map<number, string>();
-    enhSections.forEach((s, i) => m.set(enhSectionStarts[i], `${s.label} (${s.items.length})`));
-    return m;
-  }, [enhSections, enhSectionStarts]);
+  // Selection still owns only interaction intent; its input is the flattened domain model above.
 
   // Async metadata, image caches and the synchronous preview view model share one feature controller.
   const enhPreview = useEnhancedSearchPreview({
