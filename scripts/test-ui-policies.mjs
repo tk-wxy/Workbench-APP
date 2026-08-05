@@ -17,7 +17,12 @@ await build({
   logLevel: "error",
 });
 
-const { resolveEscapeTarget, resolveHideResetPlan } = await import(pathToFileURL(outfile).href);
+const {
+  resolveEscapeTarget,
+  resolveHeaderSearchTarget,
+  resolveHideResetPlan,
+  resolveSearchModeToggle,
+} = await import(pathToFileURL(outfile).href);
 let failed = 0;
 const check = (name, condition, detail = "") => {
   if (condition) { console.log(`  ✓ ${name}`); return; }
@@ -76,6 +81,54 @@ check(
   "可恢复 UI 统一延迟复位",
   resolveHideResetPlan({ pageSearchActive: false, enhancedSearchOpen: false }).retainedUi === "delayed",
 );
+
+console.log("\n双搜索模式 —— 顶栏归属与切换语义");
+
+check(
+  "页面模式下顶栏写入页面查询",
+  resolveHeaderSearchTarget({ defaultMode: "page", pageSearchForced: false, enhancedPinned: false }) === "page",
+);
+check(
+  "置顶增强层始终接管顶栏",
+  resolveHeaderSearchTarget({ defaultMode: "page", pageSearchForced: false, enhancedPinned: true }) === "enhanced",
+);
+check(
+  "默认增强模式下顶栏写入增强查询",
+  resolveHeaderSearchTarget({ defaultMode: "enhanced", pageSearchForced: false, enhancedPinned: false }) === "enhanced",
+);
+check(
+  "默认增强模式显式返回后顶栏写入页面查询",
+  resolveHeaderSearchTarget({ defaultMode: "enhanced", pageSearchForced: true, enhancedPinned: false }) === "page",
+);
+
+const openEnhanced = resolveSearchModeToggle({
+  enhancedOpen: false,
+  pageQuery: "report",
+  defaultMode: "page",
+});
+check(
+  "进入增强搜索时继承页面查询并置顶",
+  openEnhanced.enhancedOpen && openEnhanced.enhancedPinned && openEnhanced.enhancedQuery === "report",
+);
+check("进入增强搜索时解除页面强制模式", openEnhanced.pageSearchForced === false);
+
+const closeToPage = resolveSearchModeToggle({
+  enhancedOpen: true,
+  pageQuery: "report",
+  defaultMode: "page",
+});
+check(
+  "退出增强搜索时只清增强现场",
+  !closeToPage.enhancedOpen && !closeToPage.enhancedPinned && closeToPage.enhancedQuery === "",
+);
+check("页面默认模式退出后仍由页面查询接管", closeToPage.pageSearchForced === false);
+
+const closeEnhancedDefault = resolveSearchModeToggle({
+  enhancedOpen: true,
+  pageQuery: "report",
+  defaultMode: "enhanced",
+});
+check("默认增强模式退出后显式停留页面搜索", closeEnhancedDefault.pageSearchForced === true);
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");

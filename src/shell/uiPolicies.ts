@@ -62,3 +62,53 @@ export function resolveHideResetPlan(input: {
     retainedUi: "delayed",
   };
 }
+
+export type SearchMode = "page" | "enhanced";
+
+/**
+ * The header is shared by both search surfaces, but their queries are independent.
+ * Default enhanced mode routes typing to enhanced search until the user explicitly
+ * returns to page search; a pinned enhanced layer always owns the header.
+ */
+export function resolveHeaderSearchTarget(input: {
+  defaultMode: SearchMode;
+  pageSearchForced: boolean;
+  enhancedPinned: boolean;
+}): SearchMode {
+  return (input.defaultMode === "enhanced" && !input.pageSearchForced) || input.enhancedPinned
+    ? "enhanced"
+    : "page";
+}
+
+export interface SearchModeTogglePlan {
+  enhancedOpen: boolean;
+  enhancedPinned: boolean;
+  enhancedQuery: string;
+  pageSearchForced: boolean;
+}
+
+/**
+ * Entering enhanced search seeds it from the page query. Leaving discards edits made
+ * only in enhanced search and never mutates the page query, so the main view restores
+ * its exact pre-enhanced filter without an intermediate recompute.
+ */
+export function resolveSearchModeToggle(input: {
+  enhancedOpen: boolean;
+  pageQuery: string;
+  defaultMode: SearchMode;
+}): SearchModeTogglePlan {
+  if (input.enhancedOpen) {
+    return {
+      enhancedOpen: false,
+      enhancedPinned: false,
+      enhancedQuery: "",
+      pageSearchForced: input.defaultMode === "enhanced",
+    };
+  }
+  return {
+    enhancedOpen: true,
+    enhancedPinned: true,
+    enhancedQuery: input.pageQuery,
+    pageSearchForced: false,
+  };
+}
