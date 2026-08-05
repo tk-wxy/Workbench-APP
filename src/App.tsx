@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, agoSec, dirOf, fmtDateTime, fileCategory, fileGroup, catToGroup, fileGlyphFor, type FileCat, type FileGroup, type FileGlyphArgs } from "./lib/format";
+import { IMG_EXTS, dirOf, fileGroup, fileGlyphFor, type FileGroup } from "./lib/format";
 import { groupFiles, groupRanked } from "./lib/enhSections";
 import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
 import { matchName, type PinyinTable, type PinyinVariant } from "./lib/pinyin";
@@ -14,17 +14,25 @@ import { Clock, WorkbenchFooter, WorkbenchSearchHeader } from "./components/Work
 import HighlightText from "./components/HighlightText";
 import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog";
 import { LauncherManagerDialog, LauncherPickerDialog, StageRecoveryDialog } from "./components/WorkbenchDialogs";
+import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
 import { buildLauncherLayoutExport, createLauncherId, LAUNCHER_MAX, previewLauncherImport } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
 import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
 import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
 import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
+import { useEnhancedSearchPreview } from "./hooks/useEnhancedSearchPreview";
+import { useEnhancedSearchSelection } from "./hooks/useEnhancedSearchSelection";
 import { cacheApi } from "./platform/cacheApi";
 import { clipboardApi } from "./platform/clipboardApi";
 import { subscribeNativeEvents } from "./platform/nativeEvents";
 import { openWorkbenchStore, runStartupStep, startupNative, type WorkbenchStore } from "./platform/workbenchStartup";
 import { createPassiveEventHandlers, normalizeClipboardHistory, type ClipboardOriginalDegradedPayload } from "./shell/passiveEventHandlers";
-import { resolveEscapeTarget, resolveHideResetPlan } from "./shell/uiPolicies";
+import {
+  resolveEscapeTarget,
+  resolveHeaderSearchTarget,
+  resolveHideResetPlan,
+  resolveSearchModeToggle,
+} from "./shell/uiPolicies";
 import type {
   AppInfo,
   AppUsage,
@@ -73,27 +81,6 @@ const STAGE_MISSING_SCAN_YIELD_MS = 32;
 // 分组不足此条数则并入「其他文件」（续114b）。没有这道闸，一个只返回 3 个文件的查询会得到
 // 3 个标题配 3 条内容——标题比内容还多，比不分组更难看。这条阈值对实际观感的影响大于分类表本身。
 const ENH_MIN_SECTION = 3;
-// 预览面板（续115）：按住 ↓ 连续穿过结果时不能每项都发 IPC，故未命中缓存的取用防抖；
-// 命中缓存则**立即出**（不等防抖），来回移动时面板不闪。
-const PREVIEW_DEBOUNCE_MS = 130;
-/// 预览元数据缓存的条数上限（续131d 从 300 改到 60，并从「整表清空」改为 LRU 淘汰）。
-///
-/// 改小的依据是实测：`get_large_icon` 单张 base64 **均值 43.9 KB**（最大 108 KB，
-/// 见 apps.rs 的 `probe_large_icon_cost` 探针），300 条 ≈ **12.6 MB** —— 与整个文件索引
-/// （续126 瘦身后 9.8 MB）同量级，对一个常驻后台的工具太重。60 条 ≈ 2.6 MB，
-/// 而「会再看一眼」的项本来也就那么几条，命中率损失可忽略。
-///
-/// 淘汰策略必须**同时**换掉：原注释说「重取代价低，不值得上 LRU」，在预览是"一帧换好"时成立；
-/// 续131d 之后重取要走「低清 → 淡入高清」，整表清空 = 所有项一起退回那个观感。
-const PREVIEW_CACHE_MAX = 60;
-/// 预览大图标共享表的上限（续131e，按 `iconKey` 而非路径计数）。
-/// 常见扩展名撑死几十个，会撑大它的只有 exe/lnk（各有各的图标、键是自身路径）。
-/// 100 条 ≈ 4.4 MB 封顶，同样走 LRU。
-const LARGE_ICON_CACHE_MAX = 100;
-// 增强搜索列表的 hover 选中驻留门槛（续118）。指针在某行连续停留超过这个时长才提交选中变更。
-// 70ms 的依据：擦过一行通常 <30ms，有意停留远超 70ms，两者区分得干净；而预览面板本就有
-// 130ms 元数据防抖，再叠 70ms 仍在既有延迟特征内，手感不会变钝。
-const HOVER_DWELL_MS = 70;
 const ENH_FILE_LIMIT_BUILTIN = 150;
 const ENH_FILE_LIMIT_EVERYTHING = 500;
 // 文件查询的防抖，**按引擎分档**（续131）。防抖的目的是压住"每敲一键一次查询"的开销，
@@ -181,28 +168,6 @@ type AddResult = "added" | "duplicate" | "full";
 // 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
 // 续142b：克隆改 cloneNode(源图标容器)，尺寸/底色由克隆自身携带、精确贴合，不再靠 React 重渲 + 猜百分比（旧 75% → 比磁贴小一圈、点击瞬间"缩一下"）。
-
-// 结果唯一键：渲染 key + 预览缓存键 + 预览竞态守卫共用一套，避免三处各写一份跑偏
-const enhKey = (r: EnhResult) =>
-  r.kind === "app" ? "app:" + r.app.path : r.kind === "stage" ? "stage:" + r.item.id
-  : r.kind === "clip" ? "clip:" + r.item.time : "fs:" + r.path;
-// 结果对应的真实文件路径（取不到=空串，如纯文本/图片剪贴板项）。
-// 与渲染里的 rPath 不同：那个只服务「加入启动台/中转」的按钮反馈、故意排除 stage/clip；
-// 预览要对 stage/clip 里的文件项也显示位置与时间，所以单独一份。
-/// 把 base64 图先解码好再交给渲染（续131d）。
-/// 不这么做的话，`<img>` 换 src 的那一帧浏览器可能还没解完码，替换会多出一个中间态。
-/// 失败一律当成功返回——预解码只是为了让替换更干净，不该让取不到图标变成取不到面板。
-async function preloadImg(src: string | null): Promise<void> {
-  if (!src) return;
-  try {
-    const im = new Image();
-    im.src = src;
-    if (im.decode) await im.decode();
-  } catch { /* 解码失败照常渲染，浏览器会自己处理 */ }
-}
-
-const enhPath = (r: EnhResult) =>
-  r.kind === "app" ? r.app.path : r.kind === "fs" ? r.path : (r.item.items?.[0]?.path ?? "");
 
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
@@ -340,7 +305,6 @@ export default function App() {
   const [enhOpen, setEnhOpen] = useState(false);
   const [enhPinned, setEnhPinned] = useState(false); // true=打字触发（顶栏为输入框，不覆盖顶栏）；false=Ctrl+K触发（全覆盖+独立搜索框）
   const [enhQuery, setEnhQuery] = useState("");
-  const [enhSelIdx, setEnhSelIdx] = useState(0);
   const [launcherSelIdx, setLauncherSelIdx] = useState(-1); // 启动器网格键盘选中项（-1=未选中，焦点在搜索框）
   const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
@@ -1169,58 +1133,6 @@ export default function App() {
     (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number; everythingAvailable: boolean }>("get_index_status"); setIndexReady(s.ready); setEverythingAvailable(!!s.everythingAvailable); } catch {} })();
   }, [enhOpen, settingsOpen, searchEngine]);
 
-  // ── 增强搜索 hover 选中的门控（续118）────────────────────────────────────────
-  //
-  // 裸 `onMouseEnter={()=>setEnhSelIdx(i)}` 有两个失效，症状都是「信息栏莫名其妙跳、
-  // 跟着点错东西」，但根因不同，故两道门各治一个：
-  //
-  // ① **位移门**（治「键盘导航被静止的鼠标劫持」）：下面那个 scrollIntoView 会在 ↑↓ 时滚动列表，
-  //    于是**鼠标没动、它底下的行却换了**，浏览器照样派发 mouseenter → 选中被拽回鼠标位置，
-  //    可能再次触发滚动。故要求「指针坐标相对上一次真实 mousemove 确有变化」才放行。
-  //    真实移动时 mouseenter 先于该位置的 mousemove 派发，故此时 enter 的坐标必然 ≠ 已记录值；
-  //    滚动导致的 enter 坐标则与已记录值完全相同 —— 靠这个差异区分，无需监听 scroll。
-  //
-  // ② **驻留门**（治「去预览面板路上蹭到邻行」）：预览面板在列表**左外侧**，去点它的按钮必须
-  //    横向穿越，轨迹稍斜就会扫过上下邻行，每扫一行都换一次预览 → 走到面板时对象已经变了
-  //    （经典的菜单对角线问题）。故 hover 不立即提交，先等 HOVER_DWELL_MS；中途离开即取消。
-  //
-  // 为什么不拆 enhSelIdx 成「键盘光标」和「hover 预览」两个状态：它同时是 Enter 的目标，
-  // 而 enhResults[0] / Enter 行为的稳定性是续114b 明确维护的不变量，拆开风险远大于收益。
-  const hoverPosRef = useRef({ x: -1, y: -1 });   // 最近一次**真实** mousemove 的视口坐标
-  const hoverTimerRef = useRef<number | null>(null);
-  const cancelHoverSelect = useCallback(() => {
-    if (hoverTimerRef.current !== null) { clearTimeout(hoverTimerRef.current); hoverTimerRef.current = null; }
-  }, []);
-  // 键盘导航时清掉待定的 hover 提交，否则 70ms 窗口内的按键会被随后落地的 hover 覆盖回去
-  const selectByKeyboard = useCallback((next: number | ((i: number) => number)) => {
-    cancelHoverSelect();
-    setEnhSelIdx(next as never);
-  }, [cancelHoverSelect]);
-  const onEnhRowEnter = useCallback((idx: number, e: React.MouseEvent) => {
-    const p = hoverPosRef.current;
-    if (e.clientX === p.x && e.clientY === p.y) return; // ① 指针没动 = 滚动造成的，不是用户意图
-    cancelHoverSelect();
-    hoverTimerRef.current = window.setTimeout(() => {   // ② 驻留够久才算数
-      hoverTimerRef.current = null;
-      setEnhSelIdx(idx);
-    }, HOVER_DWELL_MS);
-  }, [cancelHoverSelect]);
-  // 关闭增强搜索时清掉待定提交（否则关掉后定时器落地会改已失效的下标）。
-  // 结果集变化时的清理放在 enhResults 声明之后（见那里）——此处引用不到它。
-  useEffect(() => { if (!enhOpen) cancelHoverSelect(); }, [enhOpen, cancelHoverSelect]);
-
-  // 选中高亮 + 滚入视野。**高亮是命令式加 class，不进 React**（续127）。
-  //
-  // 为什么：行是 `enhResults.map` 全量渲染的，若 className 里带 `i===enhSelIdx`，
-  // 每按一次 ↑↓ 就要让 React reconcile 全部 500 行——而真正变化的只有 2 行。
-  // 用户实测「↑↓ 翻结果时卡顿」即源于此。改成这里直接摘/挂 class 后：
-  // 行数组由 useMemo 缓存（依赖里**不含 enhSelIdx**），一次按键的开销从 O(500) 降到 O(1)。
-  // 这与续109 拖拽 ghost「坐标只进 ref + 直写 DOM」是同一套写法。
-  //
-  // ⚠️ 依赖里必须有 enhResults：换查询时 enhSelIdx 常常仍是 0（值没变、effect 不会重跑），
-  // 那样新列表就一行都不会高亮。
-  // 依赖里要有 enhResults，而此处引用不到它（声明在下方），故 effect 本体放在其声明之后。
-
   // 启动器键盘选中：滚入视野；关闭覆盖层 / 搜索过滤态变化时复位到「未选中」（焦点回搜索框）
   useEffect(() => {
     if (launcherSelIdx >= 0) document.querySelector(".app-tile.selected")?.scrollIntoView({ block: "nearest" });
@@ -1274,9 +1186,14 @@ export default function App() {
 
   // 扁平结果：↑↓/Enter/激活全部照旧读它，分段对这些路径完全透明
   const enhResults = useMemo<EnhResult[]>(() => enhSections.flatMap(s => s.items), [enhSections]);
-  // 结果集变化时清掉待定的 hover 提交（续118）：边打字边把鼠标停在某行时，结果会在
-  // 驻留窗口内被换掉，此时旧下标已指向另一个条目——让定时器落地就是选中了不相干的东西。
-  useEffect(() => cancelHoverSelect, [enhResults, cancelHoverSelect]);
+  const {
+    selectedIndex: enhSelIdx,
+    setSelectedIndex: setEnhSelIdx,
+    selectByKeyboard,
+    onRowEnter: onEnhRowEnter,
+    cancelPendingHover: cancelHoverSelect,
+    trackPointer: trackEnhResultsPointer,
+  } = useEnhancedSearchSelection(enhOpen, enhResults);
   // 选中高亮 + 滚入视野的本体在 enhRows 定义之后——它必须依赖 enhRows（见那里的说明）。
   // 每段首项的下标：Ctrl+↑↓ 跨段跳转的边界表（取代续114 硬编码的 enhTier1.length）
   const enhSectionStarts = useMemo<number[]>(() => {
@@ -1291,241 +1208,15 @@ export default function App() {
     return m;
   }, [enhSections, enhSectionStarts]);
 
-  // ── 预览面板异步元数据（续115）：大图标 + 时间戳/大小，仅文件系统类结果需要 ──
-  // 同步能算的部分（名称/类型/徽标/已有小图标）在 enhPreview 里直接出，**不等这里**，
-  // 所以快速 ↑↓ 时面板不会空白闪烁，只是详细行稍后补上。
-  const [previewMeta, setPreviewMeta] = useState<{ key: string; info: FileEntry | null; icon: string | null; thumb: string | null } | null>(null);
-  const previewCacheRef = useRef(new Map<string, { info: FileEntry | null; icon: string | null; thumb: string | null }>());
-  const previewKeyRef = useRef("");
-  /// 预览大图标按「图标身份」共享（续131e）：`iconKey` 是 Rust 算的——目录一个键、
-  /// 普通文件按扩展名、exe/lnk 用自身路径（各有各的图标，本就不该共享）。
-  ///
-  /// 为什么不按路径存：50 个 .txt 就是 50 次 `get_large_icon`（每次 14~64ms 的 Shell COM）
-  /// 外加 50 份各自独立的 43.9 KB 字符串——同一张图标反复取、反复占内存。
-  /// 续126 已经给**列表**图标做过同样的去重，预览这一路当时没跟上。
-  ///
-  /// 键直接用 Rust 回传的 `iconKey`，**不在前端另写一套身份规则**——两套规则迟早跑偏。
-  /// 命中时不仅省掉 IPC，还能在第一帧就画出高清图（连那次淡入都不会发生）。
-  const largeIconRef = useRef(new Map<string, string | null>());
-  useEffect(() => {
-    if (!enhOpen) {
-      setPreviewMeta(null);
-      // 续137：关闭增强搜索时释放预览大图标/缩略图缓存（续136 ②′ 落地）。
-      // 这两张表攒的是本流程里最大的**已解码图片**——192px 大图标（均 ~44KB/张，largeIconRef LRU 100）
-      // 与图片文件缩略图（previewCacheRef LRU 60）；用得越久攒得越满，且**关掉后仍占着 JS 堆
-      // 并撑着 Chromium 的解码位图缓存**，正是「用增强搜索后内存一直下不来」的那部分。
-      // 关闭时清空，内存回到基线；重开只对**当前选中项**按需重取（异步 + PREVIEW_DEBOUNCE_MS 防抖，
-      // 不碰列表、不产生 UI 卡顿——等价于每次全新打开的既有行为）。列表图标另走 fsResults，每次查询本就重取，不受影响。
-      previewCacheRef.current.clear();
-      largeIconRef.current.clear();
-      return;
-    }
-    const r = enhResults[enhSelIdx] ?? enhResults[0];
-    const key = r ? enhKey(r) : "";
-    const path = r ? enhPath(r) : "";
-    previewKeyRef.current = key;              // 竞态守卫基准：响应回来时若已不等，说明选中变了
-    if (!r || !path) { setPreviewMeta(null); return; } // 纯文本/图片剪贴板项无路径，无需取
-    const hit = previewCacheRef.current.get(key);
-    if (hit) {
-      // LRU 触碰：删了再塞回去 = 移到 Map 末尾（Map 保插入序）。
-      // **只在 effect 里做，不在渲染期做**——渲染期那次读取（见 enhPreview）必须保持纯净，
-      // 改动 ref 会让同一次渲染变得有副作用。effect 每次选中变化都会跑，触碰不会漏。
-      previewCacheRef.current.delete(key);
-      previewCacheRef.current.set(key, hit);
-      setPreviewMeta({ key, ...hit });
-      return;
-    }
-    const timer = setTimeout(async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        // 图片文件另取真缩略图（复用续99c 的落盘缓存，重复访问零解码原图）；非图片跳过这次 IPC
-        const isImg = IMG_EXTS.includes((path.split(".").pop() ?? "").toLowerCase());
-        // 大图标先查「图标身份」共享表（续131e）：同扩展名的第二个文件起直接复用，
-        // 既省掉 14~64ms 的 Shell COM，又让 50 个 .txt 共用同一个字符串实例
-        // （JS 字符串按引用共享，去重后内存是真降下来的，不是只少了几次调用）。
-        const ikey = r.kind === "fs" ? (r.iconKey ?? "") : "";
-        const shared = ikey ? largeIconRef.current.get(ikey) : undefined;
-        // 三个命令并行；任一失败不影响其余（大图标失败会回退到小图标/矢量字形）
-        const [info, icon, thumb] = await Promise.all([
-          invoke<FileEntry>("get_file_info", { path }).catch(() => null),
-          shared !== undefined ? Promise.resolve(shared)
-                               : invoke<string | null>("get_large_icon", { path }).catch(() => null),
-          isImg ? invoke<string>("get_stage_thumbnail", { path }).catch(() => null) : Promise.resolve(null),
-        ]);
-        if (ikey && shared === undefined) {
-          largeIconRef.current.set(ikey, icon ?? null); // 含 null：取不到也记下来，别每次都去白试
-          while (largeIconRef.current.size > LARGE_ICON_CACHE_MAX) {
-            const oldest = largeIconRef.current.keys().next().value;
-            if (oldest === undefined) break;
-            largeIconRef.current.delete(oldest);
-          }
-        }
-        const entry = { info, icon: icon ?? null, thumb: thumb ?? null };
-        previewCacheRef.current.set(key, entry);
-        // LRU 淘汰：Map 的迭代序 = 插入序，队首就是最久没被触碰的那条，逐条删到不超上限。
-        // **不能再用整表清空**（续131d）：清空一次会让所有项都退回"低清淡入一次高清"，
-        // 正是刚修掉的那个体验问题周期性重演。
-        while (previewCacheRef.current.size > PREVIEW_CACHE_MAX) {
-          const oldest = previewCacheRef.current.keys().next().value;
-          if (oldest === undefined) break;
-          previewCacheRef.current.delete(oldest);
-        }
-        // 先解码再上屏（续131d）：高清图标一挂上去就能立刻画出来，替换只占一帧。
-        // 放在写缓存**之后**——缓存的是数据，解码只服务这次渲染，失败也不该让缓存落空。
-        await Promise.all([preloadImg(entry.icon), preloadImg(entry.thumb)]);
-        if (previewKeyRef.current === key) setPreviewMeta({ key, ...entry }); // 迟到的响应直接丢弃
-      } catch {}
-    }, PREVIEW_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [enhOpen, enhSelIdx, enhResults]);
-
-  // ── 预览面板视图模型（续115）──
-  // 同步部分（标题/徽标/字形/已有小图标）恒可算；异步部分（大图标/缩略图/时间/大小）到了才补，
-  // 故快速导航时面板结构稳定、只有细节行渐显，不会整块闪。
-  const enhPreview = useMemo(() => {
-    const r = enhResults[enhSelIdx] ?? enhResults[0];
-    if (!r) return null;
-    const key = enhKey(r);
-    // 只认当前选中项的元数据，防串味。
-    // ⚠️ **命中缓存时必须在这里直接读缓存，不能等 state**（续131d 修正）：
-    // effect 在**渲染之后**才跑，所以"选中变了"那一帧 `previewMeta` 还是上一项的、判定为 null
-    // → 面板先渲染一帧低清图，effect 随后 setPreviewMeta 才换高清。
-    // 结果就是**哪怕刚看过这一项，也照样从低清淡入一次高清**（用户原话：比抖动还难受）。
-    // previewCacheRef 是纯数据缓存、读它幂等，渲染期读取安全；state 仍保留——
-    // 它负责在异步取回后触发重渲，两者职责不同。
-    const meta = previewMeta?.key === key ? previewMeta : (previewCacheRef.current.get(key) ?? null);
-    const info = meta?.info ?? null;
-    // rtl：只给「位置」行——用 direction:rtl 让超长路径省略头部、保住尾部（文件名侧）。
-    // 绝不能全表铺开：时间/大小含中性字符，RTL 排版会把它们的标点顺序弄错。
-    // 续116 的信息设计：这个面板的职责是**消歧（这是我要的那个吗）**，不是属性对话框。
-    // 判断材料分三层——① 位置 = 最大的消歧依据（同名文件散在不同目录，是搜索场景里
-    // 压倒性最常见的歧义源），升为独立区块；② stats = 一眼扫的 1~2 个事实；
-    // ③ rows = 其余次要信息。删掉的两项：「类型」（徽标 + 图标已经说了两遍）与
-    // 「创建时间」（Windows 上复制会重置创建时间、常晚于 modified ——
-    // 既不参与消歧又容易误导）。
-    const rows: { label: string; value: string; rtl?: boolean; pending?: boolean; title?: string }[] = [];
-    const stats: { label: string; value: string; title?: string; pending?: boolean }[] = [];
-    let loc: string | null = null;
-    const push = (label: string, value?: string | null, rtl?: boolean, title?: string) => { if (value) rows.push({ label, value, rtl, title }); };
-    const fileFacts = (path: string, isDir?: boolean, extHint?: string) => {
-      loc = dirOf(path);
-      // ↓ stats 的**槽位数只由同步已知的信息决定**（不按值的有无出没）。值要等 get_file_info。
-      // 若用「有值才渲染」，元数据到达的瞬间面板就会长高、肉眼可见地抖动
-      // （续115 实测并反馈过的症状）。加载中→「…」／取到但字段缺失→「—」，两者高度一致。
-      // pending 看的是「元数据是否已返回」(meta) 而非「值是否非空」(info)：取失败时
-      // info=null 但 meta 已到，此时该显示「—」（否则失败与加载中无法区分）。
-      // ⚠️ 续119 把分支增加到 3 个，但**分支条件是 isDir 与扩展名，都是同步已知**，
-      //    所以这个不变量仍然成立（切记不要拿 meta 的内容做分支）。
-      const pending = !meta;
-      const ext = (extHint || "").toLowerCase().replace(/^\./, "");
-      const isImg = !isDir && IMG_EXTS.includes(ext);
-      const modStat = {
-        // 以相对表述为主：这里是扫「是不是最近碰过的」，而不是精确看「什么时候」。
-        // 绝对值放 title 里 hover 查看（续116。此前两行绝对时间是一堵数字墙）。
-        label: t("修改"),
-        value: pending ? "…" : (info?.modified ? agoSec(info.modified, t) : "—"),
-        title: info?.modified ? fmtDateTime(info.modified) : undefined,
-        pending,
-      };
-      const sizeStat = { label: t("大小"), value: pending ? "…" : (info ? fmtSize(info.size) : "—"), pending };
-      if (isDir) {
-        // 续119：选中文件夹时面板给的全是「容器外面」的信息。把条目数提到主角级。
-        // entriesCapped 时显示「10000+」——把截断值当确定值输出就是撒谎。
-        stats.push({
-          label: t("项目数"),
-          value: pending ? "…"
-            : (info?.entries != null ? `${info.entries}${info.entriesCapped ? "+" : ""}` : "—"),
-          pending,
-        });
-        stats.push(modStat);
-      } else if (isImg) {
-        // 图片更在意「1920 × 1080」而非「340 KB」。槽位固定 2 个，故把 修改 降级到下面的 rows。
-        stats.push({
-          label: t("尺寸"),
-          value: pending ? "…" : (info?.width && info?.height ? `${info.width} × ${info.height}` : "—"),
-          pending,
-        });
-        stats.push(sizeStat);
-        rows.push({ label: modStat.label, value: modStat.value, title: modStat.title, pending });
-      } else {
-        stats.push(sizeStat);
-        stats.push(modStat);
-      }
-      lnkRow(path);
-    };
-    // .lnk 的解析目标（续119）。**行的有无必须由 path 的扩展名（同步已知）决定**——
-    // 若写成「target 返回了才加行」，meta 到达时面板就会长高抖动（见上面的不变量）。
-    // 解析不出来（MSI 广告式快捷方式等）时显示「—」。
-    const lnkRow = (path: string) => {
-      if (!path.toLowerCase().endsWith(".lnk")) return;
-      rows.push({
-        label: t("目标"),
-        value: !meta ? "…" : (info?.target || "—"),
-        rtl: true, // 长路径省略头部、保留尾部（可执行文件名那一侧）
-        pending: !meta,
-        title: info?.target || undefined,
-      });
-    };
-
-    // photo=true 表示 big 应「铺满」（照片缩略图）；false 表示应「居中留白」（图标）。
-    // 混为一谈会把应用图标按 cover 裁掉边缘。
-    //
-    // ⚠️ **photo 必须由同步已知的信息（扩展名 / 条目类型）决定，不能看 meta 的内容**（续127）。
-    // 这就是续115/119 给文字行立的那条不变量，当初漏了图标这一处：
-    // 原先写的是 `photo = !!meta?.thumb`，于是图片文件在 meta 到达前是图标态（72×72 contain）、
-    // 130ms 后缩略图到达翻成照片态（88×88 cover）——**几何尺寸在选中后跳一次**，
-    // 来回移动选中项就是持续抖动（用户报「信息卡片抖动太厉害」）。
-    // 现在几何从第一帧就定死，meta 到达只换 src（低清→高清），不再改盒子。
-    // 注：图标本身是正方形，正方形源在正方形框里 cover 不裁掉任何东西，
-    // 故「是图片但缩略图生成失败、回退到图标」时也只是少了内边距，不会变形。
-    const photoExt = (ext?: string | null, isDir?: boolean) =>
-      !isDir && IMG_EXTS.includes((ext ?? "").toLowerCase());
-    let title = "", badge = "", big: string | null = null, low: string | null = null, glyph: FileGlyphArgs | null = null, text: string | null = null, photo = false;
-    // cat = 徽标配色用的分类键。中转 / 剪贴板条目可能没有真实扩展名（如纯文本），
-    // 故不走扩展名而直接定 FileCat，再用 catToGroup 折到色组（复用 format.ts 的映射）。
-    let cat: FileCat = "generic";
-    if (r.kind === "app") {
-      title = r.app.name; badge = t("应用程序"); glyph = { cat: "exe" }; cat = "exe";
-      big = meta?.icon ?? r.app.icon ?? null; low = r.app.icon ?? null;
-      // 应用只给位置：大小是可执行文件的体积、意义不大，修改时间基本等于安装日期。
-      // 两者对「这是我要的那个吗」都不起作用，故不显示（续116）。
-      loc = dirOf(r.app.path);
-      lnkRow(r.app.path); // 续119：开始菜单的 .lnk，「位置」只会显示菜单所在文件夹，看不出实体在哪
-    } else if (r.kind === "fs") {
-      title = r.name; badge = r.isDir ? t("文件夹") : t("文件");
-      cat = r.isDir ? "folder" : fileCategory(r.ext ?? "");
-      glyph = r.isDir ? { isDir: true } : { ext: r.ext };
-      // 共享表命中时**第一帧就是高清**——同扩展名的第二个文件起，连那次淡入都不会发生（续131e）。
-      // 与上面读 previewCacheRef 同理：渲染期只读、不改，保持纯净。
-      const sharedIcon = r.iconKey ? (largeIconRef.current.get(r.iconKey) ?? null) : null;
-      big = meta?.thumb ?? meta?.icon ?? sharedIcon ?? r.icon ?? null; low = r.icon ?? null; photo = photoExt(r.ext, r.isDir);
-      fileFacts(r.path, r.isDir, r.ext);
-    } else if (r.kind === "stage") {
-      const it = r.item, p = it.items?.[0]?.path;
-      // 徽标并列「出处 · 种别」（续116）：种别的信息量不足以独占一行，
-      // 但在中转 / 剪贴板里光有出处又看不出是什么条目。折进一个徽标，省下一行。
-      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("中转站")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("中转站")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = (p && stageThumbs[p]) || meta?.thumb || it.content || null; low = (p && stageThumbs[p]) || it.content || null; photo = true; }
-      else { title = r.name; badge = t("中转站"); cat = it.isDir ? "folder" : fileCategory(it.ext ?? ""); glyph = it.isDir ? { isDir: true } : { ext: it.ext ?? "" }; big = (p && stageThumbs[p]) || meta?.thumb || meta?.icon || null; low = (p && stageThumbs[p]) || null; photo = photoExt(it.ext, it.isDir); if (p) fileFacts(p, it.isDir, it.ext); }
-      if (it.pinned) push(t("状态"), t("已固定"));
-    } else { // clip
-      const it = r.item, p = it.items?.[0]?.path;
-      if (it.type === "text") { title = (it.content || "").trim().slice(0, 60) || t("文本"); badge = `${t("剪贴板")} · ${t("文本")}`; cat = "text"; glyph = { cat: "doc" }; text = it.content ?? null; stats.push({ label: t("字数"), value: String((it.content || "").length) }); }
-      else if (it.type === "image") { title = t("图片"); badge = `${t("剪贴板")} · ${t("图片")}`; cat = "image"; glyph = { isImage: true }; big = clipThumbs[it.time] ?? null; photo = true; } /* 步骤2：clip 图 content 已剥离，预览用缩略图 */
-      else { title = r.name; badge = t("剪贴板"); cat = fileCategory(it.items?.[0]?.ext ?? ""); glyph = { ext: it.items?.[0]?.ext ?? "" }; big = meta?.thumb ?? meta?.icon ?? null; photo = photoExt(it.items?.[0]?.ext); if (p) fileFacts(p, false, it.items?.[0]?.ext); if ((it.count ?? 1) > 1) push(t("数量"), t("{n} 个文件", { n: it.count ?? 0 })); }
-      // 剪贴板条目唯一有用的元信息。相对表述 + 绝对值 hover 查看（ClipItem.time 是毫秒 → 直接用 ago）
-      push(t("复制时间"), ago(it.time, t), false, fmtDateTime(Math.floor(it.time / 1000)));
-    }
-    // 渲染用的两层（续131d）：low 恒是**同步已知**的那张，第一帧就在场——这样高清到达时
-    // 它才有「从可见淡出」的前值可插值；若与高清同帧挂载，它带着 is-hidden 出生，过渡根本不会发生。
-    // hi 只在**确实比 low 更好**时才有值（两者相同则为 null，免得同一张图白叠两层）。
-    const hi = big && big !== low ? big : null;
-    // 卡片骨架始终保留“位置/来源”槽位：无真实路径的文本/图片条目显示来源，
-    // 不让不同来源切换时把下面的内容整体顶上去。
-    const locText = loc ?? (r.kind === "clip" ? t("剪贴板历史") : r.kind === "stage" ? t("中转站") : badge);
-    return { r, key, title, badge, cat, group: catToGroup(cat), low, hi, photo, glyph, text, loc, locText, stats, rows, path: enhPath(r) };
-  }, [enhResults, enhSelIdx, previewMeta, stageThumbs, clipThumbs, t]);
-
+  // Async metadata, image caches and the synchronous preview view model share one feature controller.
+  const enhPreview = useEnhancedSearchPreview({
+    open: enhOpen,
+    results: enhResults,
+    selectedIndex: enhSelIdx,
+    stageThumbnails: stageThumbs,
+    clipboardThumbnails: clipThumbs,
+    t,
+  });
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
     const q = pickerQuery.trim();
@@ -2919,9 +2610,6 @@ export default function App() {
     setEnhQuery(query);
     setEnhSelIdx(0);
   }, []);
-  const trackEnhResultsPointer = useCallback<React.MouseEventHandler<HTMLDivElement>>(event => {
-    hoverPosRef.current = { x: event.clientX, y: event.clientY };
-  }, []);
   const addEnhancedPreviewToLauncher = useCallback(async (preview: EnhancedSearchPreview) => {
     const r = preview.r;
     const result = r.kind === "app" ? addAppToLauncher(r.app)
@@ -3025,9 +2713,13 @@ export default function App() {
   }, []);
 
   const changePageSearch = useCallback((value: string) => {
-    if ((searchDefaultModeRef.current === "enhanced" && !pageSearchForcedRef.current) || enhPinnedRef.current) {
-      // enhanced 模式自动打开 / 或 enh 已以 pinned 方式打开（page 模式手动呼出时）：顶栏输入同步到 enhQuery
-      setSearch(value);
+    const target = resolveHeaderSearchTarget({
+      defaultMode: searchDefaultModeRef.current,
+      pageSearchForced: pageSearchForcedRef.current,
+      enhancedPinned: enhPinnedRef.current,
+    });
+    if (target === "enhanced") {
+      // 顶栏虽由两种搜索共用，但两套 query 独立；增强模式输入不能污染底层页面筛选。
       setEnhQuery(value);
       setEnhSelIdx(0);
       if (value && !enhOpenRef.current) {
@@ -3077,7 +2769,6 @@ export default function App() {
             setEnhOpen(false);
             setEnhPinned(false);
             setEnhQuery("");
-            setSearch("");
             if (searchDefaultModeRef.current === "enhanced") pageSearchForcedRef.current = true;
             searchRef.current?.focus();
             return;
@@ -3126,7 +2817,21 @@ export default function App() {
         }
         return;
       }
-      if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
+      if(matchComboEvent(e, enhHotkey)){
+        e.preventDefault();
+        const plan = resolveSearchModeToggle({
+          enhancedOpen: enhOpen,
+          pageQuery: search,
+          defaultMode: searchDefaultModeRef.current,
+        });
+        setEnhOpen(plan.enhancedOpen);
+        setEnhPinned(plan.enhancedPinned);
+        setEnhQuery(plan.enhancedQuery);
+        pageSearchForcedRef.current = plan.pageSearchForced;
+        if(plan.enhancedOpen)setEnhSelIdx(0);
+        searchRef.current?.focus();
+        return;
+      }
       // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
       if(e.key==="Tab"){e.preventDefault();return;}
       if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
@@ -3162,12 +2867,18 @@ export default function App() {
     return ()=>window.removeEventListener("keydown",onKey,true);
   }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSectionStarts, enhSelIdx, activateEnh, enhHotkey, filteredLauncher, launcherSelIdx, openLauncherItem]);
 
+  const headerSearchTarget = resolveHeaderSearchTarget({
+    defaultMode: searchDefaultMode,
+    pageSearchForced: pageSearchForcedRef.current,
+    enhancedPinned: enhPinned,
+  });
+
   return (
    <>
     <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
-        <WorkbenchSearchHeader search={search} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>
+        <WorkbenchSearchHeader search={headerSearchTarget === "enhanced" ? enhQuery : search} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>
         <div className="top-right">
           <Clock lang={lang}/>
           <button className="settings-btn" onClick={()=>setSettingsOpen(true)} title={t("设置")} aria-label={t("设置")}>
