@@ -14,6 +14,7 @@ import {
   type FileCat,
   type FileGlyphArgs,
 } from "../lib/format";
+import { perf } from "../lib/perfTrace";
 import { searchPreviewApi } from "../platform/searchPreviewApi";
 import type { EnhResult, FileEntry } from "../types";
 
@@ -89,6 +90,7 @@ export function useEnhancedSearchPreview({
         const isImage = IMG_EXTS.includes((path.split(".").pop() ?? "").toLowerCase());
         const iconKey = result.kind === "fs" ? (result.iconKey ?? "") : "";
         const sharedIcon = iconKey ? largeIconRef.current.get(iconKey) : undefined;
+        const tIpc = performance.now();
         const [info, icon, thumbnail] = await Promise.all([
           searchPreviewApi.getFileInfo(path).catch(() => null),
           sharedIcon !== undefined
@@ -96,6 +98,7 @@ export function useEnhancedSearchPreview({
             : searchPreviewApi.getLargeIcon(path).catch(() => null),
           isImage ? searchPreviewApi.getThumbnail(path).catch(() => null) : Promise.resolve(null),
         ]);
+        perf.record("preview-ipc", performance.now() - tIpc);
 
         if (iconKey && sharedIcon === undefined) {
           largeIconRef.current.set(iconKey, icon ?? null);
@@ -114,7 +117,9 @@ export function useEnhancedSearchPreview({
           previewCacheRef.current.delete(oldest);
         }
 
+        const tDecode = performance.now();
         await Promise.all([preloadImage(entry.icon), preloadImage(entry.thumb)]);
+        perf.record("preview-decode", performance.now() - tDecode);
         if (previewKeyRef.current === key) setPreviewMeta({ key, ...entry });
       } catch {
         // Partial preview failure must not affect search results or activation.

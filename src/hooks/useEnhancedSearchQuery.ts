@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { perf } from "../lib/perfTrace";
 import { searchApi } from "../platform/searchApi";
 import type { BuiltinSearchHit } from "../types";
 
@@ -54,15 +55,21 @@ export function useEnhancedSearchQuery({
     const timer = setTimeout(async () => {
       try {
         if (useEverything) {
+          const t0 = performance.now();
           const response = await searchApi.searchEverything(normalizedQuery, limit);
+          perf.record("ipc:everything", performance.now() - t0);
           if (token !== requestRef.current) return;
           setBuiltinHits([]);
           setFileResults(response.results.map(result => ({ ...result, icon: response.icons[result.iconKey] ?? null })));
+          perf.mark("results"); // 响应落状态 → 高亮 effect 里的 results→paint 段以此为 t0
         } else {
+          const t0 = performance.now();
           const response = await searchApi.searchBuiltin(normalizedQuery, limit);
+          perf.record("ipc:builtin", performance.now() - t0);
           if (token !== requestRef.current) return;
           setFileResults([]);
           setBuiltinHits(response.results.map(hit => hit.kind === "fs" ? { ...hit, icon: response.icons[hit.iconKey] ?? null } : hit));
+          perf.mark("results");
         }
       } catch {
         if (token !== requestRef.current) return;
