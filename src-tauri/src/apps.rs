@@ -518,6 +518,8 @@ pub fn extract_icon_base64(path: &str) -> Option<String> {
 /// 与 `extract_icon_base64` **并存而非替换**：列表里几十个 32px 图标够用且省得多，
 /// 只有预览这一处需要大图。
 pub fn extract_large_icon_base64(path: &str) -> Option<String> {
+    let perf = crate::perf::perf_on();
+    let t_shell = std::time::Instant::now();
     let wide = str_to_wide(path);
     unsafe {
         let mut shfi: SHFILEINFOW = std::mem::zeroed();
@@ -533,8 +535,17 @@ pub fn extract_large_icon_base64(path: &str) -> Option<String> {
 
         let hicon = ImageList_GetIcon(himl, shfi.iIcon, ILD_NORMAL);
         if hicon == 0 { return None; }
+        let d_shell = t_shell.elapsed();
+        let t_png = std::time::Instant::now();
         let result = hicon_to_png(hicon, Some(PREVIEW_ICON_MAX));
         DestroyIcon(hicon); // 系统列表本身不释放（进程级共享），只销毁取出的副本
+        if perf {
+            eprintln!(
+                "[perf] large-icon shell={d_shell:?} png={:?} ok={}",
+                t_png.elapsed(),
+                result.is_some(),
+            );
+        }
         result
     }
 }
@@ -542,9 +553,14 @@ pub fn extract_large_icon_base64(path: &str) -> Option<String> {
 /// 预览面板取大图标（COM 仅在本次调用线程临时初始化，同 get_file_info）。
 #[tauri::command]
 pub fn get_large_icon(path: String) -> Option<String> {
+    let perf = crate::perf::perf_on();
+    let t_total = std::time::Instant::now();
     let com_hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED) };
     let icon = extract_large_icon_base64(&path);
     if com_hr == 0 { unsafe { CoUninitialize(); } }
+    if perf {
+        eprintln!("[perf] get_large_icon total={:?} hit={}", t_total.elapsed(), icon.is_some());
+    }
     icon
 }
 

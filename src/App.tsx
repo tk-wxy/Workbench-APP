@@ -24,6 +24,7 @@ import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
 import { useEnhancedSearchPreview } from "./hooks/useEnhancedSearchPreview";
 import { useEnhancedSearchSelection } from "./hooks/useEnhancedSearchSelection";
 import { useEnhancedSearchResults } from "./hooks/useEnhancedSearchResults";
+import { perf } from "./lib/perfTrace";
 import { cacheApi } from "./platform/cacheApi";
 import { clipboardApi } from "./platform/clipboardApi";
 import { subscribeNativeEvents } from "./platform/nativeEvents";
@@ -2508,6 +2509,7 @@ export default function App() {
   }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, toastAddResult, showToast, t]);
 
   const changeEnhQuery = useCallback((query: string) => {
+    perf.mark("input"); // 性能专项 t0：input→echo / input→paint 两段以此为起点
     setEnhQuery(query);
     setEnhSelIdx(0);
   }, []);
@@ -2537,7 +2539,9 @@ export default function App() {
   //
   // 其余依赖（enhAdded / 各 handler）变化时整批重建是可以接受的：那都是用户主动操作
   // 且低频，而 ↑↓ 是按住方向键时每秒几十次的高频路径。
-  const enhRows = useMemo(() => enhResults.map((r,i)=>{
+  const enhRows = useMemo(() => perf.time("row-build", () => {
+    perf.record("rows", enhResults.length);
+    return enhResults.map((r,i)=>{
             // ⚠️ key 必须带上行号（续131c）。`enhKey` 对文件结果是 `"fs:"+path`，
             // 只要结果里出现两条同路径（续131c 之前索引嵌套根就会造出来），
             // 同一列表里就有重复 key → React reconciliation 错乱：旧行残留在顶部、
@@ -2580,7 +2584,8 @@ export default function App() {
                 </div>
               </Fragment>
             );
-          }), [enhResults, enhHeadAt, enhAdded, lang, t, onEnhRowEnter, cancelHoverSelect, openEnhCtxMenu, activateEnh, addFsToStage, addFsToLauncher, addAppToLauncher, toastAddResult]);
+          });
+  }), [enhResults, enhHeadAt, enhAdded, lang, t, onEnhRowEnter, cancelHoverSelect, openEnhCtxMenu, activateEnh, addFsToStage, addFsToLauncher, addAppToLauncher, toastAddResult]);
 
   // 选中高亮 + 滚入视野。**高亮命令式加 class，不进 React**（续127，说明见 onEnhRowEnter 附近）。
   //
@@ -2597,7 +2602,27 @@ export default function App() {
     const cur = box.querySelector<HTMLElement>(`.enh-result[data-idx="${enhSelIdx}"]`);
     cur?.classList.add("selected");
     cur?.scrollIntoView({ block: "nearest" });
+    // 性能专项：本 effect 在提交后跑，rAF 回调即绘制后——每个 mark 实例每段只记一次（perfTrace 内去重），
+    // 方向键导航导致的重跑不会污染「输入→绘制」。
+    requestAnimationFrame(() => {
+      perf.since("input", "input→paint");
+      perf.since("results", "results→paint");
+    });
   }, [enhSelIdx, enhOpen, enhRows]);
+
+  // 性能专项：输入回显段（enhQuery 提交 + 绘制后的第一帧）。
+  useEffect(() => {
+    if (!enhOpen) return;
+    const frame = requestAnimationFrame(() => perf.since("input", "input→echo"));
+    return () => cancelAnimationFrame(frame);
+  }, [enhQuery, enhOpen]);
+
+  // 性能专项：层开/关各采一次 JS heap；关闭时把本轮汇总经 perf_report 落到 Rust stderr（与 [perf] 分段同流）。
+  useEffect(() => {
+    if (!perf.on) return;
+    if (enhOpen) perf.heap("open");
+    else { perf.heap("close"); perf.dump(); }
+  }, [enhOpen]);
 
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
@@ -2621,6 +2646,7 @@ export default function App() {
     });
     if (target === "enhanced") {
       // 顶栏虽由两种搜索共用，但两套 query 独立；增强模式输入不能污染底层页面筛选。
+      perf.mark("input");
       setEnhQuery(value);
       setEnhSelIdx(0);
       if (value && !enhOpenRef.current) {

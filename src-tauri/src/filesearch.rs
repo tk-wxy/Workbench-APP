@@ -1417,6 +1417,8 @@ pub struct UnifiedSearchResponse {
 /// 内置引擎统一查询：动态来源与文件索引共用一套 SearchScore，并保持严格全局顺序。
 #[tauri::command]
 pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse {
+    let perf = crate::perf::perf_on();
+    let t_total = std::time::Instant::now();
     let limit = limit.min(QUERY_LIMIT_CAP);
     let search = SearchQuery::new(&query);
     if limit == 0 || search.is_empty() {
@@ -1425,6 +1427,7 @@ pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse 
             icons: HashMap::new(),
         };
     }
+    let t_snap = std::time::Instant::now();
     let files = FILE_INDEX
         .get()
         .and_then(|lock| lock.lock().ok())
@@ -1437,10 +1440,15 @@ pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse 
         .unwrap_or_else(|| Arc::from(Vec::<DynamicEntry>::new()));
     let now = now_unix();
     let usage = FILE_USAGE.get().and_then(|lock| lock.lock().ok());
+    let d_snap = t_snap.elapsed();
     // 两边先带回部分候选，等合并后再按全局完整结果数决定是否需要补位。
+    let t_rank = std::time::Instant::now();
     let file_hits = rank_index_impl(&search, &files, usage.as_deref(), now, limit, true);
+    let d_frank = t_rank.elapsed();
     let dynamic_hits = rank_dynamic_impl(&search, &dynamic, limit, true);
+    let d_drank = t_rank.elapsed() - d_frank;
 
+    let t_sort = std::time::Instant::now();
     let mut combined = Vec::with_capacity(file_hits.len() + dynamic_hits.len());
     combined.extend(file_hits.into_iter().map(|hit| CombinedHit {
         relevance: hit.relevance,
@@ -1455,7 +1463,9 @@ pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse 
     apply_combined_partial_fallback(&mut combined, limit);
     combined.sort_unstable_by(|a, b| compare_combined_hits(a, b, &files, &dynamic));
     combined.truncate(limit);
+    let d_sort = t_sort.elapsed();
 
+    let t_proj = std::time::Instant::now();
     let mut results = Vec::with_capacity(combined.len());
     for hit in combined {
         match hit.source {
@@ -1481,6 +1491,9 @@ pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse 
         }
     }
 
+    let d_proj = t_proj.elapsed();
+
+    let t_icons = std::time::Instant::now();
     let mut icons = HashMap::new();
     if let Some(cache) = ICON_CACHE.get().and_then(|lock| lock.lock().ok()) {
         for result in &results {
@@ -1493,6 +1506,14 @@ pub fn search_builtin_all(query: String, limit: usize) -> UnifiedSearchResponse 
                     .or_insert_with(|| icon.clone());
             }
         }
+    }
+    if perf {
+        eprintln!(
+            "[perf] builtin q={query:?} snap={d_snap:?} frank={d_frank:?} drank={d_drank:?} sort={d_sort:?} proj={d_proj:?} icons={:?} total={:?} hits={}",
+            t_icons.elapsed(),
+            t_total.elapsed(),
+            results.len(),
+        );
     }
     UnifiedSearchResponse { results, icons }
 }
@@ -1705,6 +1726,8 @@ const EVERYTHING_CANDIDATE_POOL: usize = 5000;
 /// Everything 不可用时静默降级回内置（保证永远有结果）。
 #[tauri::command]
 pub fn search_files(query: String, limit: usize) -> SearchResponse {
+    let perf = crate::perf::perf_on();
+    let t_total = std::time::Instant::now();
     let want = limit.min(QUERY_LIMIT_CAP);
     let results = if SEARCH_ENGINE.load(Ordering::Relaxed) == ENGINE_EVERYTHING {
         // 续120：**广取 → 评估 → 收窄再返回**。
@@ -1712,25 +1735,62 @@ pub fn search_files(query: String, limit: usize) -> SearchResponse {
         // ——「先截断再评估」的只有 Everything 这条路。
         // 续121：噪声排除放在 **Everything 侧的查询语句**里做（收到结果再扔的话，
         // 池子会被噪声占满、实际候选数归零。见 everything_query_with_exclusions）
+        let t_query = std::time::Instant::now();
         match crate::everything::query(
             &everything_query_with_exclusions(&query),
             EVERYTHING_CANDIDATE_POOL,
         ) {
             // 续117：用与内置相同的尺子重排后再返回（说明见 rerank_everything）
             Ok(r) => {
+                let d_query = t_query.elapsed();
+                let t_rerank = std::time::Instant::now();
                 let mut ranked = rerank_everything(r, &query);
                 ranked.truncate(want); // ← 在填图标之前截断（下面的 fill 只需处理要返回的那些）
+                if perf {
+                    eprintln!(
+                        "[perf] everything q={query:?} query={d_query:?} rerank={:?} hits={}",
+                        t_rerank.elapsed(),
+                        ranked.len(),
+                    );
+                }
                 ranked
             }
             Err(e) => {
                 eprintln!("[everything] 查询失败，降级内置: {e}");
-                builtin_search(&query, want)
+                let t_fallback = std::time::Instant::now();
+                let ranked = builtin_search(&query, want);
+                if perf {
+                    eprintln!(
+                        "[perf] builtin-fallback q={query:?} rank={:?} hits={}",
+                        t_fallback.elapsed(),
+                        ranked.len(),
+                    );
+                }
+                ranked
             }
         }
     } else {
-        builtin_search(&query, want)
+        let t_rank = std::time::Instant::now();
+        let ranked = builtin_search(&query, want);
+        if perf {
+            eprintln!(
+                "[perf] builtin-files q={query:?} rank={:?} hits={}",
+                t_rank.elapsed(),
+                ranked.len(),
+            );
+        }
+        ranked
     };
-    attach_icons(results)
+    let t_icons = std::time::Instant::now();
+    let response = attach_icons(results);
+    if perf {
+        eprintln!(
+            "[perf] search_files q={query:?} icons={:?} total={:?}",
+            t_icons.elapsed(),
+            t_total.elapsed(),
+        );
+    }
+    response
 }
 
 /// 索引 / 引擎状态查询（前端显示「建立中…」「Everything 未运行」用）。
