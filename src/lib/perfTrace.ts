@@ -122,9 +122,9 @@ export function createPerfTracer({ on, now, heapBytes, report, capacity = 500 }:
   };
 }
 
-/** 全局单例：真实环境下由 wb.perf 门控；测试用 createPerfTracer 注入假时钟。 */
+/** 全局单例：普通构建常量为 false；测量构建由 WORKBENCH_PERF=1 编译成 true。 */
 export const perf = createPerfTracer({
-  on: typeof localStorage !== "undefined" && localStorage.getItem("wb.perf") === "1",
+  on: __WORKBENCH_PERF__,
   now: () => performance.now(),
   heapBytes: () => (performance as unknown as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize ?? null,
   report: (lines) => {
@@ -134,16 +134,6 @@ export const perf = createPerfTracer({
   },
 });
 
-function exposeGlobal() {
-  if (typeof window !== "undefined") (window as unknown as { __wbPerf: PerfTracer }).__wbPerf = perf;
-}
-
-if (perf.on) {
-  exposeGlobal();
-} else {
-  // release 构建无 devtools、设不了 localStorage：WORKBENCH_PERF=1 经 Rust 侧同时翻开前端分段。
-  import("@tauri-apps/api/core")
-    .then(({ invoke }) => invoke<boolean>("perf_env_on"))
-    .then((envOn) => { if (envOn) { perf.setOn(true); exposeGlobal(); } })
-    .catch(() => {});
+if (__WORKBENCH_PERF__ && typeof window !== "undefined") {
+  (window as unknown as { __wbPerf: PerfTracer }).__wbPerf = perf;
 }

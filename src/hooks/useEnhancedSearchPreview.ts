@@ -61,6 +61,10 @@ export function useEnhancedSearchPreview({
   // Rust owns icon identity: directories share one key, ordinary files share by extension, exe/lnk by path.
   const largeIconRef = useRef(new Map<string, string | null>());
 
+  const selectedResult = results[selectedIndex] ?? results[0];
+  const selectedKey = selectedResult ? enhancedResultKey(selectedResult) : "";
+  const selectedPath = selectedResult ? enhancedResultPath(selectedResult) : "";
+
   useEffect(() => {
     if (!open) {
       setPreviewMeta(null);
@@ -70,9 +74,9 @@ export function useEnhancedSearchPreview({
       return;
     }
 
-    const result = results[selectedIndex] ?? results[0];
-    const key = result ? enhancedResultKey(result) : "";
-    const path = result ? enhancedResultPath(result) : "";
+    const result = selectedResult;
+    const key = selectedKey;
+    const path = selectedPath;
     previewKeyRef.current = key;
     if (!result || !path) { setPreviewMeta(null); return; }
 
@@ -127,9 +131,10 @@ export function useEnhancedSearchPreview({
     }, PREVIEW_DEBOUNCE_MS);
 
     return () => clearTimeout(timer);
-  }, [open, selectedIndex, results]);
+  }, [open, selectedKey, selectedPath]);
 
   return useMemo<EnhancedSearchPreview | null>(() => {
+    if (!open) return null;
     const result = results[selectedIndex] ?? results[0];
     if (!result) return null;
     const key = enhancedResultKey(result);

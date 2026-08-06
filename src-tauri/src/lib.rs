@@ -861,7 +861,7 @@ pub fn run() {
             filesearch::search_files, filesearch::search_builtin_all, filesearch::get_index_status,
             filesearch::set_search_engine, filesearch::set_search_dirs, filesearch::set_search_items,
             pinyin_util::to_pinyin_batch,
-            perf::perf_report, perf::perf_env_on,
+            perf::perf_report,
             everything::reload_everything,
             dragout::start_drag_out,
             dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,

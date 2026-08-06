@@ -13,6 +13,7 @@ await build({
   format: "esm",
   platform: "node",
   external: ["@tauri-apps/api/core"],
+  define: { __WORKBENCH_PERF__: "false" },
   outfile,
   logLevel: "error",
 });
