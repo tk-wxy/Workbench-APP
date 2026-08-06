@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const dir = mkdtempSync(join(tmpdir(), "component-contracts-"));
+const dir = mkdtempSync(join(root, "node_modules", ".component-contracts-"));
 const outfile = join(dir, "bundle.mjs");
 await build({
   stdin: {
@@ -26,6 +26,7 @@ await build({
     loader: "ts",
   },
   bundle: true,
+  external: ["react", "react-dom/server"],
   format: "esm",
   platform: "node",
   outfile,
@@ -112,7 +113,7 @@ const enhancedHtml = renderToStaticMarkup(createElement(EnhancedSearchLayer, {
   onQueryChange: noop,
   onResultsMouseMove: noop,
 }));
-check("增强搜索关闭时仍保持 enh-layer 挂载", enhancedHtml.includes('class="enh-layer"') && enhancedHtml.includes("输入以搜索"), enhancedHtml);
+check("增强搜索关闭时保持轻量 enh-layer shell", enhancedHtml.includes('class="enh-layer"') && enhancedHtml.includes('class="enh-search-input"') && !enhancedHtml.includes('class="enh-result"'), enhancedHtml);
 
 const headerHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
   search: "query",
