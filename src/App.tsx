@@ -2613,7 +2613,10 @@ export default function App() {
   // 性能专项：输入回显段（enhQuery 提交 + 绘制后的第一帧）。
   useEffect(() => {
     if (!enhOpen) return;
-    const frame = requestAnimationFrame(() => perf.since("input", "input→echo"));
+    const frame = requestAnimationFrame(() => {
+      perf.since("open", "open→first-paint");
+      perf.since("input", "input→echo");
+    });
     return () => cancelAnimationFrame(frame);
   }, [enhQuery, enhOpen]);
 
@@ -2751,6 +2754,7 @@ export default function App() {
           pageQuery: search,
           defaultMode: searchDefaultModeRef.current,
         });
+        if (plan.enhancedOpen) perf.mark("open");
         setEnhOpen(plan.enhancedOpen);
         setEnhPinned(plan.enhancedPinned);
         setEnhQuery(plan.enhancedQuery);
@@ -2931,22 +2935,22 @@ export default function App() {
           drag={clipboardPanelDrag}
         />
       </main>
-      {/* ── 增强搜索层（始终挂载，靠 class 切换显隐，沿用 overlay-visible/hidden 模式避免卸载闪烁）── */}
+      {/* ── 增强搜索层：轻量 shell 常驻以保留呼出动画；结果 DOM / preview 仅在打开时挂载 ── */}
       <EnhancedSearchLayer
         open={enhOpen}
         pinned={enhPinned}
         query={enhQuery}
         inputRef={enhInputRef}
         resultsRef={enhResultsRef}
-        rows={enhRows}
-        resultCount={enhResults.length}
-        sectionCount={enhSections.length}
+        rows={enhOpen ? enhRows : null}
+        resultCount={enhOpen ? enhResults.length : 0}
+        sectionCount={enhOpen ? enhSections.length : 0}
         searchDefaultMode={searchDefaultMode}
         enhancedHotkeyLabel={comboLabel(enhHotkey)}
         searchEngine={searchEngine}
         everythingAvailable={everythingAvailable}
         indexReady={indexReady}
-        preview={enhPreview}
+        preview={enhOpen ? enhPreview : null}
         t={t}
         actions={enhancedSearchActions}
         onQueryChange={changeEnhQuery}

@@ -14,6 +14,8 @@ export default defineConfig({
   // 单一版本号来源：package.json（tauri.conf.json / Cargo.toml 仍需手动同步）
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
+    // 测量包构建时显式打开；普通 dev/release 编译成 false，前端启动不做任何探测 IPC。
+    __WORKBENCH_PERF__: JSON.stringify(process.env.WORKBENCH_PERF === "1"),
   },
 
   // 阻止 Vite 在编辑器中打开浏览器（使用 Tauri 窗口）

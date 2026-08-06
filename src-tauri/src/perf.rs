@@ -13,17 +13,10 @@ pub fn perf_on() -> bool {
     *ON.get_or_init(|| std::env::var("WORKBENCH_PERF").is_ok_and(|v| v == "1"))
 }
 
-/// 前端 perfTrace 的汇总行原样落 stderr（前端不打 wb.perf 就不会有调用，故这里不再二次门控）。
+/// 前端 perfTrace 的汇总行原样落 stderr（普通包前端桩在构建时已裁成关闭，不会调用）。
 #[tauri::command]
 pub fn perf_report(lines: Vec<String>) {
     for line in lines {
         eprintln!("[perf-fe] {line}");
     }
-}
-
-/// 前端门控的环境开关来源：release 构建无 devtools、设不了 localStorage，
-/// 所以 `WORKBENCH_PERF=1` 必须同时能打开前端分段（启动时由 perfTrace 查询一次）。
-#[tauri::command]
-pub fn perf_env_on() -> bool {
-    perf_on()
 }

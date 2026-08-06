@@ -105,10 +105,10 @@ export default function EnhancedSearchLayer({
         ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div>
         : !indexReady && hasQuery ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null}
       <div className="enh-body">
-        <div className="enh-results" ref={resultsRef} onMouseMove={onResultsMouseMove}>
+          <div className="enh-results" ref={resultsRef} onMouseMove={onResultsMouseMove}>
           {resultCount ? rows : <p className="empty-hint">{hasQuery ? t("无匹配") : t("输入以搜索")}</p>}
         </div>
-        {preview && (
+        {open && preview && (
           <aside className="enh-preview" data-kind={preview.r.kind}>
             <div className="enh-pv-head">
               <div className={`enh-pv-icon${preview.photo ? " enh-pv-icon-img" : ""}`}>
