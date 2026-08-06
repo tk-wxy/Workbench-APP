@@ -1,4 +1,4 @@
-import { Fragment, type MouseEventHandler, type ReactNode, type RefObject } from "react";
+import { Fragment, startTransition, useEffect, useState, type MouseEventHandler, type ReactNode, type RefObject } from "react";
 import { FileGlyph, IconExplorer, IconSearch } from "../icons";
 import type { FileGlyphArgs, FileGroup } from "../lib/format";
 import type { EnhResult } from "../types";
@@ -82,6 +82,14 @@ export default function EnhancedSearchLayer({
   onResultsMouseMove,
 }: EnhancedSearchLayerProps) {
   const hasQuery = !!query.trim();
+  // overlay 输入框持有即时值：字符回显只更新这棵小子树；App/query/results 的重计算进入 transition。
+  // 父级切换查询（清空、模式切换、hotkey 继承）时再同步回来。
+  const [inputValue, setInputValue] = useState(query);
+  useEffect(() => setInputValue(query), [query]);
+  const handleInputChange = (value: string) => {
+    setInputValue(value);
+    startTransition(() => onQueryChange(value));
+  };
 
   return (
     <div className={`enh-layer${open ? " enh-open" : ""}${pinned ? " enh-pinned" : ""}`}>
@@ -91,8 +99,8 @@ export default function EnhancedSearchLayer({
           ref={inputRef}
           className="enh-search-input"
           placeholder={t("搜索应用、中转、剪贴板…")}
-          value={query}
-          onChange={event => onQueryChange(event.target.value)}
+          value={inputValue}
+          onChange={event => handleInputChange(event.target.value)}
           spellCheck={false}
         />
         <span className="enh-hint">

@@ -1,4 +1,4 @@
-import { memo, useEffect, useState, type RefObject } from "react";
+import { memo, startTransition, useEffect, useState, type RefObject } from "react";
 import type { Lang } from "../i18n";
 import { IconSearch } from "../icons";
 import { comboLabel } from "../lib/hotkey";
@@ -41,6 +41,12 @@ export const WorkbenchSearchHeader = memo(function WorkbenchSearchHeader({
   t,
   onSearchChange,
 }: WorkbenchSearchHeaderProps) {
+  const [inputValue, setInputValue] = useState(search);
+  useEffect(() => setInputValue(search), [search]);
+  const handleChange = (value: string) => {
+    setInputValue(value);
+    startTransition(() => onSearchChange(value));
+  };
   return <>
     <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
     <div className="top-center">
@@ -50,8 +56,8 @@ export const WorkbenchSearchHeader = memo(function WorkbenchSearchHeader({
           ref={searchRef}
           className="search-field"
           placeholder={t("搜索应用、中转、剪贴板…")}
-          value={search}
-          onChange={event => onSearchChange(event.target.value)}
+          value={inputValue}
+          onChange={event => handleChange(event.target.value)}
           spellCheck={false}
         />
       </div>
