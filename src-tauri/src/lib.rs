@@ -1,11 +1,19 @@
+// FFI 结构体逐字镜像 Win32 名（SHFILEINFOW/ICONINFO/BITMAPINFOHEADER/BITMAP/GUID…），
+// 改成驼峰反而对不上 API 文档；acronym 全大写在此是正确的，crate 级放行该 lint。
+#![allow(clippy::upper_case_acronyms)]
+
 mod apps;
 mod dragdrop; // 中转区原生拖入（自注册 IDropTarget）
 mod dragout; // 中转区拖出（DoDragDrop：IDataObject + IDropSource，独立 STA 线程）
 mod filesearch; // 文件系统搜索：后台预建内存索引（独立线程，零前端阻塞）
 mod everything; // 可选 Everything 搜索引擎（libloading 动态加载 SDK DLL）
 mod clipboard; // 剪贴板子系统（历史/粘贴/复制/janitor/监听）
+mod pinyin_util; // 汉字→拼音派生（增强搜索的拼音匹配，续131）
+mod perf; // 性能测量桩（WORKBENCH_PERF=1 门控的分段计时 + 前端汇总落 stderr）
+mod search_rank; // 内置搜索的统一多字段匹配内核（名称 / 缩写 / 拼音 / 路径 / 类型）
 
 use std::os::windows::process::CommandExt;
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 // CREATE_NO_WINDOW：防止 cmd.exe 子进程在开发模式下弹出控制台窗口
@@ -20,6 +28,56 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLock::new();
 /// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
 static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
+/// 最近一次从隐藏态呼出前的前台窗口。粘贴隐藏 overlay 后优先把输入交还给它，避免
+/// `SetForegroundWindow(GetForegroundWindow())` 对当前窗口做恒等调用。
+static FOREGROUND_BEFORE_SHOW: AtomicIsize = AtomicIsize::new(0);
+
+fn choose_paste_target(remembered: isize, current: isize, self_hwnd: isize, remembered_valid: bool) -> isize {
+    if remembered_valid && remembered != 0 && remembered != self_hwnd {
+        remembered
+    } else if current != 0 && current != self_hwnd {
+        current
+    } else {
+        0
+    }
+}
+
+/// 必须在 window.show() 之前调用；只记录真实外部窗口，失败时清零避免复用上轮陈旧 HWND。
+fn remember_foreground_before_show(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let current = unsafe { GetForegroundWindow() }.0 as isize;
+    let self_hwnd = window.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
+    FOREGROUND_BEFORE_SHOW.store(
+        if current != 0 && current != self_hwnd { current } else { 0 },
+        Ordering::SeqCst,
+    );
+}
+
+/// hide + handback 后解析本次粘贴目标。快照失效时退回 OS 当前交还的前台窗口。
+pub(crate) fn paste_target_hwnd(app: &AppHandle, current: isize) -> isize {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let remembered = FOREGROUND_BEFORE_SHOW.load(Ordering::SeqCst);
+    let self_hwnd = app.get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+    let remembered_valid = remembered != 0 && unsafe { IsWindow(HWND(remembered as *mut _)).as_bool() };
+    choose_paste_target(remembered, current, self_hwnd, remembered_valid)
+}
+
+// ── M5-A：常驻线程退出打点 ─────────────────────────────────────────────
+// RAII 守卫：线程以任何路径退出（early return / break / dev 下 panic unwind）都在 stderr 留一行。
+// release 是 panic=abort（不 unwind、进程直接死），故它抓的正是唯一残余形态——「静默提前 return」
+// （如监听器注册失败退化轮询、循环意外 break）。统一前缀 [thread-exit] 便于 grep。
+// 用法：常驻 spawn 闭包首行 `let _guard = crate::ThreadExitGuard("名字");`。
+// ⚠ 一次性任务线程别挂（正常结束会误报）。
+pub(crate) struct ThreadExitGuard(pub &'static str);
+impl Drop for ThreadExitGuard {
+    fn drop(&mut self) {
+        eprintln!("[thread-exit] {} 常驻线程退出（设计为永不返回；退出=该功能静默降级）", self.0);
+    }
+}
 
 /// 托盘菜单项句柄（setup 时 manage 进 app state），供 set_tray_language 运行时切换文案用。
 struct TrayMenuItems {
@@ -60,6 +118,36 @@ const HOTKEY_TAP_MAX_MS: u128 = 250;
 /// 前台窗口轮询间隔（50ms）：light dismiss——窗口可见时若前台切到别的应用则自动隐藏。
 /// GetForegroundWindow 是 µs 级调用，50ms 轮询近乎零成本
 const FOCUS_POLL_MS: u64 = 50;
+/// setup 发生在首屏导航完成前；启动隐藏态延迟重申 Low，才能回收页面加载期新建的缓存。
+const WEBVIEW_STARTUP_LOW_REAPPLY_MS: u64 = 2_000;
+
+/// WebView2 官方内存目标：隐藏时切 Low 回收非关键缓存，显示前恢复 Normal。
+/// 这不是 suspend/unload：React state、事件监听和后台 IPC 均保持不变。
+/// with_webview 会把 COM 调用调度到 WebView UI 线程，因此可安全从热键/焦点后台线程调用。
+pub(crate) fn set_webview_memory_low(window: &tauri::WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core_webview::Interface;
+
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    let label = if low { "low" } else { "normal" };
+    if let Err(error) = window.with_webview(move |webview| {
+        let result = unsafe { webview.controller().CoreWebView2() }
+            .and_then(|core| core.cast::<ICoreWebView2_19>())
+            .and_then(|core| unsafe { core.SetMemoryUsageTargetLevel(level) });
+        if let Err(error) = result {
+            eprintln!("[webview-memory] set {label} failed: {error}");
+        }
+    }) {
+        eprintln!("[webview-memory] dispatch {label} failed: {error}");
+    }
+}
 
 
 // ── 动态全屏 ───────────────────────────────────────────────
@@ -138,8 +226,11 @@ fn tray_toggle(app_handle: &AppHandle) {
     if let Some(window) = app_handle.get_webview_window("main") {
         if window.is_visible().unwrap_or(false) {
             let _ = window.hide();
+            set_webview_memory_low(&window, true);
             let _ = app_handle.emit("hotkey-hide", ());
         } else {
+            remember_foreground_before_show(&window);
+            set_webview_memory_low(&window, false);
             let _ = app_handle.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
             let _ = window.show();
             let win = window.clone();
@@ -157,6 +248,7 @@ fn tray_toggle(app_handle: &AppHandle) {
 fn hide_window(app: AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
+        set_webview_memory_low(&window, true);
         let _ = app.emit("hotkey-hide", ());
     }
 }
@@ -171,6 +263,7 @@ fn trigger_screenshot(app: AppHandle) -> Result<(), String> {
 
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
+        set_webview_memory_low(&window, true);
         let _ = app.emit("hotkey-hide", ());
     }
     std::thread::sleep(std::time::Duration::from_millis(80));
@@ -197,21 +290,212 @@ fn open_file(path: String) -> Result<(), String> {
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("无法打开: {}", e))?;
+    // 续132：文件/文件夹「使用学习」——open_file 是所有打开路径的唯一漏斗，
+    // 在此记录即全覆盖（reveal_in_explorer 不记，那是定位非打开）。内存 bump 同步、落盘异步。
+    filesearch::record_file_open(&path);
     Ok(())
 }
 
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
-    // explorer /select,"<path>" 在资源管理器中选中并高亮该文件
-    let cmd = format!("explorer.exe /select,\"{}\"", path);
-    std::process::Command::new("cmd")
-        .args(["/c", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("无法打开所在目录: {}", e))?;
+    // 在资源管理器中定位并高亮该文件。走 Shell COM API `SHOpenFolderAndSelectItems`，
+    // 不再 spawn `explorer.exe /select` 子进程——后者每次都新建一个 explorer.exe 进程再让它
+    // 转去跟已运行的 shell 通信开窗，进程创建/启动开销即"稍慢"来源；COM API 在本进程内直接
+    // 跟 shell 通信、可复用已开窗口，明显更快。历史坑仍适用：路径先归一化为反斜杠。
+    use windows::core::HSTRING;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems};
+
+    let win_path = path.replace('/', "\\");
+    unsafe {
+        // is_ok() 覆盖 S_OK（首次）与 S_FALSE（已初始化，仍加了引用计数需配平）→ 两者都要 Uninit；
+        // 仅 RPC_E_CHANGED_MODE 等错误码 is_ok()=false（未加引用）→ 不 Uninit，但仍可继续调用。
+        let did_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let pidl = ILCreateFromPathW(&HSTRING::from(win_path.as_str()));
+        if pidl.is_null() {
+            if did_init { CoUninitialize(); }
+            return Err(format!("无法解析路径: {}", win_path));
+        }
+        // apidl=None（cidl=0）+ pidl 指向文件本身 = 打开其父目录并选中该文件（标准用法）。
+        let res = SHOpenFolderAndSelectItems(pidl, None, 0);
+        ILFree(Some(pidl));
+        if did_init { CoUninitialize(); }
+        res.map_err(|e| format!("无法打开所在目录: {}", e))?;
+    }
     Ok(())
 }
 
+// ── 文件夹选择对话框（续111）─────────────────────────────────
+//
+// 让路标志：与 dragout 的 DRAG_IN_PROGRESS / STAGE_REORDER_ACTIVE / CLIP_DRAG_ACTIVE 同类——
+// 对话框一弹出就拿走前台，start_focus_watch 的判定（可见 + armed + 前台非自己非空 → hide）会在
+// 50ms 内把 overlay 隐藏掉，对话框随即变成孤儿。故对话框存续期间 light-dismiss 必须让路。
+//
+// 与续88 的区别：热键此处**直接让路**（既不 toggle 也不 emit 升级）。续88 的纯 JS 重排阶段不能
+// 让路是因为它没有别的退出方式、让路 = 用户被困住；对话框自带 Esc / 取消按钮，用户永远有出路，
+// 而 toggle 一个正挂着模态子窗口的 owner 只会制造混乱。
+static DIALOG_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn dialog_active() -> bool {
+    DIALOG_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// RAII 守卫：保证**任何**退出路径（选中 / 取消 / COM 报错 / panic）都清掉让路标志。
+/// 标志一旦悬置，light-dismiss 与热键永远让路、窗口再也无法自动隐藏——这正是 dragout 里
+/// 「任何没走到 do_drag_on_main 的中止路径都必须清标志」那段注释的教训，用 Drop 从类型上根治。
+struct DialogGuard;
+impl Drop for DialogGuard {
+    fn drop(&mut self) {
+        DIALOG_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
+
+/// 弹系统文件夹选择框，返回所选目录（用户取消 → Ok(None)，非错误）。
+/// 供设置→搜索的「浏览…」用，取代手输路径（手输打错时 scan_dirs 的 p.exists() 会静默跳过，
+/// 用户只会觉得"搜不到"而不知为何；选择器选出的目录必然存在）。
+#[tauri::command]
+fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, true)
+}
+
+/// 弹系统**文件**选择框，返回所选文件（用户取消 → Ok(None)）。
+/// 供启动台「浏览文件…」用——此前把任意文件收藏进启动台只能靠拖入（overlay 全屏覆盖时很别扭）
+/// 或增强搜索命中（索引外的路径搜不到）。与 pick_folder 唯一差别是不加 FOS_PICKFOLDERS。
+#[tauri::command]
+fn pick_file(app: AppHandle) -> Result<Option<String>, String> {
+    pick_path(app, false)
+}
+
+/// 文件 / 文件夹选择框的共用实现（`folders=true` 即加 FOS_PICKFOLDERS 变成文件夹选择器）。
+/// 让路标志、owner、STA 三处约束对两者完全一致，故合并——别为了"文件版更简单"另写一份，
+/// 漏掉其中任何一条都会复现续111 踩过的坑（见下方各段注释）。
+fn pick_path(app: AppHandle, folders: bool) -> Result<Option<String>, String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+    };
+
+    // owner 必不可少：overlay 是 alwaysOnTop 的全屏窗口，无 owner 的对话框会被压在它**下面**——
+    // 用户只看到界面卡住、根本没有对话框（比"界面消失"更糟）。owned window 永远显示在 owner 之上
+    // （即使 owner 是 topmost），且模态期间 owner 自动禁用。
+    // HWND 经 isize 中转：tauri 的 hwnd() 与本 crate 的 windows 版本可能不同，直接传会踩 trait 冲突
+    // （同 start_focus_watch / dragout 的既有做法）。
+    let owner_raw = app
+        .get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .ok_or_else(|| "主窗口 HWND 不可用".to_string())?;
+
+    unsafe {
+        // 本命令跑在 Tauri 命令线程（非主线程——dragout 需 run_on_main_thread 才拿得到主线程即为
+        // 反证），故此处自行 STA 初始化；模态循环也因此不会卡住 tao 事件循环。
+        // 绝不能学 dragout 切主线程跑：DoDragDrop 短暂尚可，文件夹对话框可能开着一分钟。
+        // is_ok() 覆盖 S_OK / S_FALSE 两者都需配平 Uninit（同 reveal_in_explorer）。
+        let did_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+
+        DIALOG_ACTIVE.store(true, Ordering::Relaxed); // 必须先于 Show() 置位
+        let guard = DialogGuard;
+
+        let result = (|| -> Result<Option<String>, String> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+                    .map_err(|e| format!("无法创建选择对话框: {e}"))?;
+            let opts = dialog
+                .GetOptions()
+                .map_err(|e| format!("读对话框选项失败: {e}"))?;
+            // FOS_PICKFOLDERS：把「文件」选择框变成「文件夹」选择框（Vista+ 标准做法）。
+            // 不加即为默认的文件选择框。
+            if folders {
+                dialog
+                    .SetOptions(opts | FOS_PICKFOLDERS)
+                    .map_err(|e| format!("设置对话框选项失败: {e}"))?;
+            }
+            // Show 阻塞至用户确定/取消。取消返回 HRESULT_FROM_WIN32(ERROR_CANCELLED)——
+            // 是正常流程不是错误，故映射为 Ok(None) 而非 Err（前端据此静默返回）。
+            if dialog.Show(HWND(owner_raw as *mut _)).is_err() {
+                return Ok(None);
+            }
+            let item = dialog
+                .GetResult()
+                .map_err(|e| format!("读取选择结果失败: {e}"))?;
+            let pwstr = item
+                .GetDisplayName(SIGDN_FILESYSPATH)
+                .map_err(|e| format!("读取路径失败: {e}"))?;
+            let path = pwstr.to_string().map_err(|e| format!("路径解码失败: {e}"))?;
+            CoTaskMemFree(Some(pwstr.0 as *const _)); // GetDisplayName 的 PWSTR 由调用方释放
+            Ok(Some(path))
+        })();
+
+        drop(guard); // 先清让路标志，再 Uninit / 返回
+        if did_init {
+            CoUninitialize();
+        }
+        result
+    }
+}
+
+// 启动台布局导入 / 导出 ────────────────────────────────────────
+// 布局本体仍只持久化在 app_data_dir（R28）。这两个命令只处理用户主动选择的
+// 外部备份文件：导入是只读，导出目录先由 pick_folder 明确取得，绝不在后台自行落盘。
+const LAUNCHER_LAYOUT_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// 读取用户选定的布局文件。上限在 Rust 侧先卡住，避免前端 JSON.parse 意外吃进超大文件。
+#[tauri::command]
+fn read_launcher_layout_import(path: String) -> Result<String, String> {
+    use std::fs::File;
+    use std::io::{Read, Take};
+
+    let file = File::open(&path).map_err(|e| format!("无法读取导入文件: {e}"))?;
+    let mut reader: Take<File> = file.take(LAUNCHER_LAYOUT_MAX_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取导入文件失败: {e}"))?;
+    if bytes.len() as u64 > LAUNCHER_LAYOUT_MAX_BYTES {
+        return Err("导入文件过大（最多 2 MB）".to_string());
+    }
+    String::from_utf8(bytes).map_err(|_| "导入文件不是 UTF-8 文本".to_string())
+}
+
+/// 在用户选定目录中创建一个不覆盖的布局 JSON。文件名用 Unix 毫秒保证稳定唯一；
+/// 极罕见同毫秒冲突时附加序号并以 create_new 保证绝不覆盖用户既有备份。
+#[tauri::command]
+fn write_launcher_layout_export(dir: String, content: String) -> Result<String, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if content.len() as u64 > LAUNCHER_LAYOUT_MAX_BYTES {
+        return Err("导出内容过大（最多 2 MB）".to_string());
+    }
+    let folder = PathBuf::from(dir);
+    if !folder.is_dir() {
+        return Err("导出目录不可用".to_string());
+    }
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("读取系统时间失败: {e}"))?
+        .as_millis();
+    for attempt in 0..100u16 {
+        let suffix = if attempt == 0 { String::new() } else { format!("-{attempt}") };
+        let path = folder.join(format!("workbench-launcher-{stamp}{suffix}.json"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(content.as_bytes())
+                    .map_err(|e| format!("写入导出文件失败: {e}"))?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("无法创建导出文件: {e}")),
+        }
+    }
+    Err("无法创建不重名的导出文件".to_string())
+}
 
 // ── 入口 ───────────────────────────────────────────────────
 
@@ -357,10 +641,31 @@ fn set_hotkey(combo: String, app: AppHandle) -> Result<(), String> {
 //     不漏给前台应用（IME 切换 / 编辑器补全）；show/hide 完全由本轮询驱动。
 //     show/hide 复刻 §8 路径配方（emit→show→延迟 set_focus / 纯 hide+emit）。
 // ════════════════════════════════════════════════════════════════════
+
+/// 松开沿动作：给定按住时长与"按下瞬间是否已可见"，判定该隐藏还是保持。
+/// 从 `start_hotkey_monitor` 的松开沿分支**逐字提纯**出来的唯一决策点——纯算术、无副作用，
+/// 便于单测钉死长短按 + toggle 语义（见文件尾 mod tests）。改这里等于改热键手感，务必让测试仍绿。
+#[derive(Debug, PartialEq, Eq)]
+enum ReleaseAction { Hide, Keep }
+
+// 两个分支都返 Hide 但语义不同（长按 momentary vs 短按 toggle-close），故意分开各自成句、
+// 各带注释——热键手感代码不「顺手合并」（见 CLAUDE.md 铁律）。clippy 的合并建议在此拒绝。
+#[allow(clippy::if_same_then_else)]
+fn hotkey_release_action(held_ms: u128, visible_at_press: bool, tap_max_ms: u128) -> ReleaseAction {
+    if held_ms > tap_max_ms {
+        ReleaseAction::Hide            // 长按 = momentary：松开即关（无论按下时开/关）
+    } else if visible_at_press {
+        ReleaseAction::Hide            // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
+    } else {
+        ReleaseAction::Keep           // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open）
+    }
+}
+
 fn start_hotkey_monitor(app: AppHandle) {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState; // combo VK 列表改读 HOTKEY_VK_KEYS
 
     std::thread::spawn(move || {
+        let _guard = ThreadExitGuard("hotkey_monitor"); // M5-A
         let window = match app.get_webview_window("main") {
             Some(w) => w,
             None => { eprintln!("[hotkey] no main window, abort"); return; }
@@ -373,6 +678,8 @@ fn start_hotkey_monitor(app: AppHandle) {
         // ── 内嵌的 show / hide 配方（复刻现有路径，不调用/不改现有 handler）──
         // show：§8 三约束——emit 先于 show（防白闪）；set_focus 延迟 50ms（防 WM_ACTIVATE 重绘）
         let show = |app: &AppHandle, window: &tauri::WebviewWindow| {
+            remember_foreground_before_show(window);
+            set_webview_memory_low(window, false);
             let _ = app.emit("hotkey-show", ());
             let _ = window.show();
             let win = window.clone();
@@ -384,6 +691,7 @@ fn start_hotkey_monitor(app: AppHandle) {
         // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
         let hide = |app: &AppHandle, window: &tauri::WebviewWindow| {
             let _ = window.hide();
+            set_webview_memory_low(window, true);
             let _ = app.emit("hotkey-hide", ());
         };
 
@@ -422,10 +730,37 @@ fn start_hotkey_monitor(app: AppHandle) {
                 continue;
             }
 
+            // 续110：剪贴板项纯 JS 拖动阶段 + 热键 = "隐藏界面并拖到外部"。与上方区内重排分支同构——
+            // 既不能直接 hide（DoDragDrop 起手前隐藏 → SetCapture 失败 → 松手无落地），也不能单纯让路
+            // （热键整段失效）。按下沿 emit "clip-drag-hotkey"，前端把纯 JS ghost 升级为原生拖出
+            // （start_drag_out force_hide=true，窗口仍可见时先起手 DoDragDrop、再由 dragout 自身隐藏）。
+            // 升级后 CLIP_DRAG_ACTIVE 转为 DRAG_IN_PROGRESS（do_drag_on_main 无缝交接），下一拍落入下方让路分支。
+            if dragout::clip_drag_active() {
+                if combo && !prev_combo {
+                    let _ = app.emit("clip-drag-hotkey", ());
+                    println!("[hotkey] 剪贴板拖动 + 热键 → emit clip-drag-hotkey（升级为原生拖出并隐藏）");
+                }
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
             // 原生拖出期间（DRAG_IN_PROGRESS）让路：窗口可见性由 dragout 独占（自动隐藏 / keepOpen 自轮询
             // 手动隐藏），此处只跟踪键态、不做 show/hide toggle，避免拖动中按热键去外部时 monitor 并发操作
             // 窗口→白闪。更新 prev_combo 保证拖动结束恢复时不产生虚假边沿；清空 down_at 防遗留按下态误判。
             if dragout::drag_in_progress() {
+                prev_combo = combo;
+                down_at = None;
+                std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
+                continue;
+            }
+
+            // 续111：文件夹选择框存续期间让路——toggle 一个正挂着模态子窗口的 owner 只会制造混乱
+            // （隐藏 owner 会留下孤儿对话框）。此处**可以**单纯让路，与续88 的重排阶段不同：对话框
+            // 自带 Esc / 取消出口，让路不会把用户困住，故无需 emit 升级那套。同样更新 prev_combo /
+            // 清 down_at，防对话框关闭后产生虚假边沿。
+            if dialog_active() {
                 prev_combo = combo;
                 down_at = None;
                 std::thread::sleep(std::time::Duration::from_millis(HOTKEY_POLL_MS));
@@ -441,16 +776,11 @@ fn start_hotkey_monitor(app: AppHandle) {
                     show(&app, &window);
                 }
             } else if !combo && prev_combo {
-                // ── 松开沿：按住时长决定语义 ──
+                // ── 松开沿：按住时长决定语义（决策提纯到 hotkey_release_action，见其单测）──
                 let held = down_at.take().map(|d| d.elapsed().as_millis()).unwrap_or(0);
-                if held > HOTKEY_TAP_MAX_MS {
-                    // 长按 = momentary：松开即关（无论按下时开/关）
-                    hide(&app, &window);
-                } else if visible_at_press {
-                    // 短按 且 按下时已开（上次短按打开的）→ 本次短按关闭（toggle close）
-                    hide(&app, &window);
-                } else {
-                    // 短按 且 按下时是关的 → 已在按下沿开过，保持显示（toggle open），无需动作
+                match hotkey_release_action(held, visible_at_press, HOTKEY_TAP_MAX_MS) {
+                    ReleaseAction::Hide => hide(&app, &window),
+                    ReleaseAction::Keep => { /* toggle open：按下沿已 show，保持显示，无需动作 */ }
                 }
             }
 
@@ -480,6 +810,7 @@ fn start_focus_watch(app: AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
     std::thread::spawn(move || {
+        let _guard = ThreadExitGuard("focus_watch"); // M5-A
         let window = match app.get_webview_window("main") {
             Some(w) => w,
             None => { eprintln!("[focus] no main window, abort"); return; }
@@ -498,7 +829,13 @@ fn start_focus_watch(app: AppHandle) {
             // 就因前台瞬时切走而自行 hide()，会打断整个手势（ghost/让路 transform 永久卡死，且
             // 因从未真正调用 start_drag_out，「拖到外部目标」这个操作本身也没发生）。让路但保持
             // armed 状态，重排结束后继续正常侦测（不清 armed，防止重排期间的假前台切换污染状态）。
-            if dragout::drag_in_progress() || dragout::stage_reorder_active() {
+            // 续111：文件夹选择框存续期间同样让路——它拿走前台，不让路则 50ms 内 overlay 被
+            // 自动隐藏、对话框变孤儿。同样不清 armed（对话框关闭后继续正常侦测）。
+            if dragout::drag_in_progress()
+                || dragout::stage_reorder_active()
+                || dragout::clip_drag_active()
+                || dialog_active()
+            {
                 std::thread::sleep(std::time::Duration::from_millis(FOCUS_POLL_MS));
                 continue;
             }
@@ -509,6 +846,7 @@ fn start_focus_watch(app: AppHandle) {
                 } else if armed && fg != 0 {
                     // 前台切到另一个真实窗口（fg==0 是切换瞬间的空窗，不误关）→ light dismiss
                     let _ = window.hide();
+                    set_webview_memory_low(&window, true);
                     let _ = app.emit("hotkey-hide", ());
                     armed = false;
                     println!("[focus] foreground lost → auto hide");
@@ -529,8 +867,14 @@ fn start_apps_worker(app: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(1)); // 应用扫描比文件索引轻，1s 即可
         let started = std::time::Instant::now();
-        let apps = apps::scan_start_menu(); // 复用现有逻辑 + 缓存，后台线程执行
-        println!("[apps] background scan: {} apps in {:?}", apps.len(), started.elapsed());
+        // 续128 两段式：.lnk 那批先 emit 一次，UWP（约 2s）扫完再 emit 完整列表。
+        // 前端的 apps-ready 监听本就是覆盖式 setApps，第二次直接顶掉第一次，无需改动前端。
+        let partial_app = app.clone();
+        let apps = apps::scan_start_menu_staged(|partial| {
+            println!("[apps] stage 1 (.lnk): {} apps in {:?}", partial.len(), started.elapsed());
+            let _ = partial_app.emit("apps-ready", partial.to_vec());
+        });
+        println!("[apps] background scan done: {} apps in {:?}", apps.len(), started.elapsed());
         let _ = app.emit("apps-ready", apps);
     });
 }
@@ -539,21 +883,28 @@ fn start_apps_worker(app: AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            apps::scan_start_menu, apps::refresh_apps,
-            apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths,
+            apps::scan_start_menu,
+            apps::launch_app, apps::get_file_info, apps::get_file_icons, apps::resolve_lnk, apps::get_stage_thumbnail, apps::check_stage_paths, apps::get_large_icon,
             apps::open_stage_thumb_dir, apps::clear_stage_thumb_cache,
-            hide_window, open_file, reveal_in_explorer, trigger_screenshot,
-            clipboard::paste_clipboard,
-            clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::set_clipboard_files,
+            apps::save_launcher_icons, apps::load_launcher_icons,
+            apps::save_stage_images, apps::existing_stage_images, apps::get_stage_image_content, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
+            hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
+            read_launcher_layout_import, write_launcher_layout_export,
+            clipboard::check_paste_ready, clipboard::paste_clipboard,
+            clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::get_clip_content, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
             clipboard::copy_text_to_clipboard, clipboard::copy_image_to_clipboard, clipboard::copy_files_to_clipboard,
-            clipboard::get_clip_cache_max, clipboard::set_clip_cache_max,
+            clipboard::set_clip_cache_max,
             clipboard::open_clip_image_dir, clipboard::clear_clip_image_cache,
-            filesearch::search_files, filesearch::get_index_status,
-            filesearch::set_search_engine, filesearch::set_search_dirs,
+            clipboard::save_image_as_launcher_file,
+            filesearch::search_files, filesearch::search_builtin_all, filesearch::get_index_status,
+            filesearch::set_search_engine, filesearch::set_search_dirs, filesearch::set_search_items,
+            pinyin_util::to_pinyin_batch,
+            perf::perf_report,
             everything::reload_everything,
             dragout::start_drag_out,
-            dragout::get_dragout_auto_close, dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
+            dragout::set_dragout_auto_close, dragout::set_stage_reorder_active,
+            dragout::set_clip_drag_active,
             set_hotkey, set_tray_language
         ])
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -578,10 +929,25 @@ pub fn run() {
             start_hotkey_monitor(app.handle().clone());
             start_focus_watch(app.handle().clone()); // light dismiss：点外部应用自动隐藏
             if let Err(e) = make_fullscreen(app) { eprintln!("全屏设置失败: {}", e); }
+            if let Some(window) = app.get_webview_window("main") {
+                let startup_window = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        WEBVIEW_STARTUP_LOW_REAPPLY_MS,
+                    ));
+                    if !startup_window.is_visible().unwrap_or(true) {
+                        // setup 早于页面加载完成：让首屏以默认 Normal 加载，稳定后首次切 Low。
+                        // 若用户已呼出则跳过，绝不把可见窗口降回 Low。
+                        set_webview_memory_low(&startup_window, true);
+                    }
+                });
+            }
             // 剪贴板子系统初始化（路径→load→monitor→janitor 时序封装在 clipboard::init 内）
             let data_dir = app.path().app_data_dir().expect("app_data_dir unavailable");
             clipboard::init(app.handle(), &data_dir);
+            filesearch::init_file_usage(&data_dir); // 文件使用学习：装载持久化的打开记录（续132）
             apps::init_thumb_cache(&data_dir); // 中转区图片缩略图落盘缓存（续99c：重启秒开）
+            apps::init_launcher_assets(&data_dir); // 启动台图标外置 + 两目录孤儿回收（续146）
             dragdrop::register_drag_drop(app); // 中转区原生拖入
             everything::init(app.handle()); // 可选 Everything：登记资源目录供加载 SDK DLL
             filesearch::start_index_worker(app.handle().clone()); // 文件系统索引：独立后台线程，零前端阻塞
@@ -596,7 +962,10 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     match event.id().as_ref() {
                         "toggle" => tray_toggle(app),
-                        "quit" => app.exit(0),
+                        "quit" => {
+                            clipboard::wait_pending_image_writes(); // 续146d：别把正在写的原图丢了
+                            app.exit(0)
+                        }
                         _ => {}
                     }
                 })
@@ -606,4 +975,99 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("启动 Workbench App 时出错");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 长短按 + toggle 状态机（hotkey_release_action）。松开沿的三条语义分支纯逻辑可测，
+    // 是本项目最高危区里少见的可脱离硬件验证的一块——见 DECISIONS §2 / CLAUDE 铁律【全局热键】。
+    const TAP: u128 = 250; // = HOTKEY_TAP_MAX_MS，用字面量避免测试悄悄跟着常量漂移
+
+    #[test]
+    fn long_press_always_hides() {
+        // 长按 = momentary：松开即关，无论按下瞬间开/关
+        assert_eq!(hotkey_release_action(251, false, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(251, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(9999, false, TAP), ReleaseAction::Hide);
+    }
+
+    #[test]
+    fn short_press_toggles_on_visibility_at_press() {
+        // 短按（held ≤ 阈值）：按下时是关的 → 保持（按下沿已开）；按下时已开 → 关闭
+        assert_eq!(hotkey_release_action(100, false, TAP), ReleaseAction::Keep);
+        assert_eq!(hotkey_release_action(100, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(0, false, TAP), ReleaseAction::Keep);
+    }
+
+    #[test]
+    fn threshold_is_strict_greater_than() {
+        // 恰好等于阈值算短按（held > tap_max 才是长按）——边界一偏，250ms 附近手感就反了
+        assert_eq!(hotkey_release_action(250, false, TAP), ReleaseAction::Keep); // 短按 open
+        assert_eq!(hotkey_release_action(250, true, TAP), ReleaseAction::Hide);  // 短按 close
+        assert_eq!(hotkey_release_action(249, true, TAP), ReleaseAction::Hide);
+        assert_eq!(hotkey_release_action(251, false, TAP), ReleaseAction::Hide); // 刚过阈值 = 长按 close
+    }
+
+    #[test]
+    fn remembered_foreground_wins_for_paste() {
+        assert_eq!(choose_paste_target(100, 200, 300, true), 100);
+    }
+
+    #[test]
+    fn invalid_or_self_foreground_falls_back_to_handback() {
+        assert_eq!(choose_paste_target(100, 200, 300, false), 200);
+        assert_eq!(choose_paste_target(300, 200, 300, true), 200);
+    }
+
+    #[test]
+    fn paste_target_never_returns_self_or_null_fallback() {
+        assert_eq!(choose_paste_target(0, 300, 300, false), 0);
+        assert_eq!(choose_paste_target(0, 0, 300, false), 0);
+    }
+
+    #[test]
+    fn uipi_only_blocks_lower_to_elevated_injection() {
+        assert!(clipboard::uipi_blocks_paste(true, false));
+        assert!(!clipboard::uipi_blocks_paste(false, false));
+        assert!(!clipboard::uipi_blocks_paste(true, true));
+        assert!(!clipboard::uipi_blocks_paste(false, true));
+    }
+
+    #[test]
+    fn paste_access_fails_closed_when_security_inspection_is_inconclusive() {
+        assert_eq!(
+            clipboard::paste_access_error(Some(true), Some(false)),
+            Some("paste-target-elevated")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(None, Some(false)),
+            Some("paste-target-elevated")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(false), Some(false)),
+            None
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(true), Some(true)),
+            None
+        );
+        assert_eq!(
+            clipboard::paste_access_error(None, Some(true)),
+            Some("paste-security-check-failed")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(false), None),
+            Some("paste-security-check-failed")
+        );
+    }
+
+    #[test]
+    fn physical_modifier_mask_must_be_fully_clear() {
+        assert!(clipboard::modifier_mask_is_clear(0));
+        for mask in 1..=0b1111 {
+            assert!(!clipboard::modifier_mask_is_clear(mask));
+        }
+    }
 }

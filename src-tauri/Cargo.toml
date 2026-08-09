@@ -1,13 +1,15 @@
 [package]
 name = "workbench-app"
-version = "0.4.5"
+version = "0.27.4"
 description = "Windows Desktop Workbench Utility"
 authors = ["you"]
 edition = "2021"
 
 [lib]
 name = "workbench_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面 Windows 只需 rlib（main.rs 链接本 lib）；staticlib/cdylib 是移动端模板残留，
+# 每次构建都会多链两份用不到的产物，故移除。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -24,23 +26,79 @@ windows = { version = "0.58", features = [
   "Win32_System_LibraryLoader",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_System_Threading",
+  "Win32_Security",
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_UI_Shell",
+  "Win32_UI_Shell_Common",
   "Win32_System_Com",
   # 原生拖入（中转区 drag-in）：自注册 IDropTarget 所需
   "Win32_System_Ole",
   "Win32_System_SystemServices",
   "Win32_System_Com_StructuredStorage",
   "Win32_Graphics_Gdi",
+  # IShellLinkW::GetPath（.lnk 解析，续119）签名里带 WIN32_FIND_DATAW，需要此 feature 才可见
+  "Win32_Storage_FileSystem",
   "implement",
 ] }
 # #[implement] 宏生成 windows_core:: 路径，用 umbrella windows crate 时需把它列为直接依赖
 windows-core = "0.58"
+# Tauri/Wry 在 Windows 已传递依赖这两个 0.61 系 crate；列为直接依赖仅为调用
+# WebView2 ICoreWebView2_19::SetMemoryUsageTargetLevel，不会引入第二份运行时。
+webview2-com = "=0.38.2"
+windows-core-webview = { package = "windows-core", version = "0.61" }
 walkdir = "2.5"
 libloading = "0.8" # 运行时动态加载 Everything64.dll（可选 Everything 搜索引擎）
 flate2 = "1.1"
 tauri-plugin-store = "2"
 enigo = "0.2"
 arboard = "3"
-image = "0.25"
+# 只解码用户现实会遇到的图片格式 + 只用 PNG 编码。默认全特性会拖入
+# AVIF(ravif/rav1e)/EXR/HDR/DDS/QOI/PNM/TGA 等一批用不到的重解码器（详见构建体积分析）；
+# 裁到下列集合覆盖 Windows 用户所有常见图片，冷门格式退化为「读不出尺寸」的优雅降级而非崩溃。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff"] }
+# 汉字→拼音（增强搜索的拼音匹配，续131）。
+# `plain` = 无声调：匹配用不上声调，带声调的输出还是非 ASCII、反而没法拿来做子序列匹配。
+# `heteronym` = 多音字全读音：没它「音乐」只会派生出首选读音 yinle，
+# 用户搜 yinyue / 网易云音乐搜 wyyyy 全都落空（实测踩到）。
+pinyin = { version = "0.11.0", default-features = false, features = ["heteronym", "plain"] }
+# 交互式模糊匹配内核。只使用低层 matcher：Workbench 自己掌控索引、跨字段排序与线程模型，
+# 避免高层 nucleo 再维护一份 item store / Rayon 线程池。
+nucleo-matcher = "0.3.1"
+
+# release 构建优化：对齐 ~5MB 包体目标。lto=fat + 单 codegen unit 换更小体积 + 更强内联；
+# opt-level="z" 优先体积（本应用无计算密集热路径，热键/焦点轮询开销在系统调用不在算术）；
+# strip 去符号表。
+# panic="abort"（续139 档 B，用户定夺）：首个 panic 直接终止进程，故后台线程**永不**在持锁时
+# 留下毒化的 Mutex → 32 处 `.lock().unwrap()` 结构上不可能再 poison-panic（M4 级联静默死被根除）。
+# 失败模式从「某子系统悄悄降级、应用貌似还活着」变为「崩溃、可重启」——对可随时重启的 overlay
+# 工具反而更好（可见 + 可恢复 > 隐形持续降级）。dev/test 构建仍走 unwind，`cargo test` 不受影响。
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# 续146d：图像编解码/压缩这几个依赖单独开优化。
+# 根因：全屏截图（3192×1970）的原图 PNG 编码在未优化构建下要 ~3.3s，而这段时间里条目已带着
+# orig_path 落了盘、文件却还没写完——进程此刻退出/重启，原图就永久丢失（拖出/粘贴静默退化成
+# 1024px 缩略图）。编码在 detached 线程、不能改成同步（会加宽剪贴板采样塌缩窗口，见 CLAUDE 铁律），
+# 故只能把窗口本身压小。CompressionType::Fast 实测零收益（同耗时同体积），真正的杠杆是优化级别。
+# 只点名这几个包：其余依赖仍按各 profile 原设置（release 的 opt-level="z" 体积目标不受影响）。
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.image]
+opt-level = 3
+[profile.release.package.png]
+opt-level = 3
+[profile.release.package.miniz_oxide]
+opt-level = 3
+[profile.release.package.flate2]
+opt-level = 3
+[profile.release.package.image]
+opt-level = 3

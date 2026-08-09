@@ -1,0 +1,235 @@
+// Extracted view contract tests: bundle the real TSX components and render them without a browser.
+import { build } from "esbuild";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const dir = mkdtempSync(join(root, "node_modules", ".component-contracts-"));
+const outfile = join(dir, "bundle.mjs");
+await build({
+  stdin: {
+    contents: [
+      'export { default as LauncherPanel } from "./src/components/LauncherPanel";',
+      'export { default as ClipboardPanel } from "./src/components/ClipboardPanel";',
+      'export { StageGridCard, StageListRow } from "./src/components/StageItems";',
+      'export { default as EnhancedSearchLayer } from "./src/components/EnhancedSearchLayer";',
+      'export { WorkbenchSearchHeader, WorkbenchFooter } from "./src/components/WorkbenchChrome";',
+      'export { default as SettingsDialog } from "./src/components/SettingsDialog";',
+      'export { LauncherPickerDialog, StageRecoveryDialog, LauncherManagerDialog } from "./src/components/WorkbenchDialogs";',
+    ].join("\n"),
+    resolveDir: root,
+    sourcefile: "component-contracts.ts",
+    loader: "ts",
+  },
+  bundle: true,
+  external: ["react", "react-dom/server"],
+  format: "esm",
+  platform: "node",
+  outfile,
+  logLevel: "error",
+});
+const { LauncherPanel, ClipboardPanel, StageGridCard, StageListRow, EnhancedSearchLayer, WorkbenchSearchHeader, WorkbenchFooter, SettingsDialog, LauncherPickerDialog, StageRecoveryDialog, LauncherManagerDialog } = await import(pathToFileURL(outfile).href);
+
+const noop = () => {};
+const t = (zh, vars) => vars ? zh.replace(/\{(\w+)\}/g, (_, key) => String(vars[key])) : zh;
+let failed = 0;
+const check = (name, condition, html = "") => {
+  if (condition) { console.log(`  ✓ ${name}`); return; }
+  failed++;
+  console.error(`  ✗ ${name}${html ? `\n      ${html.slice(0, 300)}` : ""}`);
+};
+
+console.log("\n抽取组件 —— DOM / 缩略图 / 常驻层契约");
+
+const launcherHtml = renderToStaticMarkup(createElement(LauncherPanel, {
+  items: [{ id: 1, kind: "file", name: "photo.png", path: "C:/photo.png", ext: "png" }],
+  totalCount: 1,
+  search: "",
+  selectedIndex: 0,
+  missingIds: new Set([1]),
+  thumbnails: { "C:/photo.png": "data:image/png;base64,thumb" },
+  t,
+  onOpenManager: noop,
+  onOpenPicker: noop,
+  onOpenItem: noop,
+  onOpenContextMenu: noop,
+  onPointerDown: noop,
+  highlights: new Map([[1, [[0, 4]]]]),
+}));
+check("启动台保留 app-grid / app-tile 选择器", launcherHtml.includes('class="app-grid"') && launcherHtml.includes("app-tile selected launcher-missing"), launcherHtml);
+check("启动台图片文件只渲染传入缩略图", launcherHtml.includes('class="app-tile-thumb"') && launcherHtml.includes("base64,thumb"), launcherHtml);
+check("启动台名称保留关键词高亮", launcherHtml.includes("search-highlight") && launcherHtml.includes(">photo</span>.png"), launcherHtml);
+
+const clipItem = { type: "image", time: 7, orig_degraded: true };
+const clipboardHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
+  items: [clipItem],
+  search: "",
+  category: "all",
+  thumbnails: { 7: "data:image/png;base64,clipthumb" },
+  copiedTime: 7,
+  t,
+  actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
+  drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
+  highlights: new Map(),
+  onCategoryChange: noop,
+}));
+check("剪贴板保留 clip-block 与降级标记", clipboardHtml.includes('class="clip-block"') && clipboardHtml.includes("clip-degraded-badge"), clipboardHtml);
+check("剪贴板图片只渲染传入缩略图", clipboardHtml.includes("base64,clipthumb") && !clipboardHtml.includes("orig_path"), clipboardHtml);
+
+const clipText = "开头内容用于识别来源，后面经过一段说明后出现关键词，再补充一些细节。";
+const clipTextStart = clipText.indexOf("关键词");
+const clipboardTextHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
+  items: [{ type: "text", time: 8, content: clipText }],
+  search: "关键词",
+  category: "text",
+  thumbnails: {},
+  copiedTime: null,
+  t,
+  actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
+  drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
+  highlights: new Map([[8, [[clipTextStart, clipTextStart + 2]]]]),
+  onCategoryChange: noop,
+}));
+check("剪贴板文本搜索保留开头和正文高亮", clipboardTextHtml.includes("开头内容") && clipboardTextHtml.includes("search-highlight-body") && clipboardTextHtml.includes("关键词"), clipboardTextHtml);
+check("剪贴板分类使用图标按钮并保留悬浮提示", clipboardHtml.includes('class="clip-category-tabs"') && clipboardHtml.includes("clip-category-btn active") && clipboardHtml.includes('title="全部"') && clipboardHtml.includes('title="截图"'), clipboardHtml);
+
+const stageItem = { id: 9, type: "file", items: [{ path: "C:/lost.txt", name: "lost.txt", ext: "txt", isImage: false }], count: 1, name: "lost.txt", ext: "txt" };
+const stageCommon = {
+  item: stageItem,
+  index: 0,
+  selected: true,
+  missing: true,
+  multiselect: false,
+  persistAll: false,
+  copied: false,
+  t,
+  actions: { activate: noop, openContextMenu: noop, togglePin: noop, copy: noop, remove: noop, open: noop },
+  pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
+  highlightRanges: [],
+  pageSearchActive: false,
+};
+const stageGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageCommon));
+const stageListHtml = renderToStaticMarkup(createElement(StageListRow, stageCommon));
+check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
+check("失效中转项不渲染复制/打开操作", !stageGridHtml.includes("复制到剪贴板") && !stageListHtml.includes('title="打开"'), stageGridHtml + stageListHtml);
+
+const stageText = "开头文字保留识别，经过较长的描述之后才出现关键词供搜索定位。";
+const stageTextStart = stageText.indexOf("关键词");
+const stageTextCommon = { ...stageCommon, item: { id: 10, type: "text", content: stageText }, missing: false, highlightRanges: [[stageTextStart, stageTextStart + 2]], pageSearchActive: true };
+const stageTextGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageTextCommon));
+const stageTextListHtml = renderToStaticMarkup(createElement(StageListRow, stageTextCommon));
+check("中转文本卡片将中后段命中移入预览", stageTextGridHtml.includes("关键词") && stageTextGridHtml.includes("search-highlight-body"), stageTextGridHtml);
+check("中转文本列表保留正文高亮", stageTextListHtml.includes("关键词") && stageTextListHtml.includes("search-highlight-body"), stageTextListHtml);
+
+const enhancedHtml = renderToStaticMarkup(createElement(EnhancedSearchLayer, {
+  open: false,
+  pinned: false,
+  query: "",
+  inputRef: { current: null },
+  resultsRef: { current: null },
+  rows: null,
+  resultCount: 0,
+  sectionCount: 0,
+  searchDefaultMode: "page",
+  enhancedHotkeyLabel: "Ctrl+K",
+  searchEngine: "builtin",
+  everythingAvailable: false,
+  indexReady: false,
+  preview: null,
+  t,
+  actions: { activate: noop, reveal: noop, addPreviewToLauncher: noop, addFileToStage: noop },
+  onQueryChange: noop,
+  onResultsMouseMove: noop,
+}));
+check("增强搜索关闭时保持轻量 enh-layer shell", enhancedHtml.includes('class="enh-layer"') && enhancedHtml.includes('class="enh-search-input"') && !enhancedHtml.includes('class="enh-result"'), enhancedHtml);
+
+const headerHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
+  search: "query",
+  enhanced: false,
+  searchRef: { current: null },
+  t,
+  onSearchChange: noop,
+}));
+const enhancedHeaderHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
+  search: "query",
+  enhanced: true,
+  searchRef: { current: null },
+  t,
+  onSearchChange: noop,
+}));
+check("顶栏抽取后保留品牌与搜索选择器", headerHtml.includes('class="top-left"') && headerHtml.includes('class="global-search"') && headerHtml.includes('value="query"'), headerHtml);
+check("顶栏按搜索模式切换提示文案", headerHtml.includes("搜索应用、中转、剪贴板…") && enhancedHeaderHtml.includes("搜索应用、文件、中转、剪贴板…"), headerHtml + enhancedHeaderHtml);
+
+const footerHtml = renderToStaticMarkup(createElement(WorkbenchFooter, {
+  hotkeyCombo: "ctrl+space",
+  enhancedHotkey: "ctrl+k",
+  enhancedOpen: false,
+  version: "0.22.0",
+  t,
+}));
+check("底栏抽取后保留快捷键与版本信息", footerHtml.includes('class="bottom-bar"') && footerHtml.includes("Ctrl+Space") && footerHtml.includes("Workbench v0.22.0"), footerHtml);
+
+const settingsHtml = renderToStaticMarkup(createElement(SettingsDialog, {
+  tab: "about",
+  version: "0.23.0",
+  t,
+  general: {},
+  launcher: {},
+  stage: {},
+  clipboard: {},
+  search: {},
+  hotkeys: {},
+  onTabChange: noop,
+  onClose: noop,
+}));
+check("设置弹层保留导航、面板和版本信息", settingsHtml.includes('class="settings-nav"') && settingsHtml.includes('class="settings-panel"') && settingsHtml.includes("Workbench <b>v0.23.0</b>"), settingsHtml);
+
+const pickerHtml = renderToStaticMarkup(createElement(LauncherPickerDialog, {
+  query: "cal",
+  inputRef: { current: null },
+  results: [{ app: { path: "C:/calc.exe", name: "Calculator", icon: null }, ranges: [[0, 2]] }],
+  launcherPicking: false,
+  t,
+  onClose: noop,
+  onQueryChange: noop,
+  onPickPath: noop,
+  onAddApp: noop,
+}));
+check("应用选择弹层保留搜索与浏览入口", pickerHtml.includes("picker-modal") && pickerHtml.includes("picker-search-input") && pickerHtml.includes("浏览文件夹"), pickerHtml);
+check("应用选择高亮保持闭区间范围", pickerHtml.includes("search-highlight") && pickerHtml.includes(">Cal</span>culator"), pickerHtml);
+
+const recoveryHtml = renderToStaticMarkup(createElement(StageRecoveryDialog, {
+  items: [],
+  missingPaths: new Set(),
+  t,
+  onClose: noop,
+  onRelink: noop,
+  onCopyPath: noop,
+  onRemove: noop,
+}));
+check("失效恢复弹层保留空态与恢复容器", recoveryHtml.includes("stage-recovery-modal") && recoveryHtml.includes("暂无失效条目"), recoveryHtml);
+
+const managerHtml = renderToStaticMarkup(createElement(LauncherManagerDialog, {
+  items: [],
+  selected: new Set(),
+  preview: null,
+  busy: false,
+  t,
+  onClose: noop,
+  onBackFromPreview: noop,
+  onConfirmImport: noop,
+  onToggleAll: noop,
+  onToggleItem: noop,
+  onDeleteSelected: noop,
+  onChooseImport: noop,
+  onExport: noop,
+}));
+check("启动台管理弹层保留工具栏与布局动作", managerHtml.includes("launcher-manager-modal") && managerHtml.includes("导入布局") && managerHtml.includes("导出布局"), managerHtml);
+
+rmSync(dir, { recursive: true, force: true });
+console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");
+process.exit(failed ? 1 : 0);
