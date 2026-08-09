@@ -13,7 +13,7 @@ mod perf; // 性能测量桩（WORKBENCH_PERF=1 门控的分段计时 + 前端�
 mod search_rank; // 内置搜索的统一多字段匹配内核（名称 / 缩写 / 拼音 / 路径 / 类型）
 
 use std::os::windows::process::CommandExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 // CREATE_NO_WINDOW：防止 cmd.exe 子进程在开发模式下弹出控制台窗口
@@ -28,6 +28,43 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut}
 static HOTKEY_VK_KEYS: std::sync::OnceLock<Mutex<Vec<u16>>> = std::sync::OnceLock::new();
 /// 当前注册的 Shortcut（set_hotkey 切换时据此反注册旧组合）。Shortcut impl Copy+PartialEq。
 static CURRENT_SHORTCUT: std::sync::OnceLock<Mutex<Shortcut>> = std::sync::OnceLock::new();
+/// 最近一次从隐藏态呼出前的前台窗口。粘贴隐藏 overlay 后优先把输入交还给它，避免
+/// `SetForegroundWindow(GetForegroundWindow())` 对当前窗口做恒等调用。
+static FOREGROUND_BEFORE_SHOW: AtomicIsize = AtomicIsize::new(0);
+
+fn choose_paste_target(remembered: isize, current: isize, self_hwnd: isize, remembered_valid: bool) -> isize {
+    if remembered_valid && remembered != 0 && remembered != self_hwnd {
+        remembered
+    } else if current != 0 && current != self_hwnd {
+        current
+    } else {
+        0
+    }
+}
+
+/// 必须在 window.show() 之前调用；只记录真实外部窗口，失败时清零避免复用上轮陈旧 HWND。
+fn remember_foreground_before_show(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    let current = unsafe { GetForegroundWindow() }.0 as isize;
+    let self_hwnd = window.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
+    FOREGROUND_BEFORE_SHOW.store(
+        if current != 0 && current != self_hwnd { current } else { 0 },
+        Ordering::SeqCst,
+    );
+}
+
+/// hide + handback 后解析本次粘贴目标。快照失效时退回 OS 当前交还的前台窗口。
+pub(crate) fn paste_target_hwnd(app: &AppHandle, current: isize) -> isize {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+    let remembered = FOREGROUND_BEFORE_SHOW.load(Ordering::SeqCst);
+    let self_hwnd = app.get_webview_window("main")
+        .and_then(|w| w.hwnd().ok())
+        .map(|h| h.0 as isize)
+        .unwrap_or(0);
+    let remembered_valid = remembered != 0 && unsafe { IsWindow(HWND(remembered as *mut _)).as_bool() };
+    choose_paste_target(remembered, current, self_hwnd, remembered_valid)
+}
 
 // ── M5-A：常驻线程退出打点 ─────────────────────────────────────────────
 // RAII 守卫：线程以任何路径退出（early return / break / dev 下 panic unwind）都在 stderr 留一行。
@@ -192,6 +229,7 @@ fn tray_toggle(app_handle: &AppHandle) {
             set_webview_memory_low(&window, true);
             let _ = app_handle.emit("hotkey-hide", ());
         } else {
+            remember_foreground_before_show(&window);
             set_webview_memory_low(&window, false);
             let _ = app_handle.emit("hotkey-show", ()); // 先让前端渲染深色 CSS
             let _ = window.show();
@@ -640,6 +678,7 @@ fn start_hotkey_monitor(app: AppHandle) {
         // ── 内嵌的 show / hide 配方（复刻现有路径，不调用/不改现有 handler）──
         // show：§8 三约束——emit 先于 show（防白闪）；set_focus 延迟 50ms（防 WM_ACTIVATE 重绘）
         let show = |app: &AppHandle, window: &tauri::WebviewWindow| {
+            remember_foreground_before_show(window);
             set_webview_memory_low(window, false);
             let _ = app.emit("hotkey-show", ());
             let _ = window.show();
@@ -851,7 +890,7 @@ pub fn run() {
             apps::save_stage_images, apps::existing_stage_images, apps::get_stage_image_content, apps::get_stage_image_thumb, apps::get_clip_thumbnail,
             hide_window, open_file, reveal_in_explorer, trigger_screenshot, pick_folder, pick_file,
             read_launcher_layout_import, write_launcher_layout_export,
-            clipboard::paste_clipboard,
+            clipboard::check_paste_ready, clipboard::paste_clipboard,
             clipboard::set_clipboard_image, clipboard::get_clipboard_history, clipboard::get_clip_content, clipboard::set_clipboard_files,
             clipboard::delete_clipboard_item, clipboard::clear_clipboard_history,
             clipboard::copy_text_to_clipboard, clipboard::copy_image_to_clipboard, clipboard::copy_files_to_clipboard,
@@ -969,5 +1008,66 @@ mod tests {
         assert_eq!(hotkey_release_action(250, true, TAP), ReleaseAction::Hide);  // 短按 close
         assert_eq!(hotkey_release_action(249, true, TAP), ReleaseAction::Hide);
         assert_eq!(hotkey_release_action(251, false, TAP), ReleaseAction::Hide); // 刚过阈值 = 长按 close
+    }
+
+    #[test]
+    fn remembered_foreground_wins_for_paste() {
+        assert_eq!(choose_paste_target(100, 200, 300, true), 100);
+    }
+
+    #[test]
+    fn invalid_or_self_foreground_falls_back_to_handback() {
+        assert_eq!(choose_paste_target(100, 200, 300, false), 200);
+        assert_eq!(choose_paste_target(300, 200, 300, true), 200);
+    }
+
+    #[test]
+    fn paste_target_never_returns_self_or_null_fallback() {
+        assert_eq!(choose_paste_target(0, 300, 300, false), 0);
+        assert_eq!(choose_paste_target(0, 0, 300, false), 0);
+    }
+
+    #[test]
+    fn uipi_only_blocks_lower_to_elevated_injection() {
+        assert!(clipboard::uipi_blocks_paste(true, false));
+        assert!(!clipboard::uipi_blocks_paste(false, false));
+        assert!(!clipboard::uipi_blocks_paste(true, true));
+        assert!(!clipboard::uipi_blocks_paste(false, true));
+    }
+
+    #[test]
+    fn paste_access_fails_closed_when_security_inspection_is_inconclusive() {
+        assert_eq!(
+            clipboard::paste_access_error(Some(true), Some(false)),
+            Some("paste-target-elevated")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(None, Some(false)),
+            Some("paste-target-elevated")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(false), Some(false)),
+            None
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(true), Some(true)),
+            None
+        );
+        assert_eq!(
+            clipboard::paste_access_error(None, Some(true)),
+            Some("paste-security-check-failed")
+        );
+        assert_eq!(
+            clipboard::paste_access_error(Some(false), None),
+            Some("paste-security-check-failed")
+        );
+    }
+
+    #[test]
+    fn physical_modifier_mask_must_be_fully_clear() {
+        assert!(clipboard::modifier_mask_is_clear(0));
+        for mask in 1..=0b1111 {
+            assert!(!clipboard::modifier_mask_is_clear(mask));
+        }
     }
 }
