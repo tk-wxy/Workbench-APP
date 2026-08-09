@@ -29,6 +29,8 @@ Thumbs.db
 CLAUDE.md
 claude.md
 AGENTS.md
+CODEX.md
+copilot-instructions.md
 DECISIONS.md
 MEMORY.md
 HISTORY.md
@@ -44,3 +46,5 @@ augment-guidelines.md
 .clinerules/
 .cursor/
 .claude/
+.agents/
+.codex/
