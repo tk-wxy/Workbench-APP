@@ -16,6 +16,7 @@ import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
 import { type ClipboardCategory } from "./domain/clipboardCategory";
 import { buildClipboardPageSearch } from "./domain/clipboardPageSearch";
 import { appUsageScore } from "./domain/appUsage";
+import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
 import { matchPageSearch, type TextRange } from "./domain/pageSearchPresentation";
@@ -126,8 +127,7 @@ const SHORTCUTS = [
 ] as const;
 
 // 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
-// 时长可调；放大幅度在 CSS @keyframes launch-pop 里（克制档 scale 1.4）。
-const LAUNCH_ANIM_MS = 200;
+// 时长与放大幅度都由 CSS 控制；原生 hide 以 opacity transitionend 为准，避免依赖脚本计时。
 // 全局轻提示（toast）驻留时长，须与 App.css 的 @keyframes toast-flash 总时长一致（进 12% / 停 / 出 18%）。
 // 「一闪而过」定位：只报「做成了什么」，不承载可交互内容、不要求用户确认、绝不拦截点击。
 const TOAST_MS = 1600;
@@ -181,6 +181,17 @@ export default function App() {
   const loadedRef = useRef(false);
   const appsRef = useRef<AppInfo[]>(apps); appsRef.current = apps; // 供 [visible] 兜底扫描闭包读最新 apps（apps-ready 是否已填充）
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
+  // 点击驱动的关闭要等 CSS 的真实过渡结束再交给原生 hide。不能用固定 200ms 定时器：首帧合成稍晚时，
+  // 定时器会抢在 opacity 归零前隐藏透明窗口，DWM 偶发留下黑色残影。热键/失焦路径不走这里，仍须即时 hide。
+  // lifecycle 的 1s watchdog 只兜 transitionend 缺失，不能参与正常视觉时序。
+  const dismissLifecycleRef = useRef<DismissLifecycle | null>(null);
+  if (dismissLifecycleRef.current === null) {
+    dismissLifecycleRef.current = createDismissLifecycle({
+      setTimeout: window.setTimeout.bind(window),
+      clearTimeout: window.clearTimeout.bind(window),
+    });
+  }
+  const dismissLifecycle = dismissLifecycleRef.current;
   // 启动放大暂留期间被点的那个图标：即时隐藏它，让顶层克隆独自弹出，否则原图标随覆盖层慢淡出 → 与克隆同框（"两个图标"）。复位时还原。
   const launchSrcElRef = useRef<HTMLElement|null>(null);
   // 顶层启动克隆节点（cloneNode 生成，挂在 dragLayer）：复位/下次启动前移除，防残留。
@@ -214,6 +225,19 @@ export default function App() {
   const stageMissingScanGenerationRef = useRef(0); // 新一轮或 hide 后，旧结果一律作废
   const stageMissingScanTimerRef = useRef<number | null>(null);
   const [stageRecoveryOpen, setStageRecoveryOpen] = useState(false);
+
+  const beginDismiss = useCallback((onComplete: () => void) => {
+    dismissLifecycle.begin(onComplete);
+    setDismissing(true);
+  }, [dismissLifecycle]);
+
+  const finishDismiss = useCallback((event: React.TransitionEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget || event.propertyName !== "opacity") return;
+    dismissLifecycle.complete();
+  }, [dismissLifecycle]);
+
+  useEffect(() => () => dismissLifecycle.cancel(), [dismissLifecycle]);
+
   const stageRecoveryOpenRef = useRef(false); stageRecoveryOpenRef.current = stageRecoveryOpen;
   const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
@@ -704,6 +728,7 @@ export default function App() {
           cancelStageMissingScan();
           endClipDrag();
           resetStageInteractionForHide();
+          dismissLifecycle.cancel();
           setVisible(false);
           if (launchCloneNodeRef.current) {
             launchCloneNodeRef.current.remove();
@@ -1197,14 +1222,13 @@ export default function App() {
     // 无障碍 / 拿不到图标坐标：跳过动画，沿用即时隐藏（与改造前一致）
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduce || !iconEl) { hideWorkbench(); return; }
-    // 放大暂留：克隆图标到顶层浮层做 scale+淡出，覆盖层整体淡出露桌面，LAUNCH_ANIM_MS 后再 Rust hide
+    // 放大暂留：克隆图标到顶层浮层做 scale+淡出，覆盖层整体淡出露桌面，过渡实际结束后再 Rust hide
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
     spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）
     iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
-    setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
-    setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [recordUse, spawnLaunchClone]);
+    beginDismiss(() => { void hideWorkbench(); }); // 覆盖层淡出（与剪贴板粘贴共用）
+  }, [beginDismiss, recordUse, spawnLaunchClone]);
   // 增强搜索激活：app 复用 launchApp（含放大动画+淡出+hide，不在此 setEnhOpen，让整层随 overlay dismiss 一起淡出，hotkey-hide 复位）；
   // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
   const copyAndPasteRef = useRef<((item: Pasteable) => void) | null>(null); // copyAndPaste 定义在后，activateEnh 经此 ref 调用
@@ -1249,9 +1273,8 @@ export default function App() {
     const r = iconEl.getBoundingClientRect();
     spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）——磁贴图标含真实系统图标/缩略图/FileGlyph，cloneNode 一律精确保真
     iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
-    setDismissing(true);
-    setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [launchApp, spawnLaunchClone]);
+    beginDismiss(() => { void hideWorkbench(); });
+  }, [beginDismiss, launchApp, spawnLaunchClone]);
 
   // ── 启动台排序拖拽（续75 打磨：Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起）──
   // 核心原则：ghost 位置 / 让路 transform 全走 DOM 直操作，零 React 渲染，彻底保证跟手。
@@ -1894,15 +1917,14 @@ export default function App() {
       };
       if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { await doPaste(); return; }
       launchingRef.current = true;
-      setDismissing(true);
-      setTimeout(async () => {
+      beginDismiss(() => { void (async () => {
         if (!launchingRef.current) return;
         try { await doPaste(); }
         finally { setDismissing(false); launchingRef.current = false; }
-      }, LAUNCH_ANIM_MS);
+      })(); });
     };
     void startPaste();
-  }, []);
+  }, [beginDismiss]);
   copyAndPasteRef.current = copyAndPaste; // 供 activateEnh（定义在前）对剪贴板结果取走粘贴，避开 TDZ
   const activateClipboardItem = useCallback((item: ClipItem) => {
     if (suppressClickRef.current) {
@@ -2321,7 +2343,7 @@ export default function App() {
 
   return (
    <>
-    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()}>
+    <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()} onTransitionEnd={finishDismiss}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
         <WorkbenchSearchHeader search={headerSearchTarget === "enhanced" ? enhQuery : search} enhanced={headerSearchTarget === "enhanced"} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>

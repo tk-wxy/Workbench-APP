@@ -105,7 +105,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .overlay-hidden{opacity:0;pointer-events:none;}
 /* 覆盖层「快速淡出露桌面」：启动应用与剪贴板粘贴共用同一套消失观感（仅动画期间有 transition，
    平时 show/hide 仍由 Rust 即时控制）。.dismissing(双类)特异性高于 .overlay-visible，胜出。
-   200ms 须与 JS 常量 LAUNCH_ANIM_MS 一致。 */
+   原生窗口在 opacity transitionend 后才隐藏，避免首帧合成延迟时定时器抢跑。 */
 .overlay-simple.dismissing{opacity:0;pointer-events:none;transition:opacity 200ms ease-out;}
 /* 顶层克隆：position:fixed 按点击瞬间屏幕坐标定位，自播放大+淡出 */
 /* 启动放大暂留：cloneNode 源图标容器（.app-tile-icon / .enh-result-icon）挂进本层，克隆自带精确尺寸与底色，
