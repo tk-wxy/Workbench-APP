@@ -29,6 +29,7 @@ export const Clock = memo(function Clock({ lang }: { lang: Lang }) {
 
 interface WorkbenchSearchHeaderProps {
   search: string;
+  enhanced: boolean;
   searchRef: RefObject<HTMLInputElement>;
   t: Translate;
   onSearchChange: (value: string) => void;
@@ -37,6 +38,7 @@ interface WorkbenchSearchHeaderProps {
 // 顶栏右侧仍留在 App 作为 shell 组合槽；品牌与搜索是无业务状态的纯视图。
 export const WorkbenchSearchHeader = memo(function WorkbenchSearchHeader({
   search,
+  enhanced,
   searchRef,
   t,
   onSearchChange,
@@ -55,7 +57,7 @@ export const WorkbenchSearchHeader = memo(function WorkbenchSearchHeader({
         <input
           ref={searchRef}
           className="search-field"
-          placeholder={t("搜索应用、中转、剪贴板…")}
+          placeholder={t(enhanced ? "搜索应用、文件、中转、剪贴板…" : "搜索应用、中转、剪贴板…")}
           value={inputValue}
           onChange={event => handleChange(event.target.value)}
           spellCheck={false}

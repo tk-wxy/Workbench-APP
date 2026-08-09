@@ -68,12 +68,14 @@ const clipItem = { type: "image", time: 7, orig_degraded: true };
 const clipboardHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
   items: [clipItem],
   search: "",
+  category: "all",
   thumbnails: { 7: "data:image/png;base64,clipthumb" },
   copiedTime: 7,
   t,
   actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
   drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
   highlights: new Map(),
+  onCategoryChange: noop,
 }));
 check("剪贴板保留 clip-block 与降级标记", clipboardHtml.includes('class="clip-block"') && clipboardHtml.includes("clip-degraded-badge"), clipboardHtml);
 check("剪贴板图片只渲染传入缩略图", clipboardHtml.includes("base64,clipthumb") && !clipboardHtml.includes("orig_path"), clipboardHtml);
@@ -83,14 +85,17 @@ const clipTextStart = clipText.indexOf("关键词");
 const clipboardTextHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
   items: [{ type: "text", time: 8, content: clipText }],
   search: "关键词",
+  category: "text",
   thumbnails: {},
   copiedTime: null,
   t,
   actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
   drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
   highlights: new Map([[8, [[clipTextStart, clipTextStart + 2]]]]),
+  onCategoryChange: noop,
 }));
 check("剪贴板文本搜索保留开头和正文高亮", clipboardTextHtml.includes("开头内容") && clipboardTextHtml.includes("search-highlight-body") && clipboardTextHtml.includes("关键词"), clipboardTextHtml);
+check("剪贴板分类使用图标按钮并保留悬浮提示", clipboardHtml.includes('class="clip-category-tabs"') && clipboardHtml.includes("clip-category-btn active") && clipboardHtml.includes('title="全部"') && clipboardHtml.includes('title="截图"'), clipboardHtml);
 
 const stageItem = { id: 9, type: "file", items: [{ path: "C:/lost.txt", name: "lost.txt", ext: "txt", isImage: false }], count: 1, name: "lost.txt", ext: "txt" };
 const stageCommon = {
@@ -144,11 +149,20 @@ check("增强搜索关闭时保持轻量 enh-layer shell", enhancedHtml.includes
 
 const headerHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
   search: "query",
+  enhanced: false,
+  searchRef: { current: null },
+  t,
+  onSearchChange: noop,
+}));
+const enhancedHeaderHtml = renderToStaticMarkup(createElement(WorkbenchSearchHeader, {
+  search: "query",
+  enhanced: true,
   searchRef: { current: null },
   t,
   onSearchChange: noop,
 }));
 check("顶栏抽取后保留品牌与搜索选择器", headerHtml.includes('class="top-left"') && headerHtml.includes('class="global-search"') && headerHtml.includes('value="query"'), headerHtml);
+check("顶栏按搜索模式切换提示文案", headerHtml.includes("搜索应用、中转、剪贴板…") && enhancedHeaderHtml.includes("搜索应用、文件、中转、剪贴板…"), headerHtml + enhancedHeaderHtml);
 
 const footerHtml = renderToStaticMarkup(createElement(WorkbenchFooter, {
   hotkeyCombo: "ctrl+space",
