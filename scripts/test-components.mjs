@@ -58,9 +58,11 @@ const launcherHtml = renderToStaticMarkup(createElement(LauncherPanel, {
   onOpenItem: noop,
   onOpenContextMenu: noop,
   onPointerDown: noop,
+  highlights: new Map([[1, [[0, 4]]]]),
 }));
 check("启动台保留 app-grid / app-tile 选择器", launcherHtml.includes('class="app-grid"') && launcherHtml.includes("app-tile selected launcher-missing"), launcherHtml);
 check("启动台图片文件只渲染传入缩略图", launcherHtml.includes('class="app-tile-thumb"') && launcherHtml.includes("base64,thumb"), launcherHtml);
+check("启动台名称保留关键词高亮", launcherHtml.includes("search-highlight") && launcherHtml.includes(">photo</span>.png"), launcherHtml);
 
 const clipItem = { type: "image", time: 7, orig_degraded: true };
 const clipboardHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
@@ -71,9 +73,24 @@ const clipboardHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
   t,
   actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
   drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
+  highlights: new Map(),
 }));
 check("剪贴板保留 clip-block 与降级标记", clipboardHtml.includes('class="clip-block"') && clipboardHtml.includes("clip-degraded-badge"), clipboardHtml);
 check("剪贴板图片只渲染传入缩略图", clipboardHtml.includes("base64,clipthumb") && !clipboardHtml.includes("orig_path"), clipboardHtml);
+
+const clipText = "开头内容用于识别来源，后面经过一段说明后出现关键词，再补充一些细节。";
+const clipTextStart = clipText.indexOf("关键词");
+const clipboardTextHtml = renderToStaticMarkup(createElement(ClipboardPanel, {
+  items: [{ type: "text", time: 8, content: clipText }],
+  search: "关键词",
+  thumbnails: {},
+  copiedTime: null,
+  t,
+  actions: { activate: noop, addToStage: noop, copy: noop, delete: noop, openContextMenu: noop },
+  drag: { pointerDown: noop, pointerMove: noop, pointerUp: noop, pointerCancel: noop, lostPointerCapture: noop },
+  highlights: new Map([[8, [[clipTextStart, clipTextStart + 2]]]]),
+}));
+check("剪贴板文本搜索保留开头和正文高亮", clipboardTextHtml.includes("开头内容") && clipboardTextHtml.includes("search-highlight-body") && clipboardTextHtml.includes("关键词"), clipboardTextHtml);
 
 const stageItem = { id: 9, type: "file", items: [{ path: "C:/lost.txt", name: "lost.txt", ext: "txt", isImage: false }], count: 1, name: "lost.txt", ext: "txt" };
 const stageCommon = {
@@ -87,11 +104,21 @@ const stageCommon = {
   t,
   actions: { activate: noop, openContextMenu: noop, togglePin: noop, copy: noop, remove: noop, open: noop },
   pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
+  highlightRanges: [],
+  pageSearchActive: false,
 };
 const stageGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageCommon));
 const stageListHtml = renderToStaticMarkup(createElement(StageListRow, stageCommon));
 check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
 check("失效中转项不渲染复制/打开操作", !stageGridHtml.includes("复制到剪贴板") && !stageListHtml.includes('title="打开"'), stageGridHtml + stageListHtml);
+
+const stageText = "开头文字保留识别，经过较长的描述之后才出现关键词供搜索定位。";
+const stageTextStart = stageText.indexOf("关键词");
+const stageTextCommon = { ...stageCommon, item: { id: 10, type: "text", content: stageText }, missing: false, highlightRanges: [[stageTextStart, stageTextStart + 2]], pageSearchActive: true };
+const stageTextGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageTextCommon));
+const stageTextListHtml = renderToStaticMarkup(createElement(StageListRow, stageTextCommon));
+check("中转文本卡片将中后段命中移入预览", stageTextGridHtml.includes("关键词") && stageTextGridHtml.includes("search-highlight-body"), stageTextGridHtml);
+check("中转文本列表保留正文高亮", stageTextListHtml.includes("关键词") && stageTextListHtml.includes("search-highlight-body"), stageTextListHtml);
 
 const enhancedHtml = renderToStaticMarkup(createElement(EnhancedSearchLayer, {
   open: false,
@@ -159,7 +186,7 @@ const pickerHtml = renderToStaticMarkup(createElement(LauncherPickerDialog, {
   onAddApp: noop,
 }));
 check("应用选择弹层保留搜索与浏览入口", pickerHtml.includes("picker-modal") && pickerHtml.includes("picker-search-input") && pickerHtml.includes("浏览文件夹"), pickerHtml);
-check("应用选择高亮保持闭区间范围", pickerHtml.includes(">Cal</span>culator"), pickerHtml);
+check("应用选择高亮保持闭区间范围", pickerHtml.includes("search-highlight") && pickerHtml.includes(">Cal</span>culator"), pickerHtml);
 
 const recoveryHtml = renderToStaticMarkup(createElement(StageRecoveryDialog, {
   items: [],

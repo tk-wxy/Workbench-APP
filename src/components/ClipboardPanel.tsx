@@ -1,5 +1,7 @@
 import type { MouseEvent, PointerEvent } from "react";
 import { ago, fileGlyphFor } from "../lib/format";
+import { buildSearchExcerpt, CLIPBOARD_SEARCH_EXCERPT, type TextRange } from "../domain/pageSearchPresentation";
+import HighlightText from "./HighlightText";
 import {
   FileGlyph,
   IconBox,
@@ -38,6 +40,8 @@ interface ClipboardCardProps {
   t: Translate;
   actions: ClipboardPanelActions;
   drag: ClipboardPanelDragHandlers;
+  highlightRanges: TextRange[];
+  searchActive: boolean;
 }
 
 function ClipboardCard({
@@ -47,7 +51,14 @@ function ClipboardCard({
   t,
   actions,
   drag,
+  highlightRanges,
+  searchActive,
 }: ClipboardCardProps) {
+  const textContent = item.content || "";
+  const textPreview = searchActive && highlightRanges.length
+    ? buildSearchExcerpt(textContent, highlightRanges, CLIPBOARD_SEARCH_EXCERPT)
+    : { text: `${textContent.slice(0, 100)}${textContent.length > 100 ? "…" : ""}`, ranges: [] as TextRange[] };
+  const fileLabel = item.count === 1 ? item.items?.[0]?.name || "" : t("{n}个文件", { n: item.count ?? 0 });
   return (
     <div
       className="clip-block"
@@ -72,10 +83,10 @@ function ClipboardCard({
       </> : item.type === "file" ? (
         <div className="file-clip-preview">
           <span className="clip-file-icon"><FileGlyph size={20} {...fileGlyphFor(item)}/></span>
-          <span className="file-clip-info">{item.count === 1 ? item.items?.[0]?.name : t("{n}个文件", { n: item.count ?? 0 })}</span>
+          <span className="file-clip-info"><HighlightText text={fileLabel} ranges={highlightRanges}/></span>
         </div>
       ) : (
-        <span className="clip-preview">{item.content?.slice(0, 100)}{(item.content?.length ?? 0) > 100 ? "…" : ""}</span>
+        <span className={`clip-preview${searchActive && highlightRanges.length ? " search-snippet" : ""}`}><HighlightText text={textPreview.text} ranges={textPreview.ranges} variant="body"/></span>
       )}
       <div className="clip-foot">
         <span className="clip-time">
@@ -102,6 +113,7 @@ interface ClipboardPanelProps {
   t: Translate;
   actions: ClipboardPanelActions;
   drag: ClipboardPanelDragHandlers;
+  highlights: ReadonlyMap<number, TextRange[]>;
 }
 
 function ClipboardPanel({
@@ -112,6 +124,7 @@ function ClipboardPanel({
   t,
   actions,
   drag,
+  highlights,
 }: ClipboardPanelProps) {
   const hasSearch = !!search.trim();
 
@@ -130,6 +143,8 @@ function ClipboardPanel({
             t={t}
             actions={actions}
             drag={drag}
+            highlightRanges={highlights.get(item.time) ?? []}
+            searchActive={hasSearch}
           />
         )) : hasSearch ? <p className="empty-hint">{t("无匹配")}</p> : (
           <div className="clip-empty-guide" aria-label={t("复制内容会自动出现在这里")}>
