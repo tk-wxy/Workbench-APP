@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fr
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
 import { IMG_EXTS, dirOf, fileGlyphFor } from "./lib/format";
-import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
+import { fuzzyScore, typeKeywords } from "./lib/fuzzy";
 import { tokenFromCode, parseComboStr, comboLabel } from "./lib/hotkey";
 import LauncherPanel from "./components/LauncherPanel";
 import ClipboardPanel, { type ClipboardPanelActions, type ClipboardPanelDragHandlers } from "./components/ClipboardPanel";
@@ -16,6 +16,7 @@ import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
 import { appUsageScore } from "./domain/appUsage";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
+import { matchPageSearch, type TextRange } from "./domain/pageSearchPresentation";
 import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
 import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
 import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
@@ -1044,14 +1045,21 @@ export default function App() {
   // 只喂视觉列表；两者相差至多一两帧内收敛，打字停下即一致，不影响回车/方向键选中。
   const deferredSearch = useDeferredValue(search);
   // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
-  const filteredStage = useMemo(() => {
+  const stagePageSearch = useMemo(() => {
     const q = deferredSearch.trim();
-    if (!q) return stage;
-    return stage.filter(s => {
+    if (!q) return { items: stage, highlights: new Map<number, TextRange[]>() };
+    const items: StageItem[] = [];
+    const highlights = new Map<number, TextRange[]>();
+    for (const s of stage) {
       const name = s.type === "text" ? (s.content || "") : s.type === "image" ? "图片" : (s.name || s.items?.[0]?.name || "文件");
-      return matchItem(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
-    });
+      const match = matchPageSearch(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
+      if (!match.matches) continue;
+      items.push(s);
+      highlights.set(s.id, match.ranges);
+    }
+    return { items, highlights };
   }, [stage, deferredSearch]);
+  const filteredStage = stagePageSearch.items;
   // 中转区失踪扫描是低优先级任务：呼出后才延迟启动；按小批次检查并让出执行机会。
   // 预算耗尽时不清空未检查路径的旧状态，避免“尚未检查”被误标；下一次呼出再继续。
   const scanStageMissing = useCallback(async (generationOrInitial: number | StageItem[]) => {
@@ -1126,20 +1134,36 @@ export default function App() {
     setMissingPaths(new Set());
   }, [missingPaths, saveStage]);
   // 剪贴板历史：同上
-  const filteredClip = useMemo(() => {
+  const clipboardPageSearch = useMemo(() => {
     const q = deferredSearch.trim();
-    if (!q) return clipboard;
-    return clipboard.filter(c => {
+    if (!q) return { items: clipboard, highlights: new Map<number, TextRange[]>() };
+    const items: ClipItem[] = [];
+    const highlights = new Map<number, TextRange[]>();
+    for (const c of clipboard) {
       const name = c.type === "text" ? (c.content || "") : c.type === "image" ? "图片" : (c.items?.[0]?.name || "文件");
-      return matchItem(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
-    });
+      const match = matchPageSearch(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
+      if (!match.matches) continue;
+      items.push(c);
+      highlights.set(c.time, match.ranges);
+    }
+    return { items, highlights };
   }, [clipboard, deferredSearch]);
+  const filteredClip = clipboardPageSearch.items;
   // 启动器过滤：有 search 时按名称模糊过滤，无 search 直接返回原列表（持久化/拖入/picker 行为不受影响）
-  const filteredLauncher = useMemo(() => {
+  const launcherPageSearch = useMemo(() => {
     const q = deferredSearch.trim();
-    if (!q) return launcher;
-    return launcher.filter(it => matchItem(q, it.name, []));
+    if (!q) return { items: launcher, highlights: new Map<number, TextRange[]>() };
+    const items: LauncherItem[] = [];
+    const highlights = new Map<number, TextRange[]>();
+    for (const item of launcher) {
+      const match = matchPageSearch(q, item.name, []);
+      if (!match.matches) continue;
+      items.push(item);
+      highlights.set(item.id, match.ranges);
+    }
+    return { items, highlights };
   }, [launcher, deferredSearch]);
+  const filteredLauncher = launcherPageSearch.items;
 
   // ── 操作函数 ──
   // 启动放大暂留：深拷贝源图标容器（.app-tile-icon / .enh-result-icon）到顶层 dragLayer，按源 rect 定位，
@@ -2305,7 +2329,7 @@ export default function App() {
           ref={launcherDropRef}
           items={filteredLauncher}
           totalCount={launcher.length}
-          search={search}
+          search={deferredSearch}
           selectedIndex={launcherSelIdx}
           missingIds={missingLauncherIds}
           thumbnails={stageThumbs}
@@ -2315,6 +2339,7 @@ export default function App() {
           onOpenItem={openLauncherItem}
           onOpenContextMenu={openLauncherCtxMenu}
           onPointerDown={handleLauncherPointerDown}
+          highlights={launcherPageSearch.highlights}
         />
         <section className="center-panel">
           <div className="stage-section-header">
@@ -2370,6 +2395,8 @@ export default function App() {
                     t={t}
                     actions={stageItemActions}
                     pointer={stageItemPointer}
+                    highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
+                    pageSearchActive={!!deferredSearch.trim()}
                   />
                 ))}</div>
               : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>(
@@ -2387,6 +2414,8 @@ export default function App() {
                     t={t}
                     actions={stageItemActions}
                     pointer={stageItemPointer}
+                    highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
+                    pageSearchActive={!!deferredSearch.trim()}
                   />
                 ))}</div>
             ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
@@ -2410,12 +2439,13 @@ export default function App() {
         </section>
         <ClipboardPanel
           items={filteredClip}
-          search={search}
+          search={deferredSearch}
           thumbnails={clipThumbs}
           copiedTime={copiedTime}
           t={t}
           actions={clipboardPanelActions}
           drag={clipboardPanelDrag}
+          highlights={clipboardPageSearch.highlights}
         />
       </main>
       {/* ── 增强搜索层：轻量 shell 常驻以保留呼出动画；结果 DOM / preview 仅在打开时挂载 ── */}

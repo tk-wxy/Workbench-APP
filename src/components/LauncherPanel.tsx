@@ -1,5 +1,7 @@
 import { forwardRef, memo, type MouseEvent, type PointerEvent } from "react";
 import { IMG_EXTS } from "../lib/format";
+import type { TextRange } from "../domain/pageSearchPresentation";
+import HighlightText from "./HighlightText";
 import { FileGlyph, IconRocket, IconWarn } from "../icons";
 import type { LauncherItem } from "../types";
 
@@ -14,6 +16,7 @@ interface LauncherTileProps {
   onOpen: (item: LauncherItem, iconEl: HTMLElement | null) => void;
   onContextMenu: (event: MouseEvent, item: LauncherItem) => void;
   onPointerDown: (event: PointerEvent, id: number) => void;
+  highlightRanges: TextRange[];
 }
 
 const LauncherTile = memo(function LauncherTile({
@@ -25,6 +28,7 @@ const LauncherTile = memo(function LauncherTile({
   onOpen,
   onContextMenu,
   onPointerDown,
+  highlightRanges,
 }: LauncherTileProps) {
   const imageThumbnail = item.kind === "file"
     && !!item.ext
@@ -56,7 +60,7 @@ const LauncherTile = memo(function LauncherTile({
                 ? <FileGlyph ext={item.ext ?? ""} size={42}/>
                 : <span>{item.name[0]}</span>}
       </div>
-      <div className="app-tile-label-wrap"><span className="app-tile-label">{item.name}</span></div>
+      <div className="app-tile-label-wrap"><span className="app-tile-label"><HighlightText text={item.name} ranges={highlightRanges}/></span></div>
     </div>
   );
 });
@@ -74,6 +78,7 @@ interface LauncherPanelProps {
   onOpenItem: (item: LauncherItem, iconEl: HTMLElement | null) => void;
   onOpenContextMenu: (event: MouseEvent, item: LauncherItem) => void;
   onPointerDown: (event: PointerEvent, id: number) => void;
+  highlights: ReadonlyMap<number, TextRange[]>;
 }
 
 const LauncherPanel = memo(forwardRef<HTMLDivElement, LauncherPanelProps>(function LauncherPanel({
@@ -89,6 +94,7 @@ const LauncherPanel = memo(forwardRef<HTMLDivElement, LauncherPanelProps>(functi
   onOpenItem,
   onOpenContextMenu,
   onPointerDown,
+  highlights,
 }, ref) {
   const hasSearch = !!search.trim();
 
@@ -113,6 +119,7 @@ const LauncherPanel = memo(forwardRef<HTMLDivElement, LauncherPanelProps>(functi
             onOpen={onOpenItem}
             onContextMenu={onOpenContextMenu}
             onPointerDown={onPointerDown}
+            highlightRanges={highlights.get(item.id) ?? []}
           />
         ))}
         {!items.length && (hasSearch ? <p className="empty-hint">{t("无匹配")}</p> : (

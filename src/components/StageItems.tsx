@@ -1,5 +1,7 @@
 import { memo, type MouseEvent, type PointerEvent } from "react";
 import { fmtSize } from "../lib/format";
+import { buildSearchExcerpt, STAGE_GRID_SEARCH_EXCERPT, STAGE_LIST_SEARCH_EXCERPT, type TextRange } from "../domain/pageSearchPresentation";
+import HighlightText from "./HighlightText";
 import { FileGlyph, IconCheck, IconCopy, IconOpen, IconPin, IconTrash, IconWarn } from "../icons";
 import type { StageItem } from "../types";
 
@@ -34,6 +36,8 @@ interface StageItemViewProps {
   t: Translate;
   actions: StageItemActions;
   pointer: StageItemPointerHandlers;
+  highlightRanges: TextRange[];
+  pageSearchActive: boolean;
 }
 
 const rootTitle = (item: StageItem, missing: boolean, multiselect: boolean, t: Translate, grid: boolean) => {
@@ -58,6 +62,8 @@ export const StageGridCard = memo(function StageGridCard({
   t,
   actions,
   pointer,
+  highlightRanges,
+  pageSearchActive,
 }: StageItemViewProps) {
   const rawExt = (item.ext || item.items?.[0]?.ext || "").replace(/^\./, "");
   const isAnyDir = !!item.isDir;
@@ -67,6 +73,9 @@ export const StageGridCard = memo(function StageGridCard({
   const cardMeta = item.type === "image" ? t("图片")
     : item.type === "text" ? t("文本")
       : isAnyDir ? t("文件夹") : rawExt ? `.${rawExt}` : t("文件");
+  const textPreview = pageSearchActive && highlightRanges.length
+    ? buildSearchExcerpt(item.content || "", highlightRanges, STAGE_GRID_SEARCH_EXCERPT)
+    : { text: item.content || "", ranges: [] as TextRange[] };
   const pin = persistAll ? null : (
     <button
       type="button"
@@ -108,7 +117,7 @@ export const StageGridCard = memo(function StageGridCard({
       {item.type === "text" && (
         <div className="stage-card-thumb">
           {pin}
-          <div className="stage-card-text-preview">{item.content || ""}</div>
+          <div className="stage-card-text-preview"><HighlightText text={textPreview.text} ranges={textPreview.ranges} variant="body"/></div>
         </div>
       )}
       {item.type === "file" && (
@@ -123,7 +132,7 @@ export const StageGridCard = memo(function StageGridCard({
         </div>
       )}
       <div className="stage-card-label">
-        <span className="stage-card-name">{cardName}</span>
+        <span className="stage-card-name"><HighlightText text={cardName} ranges={item.type === "text" ? [] : highlightRanges}/></span>
         <span className="stage-card-meta">{cardMeta}</span>
       </div>
       <div className="stage-card-actions">
@@ -151,8 +160,14 @@ export const StageListRow = memo(function StageListRow({
   t,
   actions,
   pointer,
+  highlightRanges,
+  pageSearchActive,
 }: StageItemViewProps) {
-  const label = item.type === "text" ? (item.content?.slice(0, 60) || t("文本"))
+  const rawText = item.content || "";
+  const textPreview = pageSearchActive && highlightRanges.length
+    ? buildSearchExcerpt(rawText, highlightRanges, STAGE_LIST_SEARCH_EXCERPT)
+    : { text: rawText.slice(0, 60) || t("文本"), ranges: [] as TextRange[] };
+  const label = item.type === "text" ? textPreview.text
     : item.type === "image" ? t("图片")
       : item.count !== 1 ? t("{n} 个文件", { n: item.count ?? 0 }) : (item.name || item.items?.[0]?.name || t("文件"));
   const imageSource = imageThumbnail || item.content;
@@ -182,7 +197,7 @@ export const StageListRow = memo(function StageListRow({
               ? <FileGlyph cat="doc" size={20}/>
               : <FileGlyph size={20} isDir={item.isDir} isImage={item.items?.[0]?.isImage} ext={item.ext ?? item.items?.[0]?.ext ?? ""}/>}</span>}
       {missing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
-      <span className="stage-title">{label}</span>
+      <span className="stage-title"><HighlightText text={label} ranges={item.type === "text" ? textPreview.ranges : highlightRanges} variant={item.type === "text" ? "body" : "name"}/></span>
       {item.type === "file" && item.count === 1 && item.size ? <span className="stage-meta">{fmtSize(item.size)}</span> : null}
       {!persistAll && (
         <button
