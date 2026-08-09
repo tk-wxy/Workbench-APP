@@ -31,7 +31,6 @@
   --card-bg: rgba(255,255,255,0.07);
   --card-thumb-bg: rgba(255,255,255,0.035);
   --card-border-c: rgba(255,255,255,0.10);
-  --card-border-hover-c: rgba(255,255,255,0.22);
   /* 分类色（续116）：预览面板徽标用。色相与「增强搜索结果分段」同一套写像（format.ts catToGroup），
      故徽标颜色 == 该项所属段落 —— 色是分类的再确认，不是装饰。8 组封顶，再细就成彩虹、
      反而丢掉「同类=同色」的节奏感。暗色主题下取中高明度以便在 --card-bg 上浮起来。 */
@@ -64,7 +63,6 @@
   --card-bg: #ffffff;
   --card-thumb-bg: #f3f3f4;
   --card-border-c: rgba(0,0,0,0.09);
-  --card-border-hover-c: rgba(0,0,0,0.20);
   /* 分类色·浅色主题：同色相往暗处压（保证在白色 --card-bg 上的可读性——直接沿用暗色版会太淡、字看不清）。
      色相排列顺序与暗色版保持一致，切换主题时分类感不会错乱。 */
   --c-folder: #9A6B00;
@@ -276,9 +274,12 @@ input,textarea{user-select:text;-webkit-user-select:text;}
    两侧网格逐行的行节奏（卡高+行距）必须相等，否则逐行累积漂移，下方越滚越错位（不是首行对不齐的问题）。
    注：gap 是横竖同值，纵向 6px 锁定行节奏不可动；横向卡间距的"略增"来自 space-evenly 的余量分配，非改 gap。*/
 .stage-grid{display:grid;grid-template-columns:repeat(auto-fill,72px);justify-content:space-evenly;gap:6px;align-content:start;}
-/* 卡片壳：固定宽度 + flex-shrink:0 防压缩 */
-.stage-card{position:relative;width:72px;min-width:72px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:9px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;transition:border-color 80ms,box-shadow 80ms;}
-.stage-card:hover{border-color:var(--card-border-hover-c);}
+/* 卡片壳：固定宽度 + flex-shrink:0 防压缩。
+   hover 只有一圈 2px accent 外轮廓，不再叠加蓝色描边，避免形成两条细线；不做 translate/scale：
+   中转站重排会读取卡片 rect 并用 transform 做 FLIP，改几何会污染落点计算。outline 不占布局，
+   也不需要常驻 will-change 或额外投影绘制。 */
+.stage-card{position:relative;width:72px;min-width:72px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:9px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;outline:2px solid transparent;outline-offset:1px;transition:outline-color 110ms ease-out;}
+.stage-card:hover{z-index:1;outline-color:var(--accent);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
 /* 缩略图区：固定 72×62（续98：封面加高 4px，来自下方标签区/悬浮菜单等量收窄，卡片总高 94px 不变）*/
 .stage-card-thumb{width:72px;height:62px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
@@ -408,6 +409,11 @@ input,textarea{user-select:text;-webkit-user-select:text;}
    下方内容顶上来显不齐；统一 min-height 后 align-items:center 使标题基线对齐（多选工具栏换行时仍可超出）。 */
 .stage-section-header{display:flex;align-items:center;justify-content:space-between;padding:6px 16px 4px;flex-shrink:0;gap:8px;min-height:34px;}
 .stage-section-header .section-label{padding:0;flex-shrink:0;}
+.clip-category-tabs{display:flex;align-items:center;gap:2px;min-width:0;}
+.clip-category-btn{width:26px;height:26px;border:1px solid transparent;border-radius:5px;background:transparent;color:var(--text3);cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;transition:background 80ms,color 80ms,border-color 80ms;}
+.clip-category-btn svg{display:block;}
+.clip-category-btn:hover{background:var(--hover);color:var(--text2);}
+.clip-category-btn.active{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 46%,transparent);color:var(--accent);}
 .launcher-header-actions{display:flex;align-items:center;gap:4px;}
 .stage-multi-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
 .stage-sel-count{font-size:11px;color:var(--text2);white-space:nowrap;padding:0 4px;}

@@ -25,6 +25,8 @@ export const EN_DICT: Record<string, string> = {
   "清空": "Clear",
   "已复制": "Copied",
   "无匹配": "No matches",
+  "全部": "All",
+  "剪贴板分类": "Clipboard categories",
   "文件": "File",
   "文件夹": "Folder",
   "图片": "Image",
@@ -181,6 +183,7 @@ export const EN_DICT: Record<string, string> = {
 
   // ── 增强搜索 ──
   "搜索应用、中转、剪贴板…": "Search apps, stage, clipboard…",
+  "搜索应用、文件、中转、剪贴板…": "Search apps, files, stage, clipboard…",
   "界面搜索": "Page Search",
   "增强搜索": "Enhanced Search",
   "Everything 未运行，已回退内置搜索": "Everything isn't running; fell back to built-in search",

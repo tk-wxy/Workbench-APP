@@ -13,6 +13,8 @@ import HighlightText from "./components/HighlightText";
 import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog";
 import { LauncherManagerDialog, LauncherPickerDialog, StageRecoveryDialog } from "./components/WorkbenchDialogs";
 import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
+import { type ClipboardCategory } from "./domain/clipboardCategory";
+import { buildClipboardPageSearch } from "./domain/clipboardPageSearch";
 import { appUsageScore } from "./domain/appUsage";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
@@ -77,6 +79,8 @@ const ENH_DEBOUNCE_EVERYTHING_MS = 150;
 /// 搜索现场（页面搜索/增强搜索）保留时长：隐藏时若仍带着搜索现场则不立即复位，保留此时长供用户
 /// 多次呼出继续浏览；每次隐藏重新起算，呼出即取消计时；超时在隐藏中静默复位，下次呼出全新。
 const SEARCH_KEEP_MS = 10_000;
+// 剪贴板分类仅是临时视图上下文：隐藏后给快速来回切换保留 10 秒，超时回到“全部”。
+const CLIPBOARD_CATEGORY_KEEP_MS = 10_000;
 /// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
 /// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
 const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
@@ -138,6 +142,8 @@ export default function App() {
   const [visible, setVisible] = useState(false);
   const [search, setSearch] = useState("");
   const searchValueRef = useRef(""); searchValueRef.current = search; // 供 hotkey-hide 闭包读最新值（判定有无搜索现场）
+  const [clipboardCategory, setClipboardCategory] = useState<ClipboardCategory>("all");
+  const clipboardCategoryRef = useRef<ClipboardCategory>("all"); clipboardCategoryRef.current = clipboardCategory;
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
@@ -663,6 +669,7 @@ export default function App() {
     let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
     let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
     let uiKeepTimer: ReturnType<typeof setTimeout> | null = null;
+    let clipboardCategoryKeepTimer: ReturnType<typeof setTimeout> | null = null;
     // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
     const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); clearEnhancedSearchResults(); setSearch(""); pageSearchForcedRef.current = false; };
     // 可恢复工作现场与危险瞬态分开：多选/管理弹层保留 10 秒；拖拽、框选、菜单仍在 hide 当场清。
@@ -689,6 +696,7 @@ export default function App() {
         await register("hotkey-show", () => {
           if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; }
           if (uiKeepTimer !== null) { clearTimeout(uiKeepTimer); uiKeepTimer = null; }
+          if (clipboardCategoryKeepTimer !== null) { clearTimeout(clipboardCategoryKeepTimer); clipboardCategoryKeepTimer = null; }
           setVisible(true);
           scheduleStageMissingScan();
         }); // 失效检查延后到首屏可操作后，绝不阻塞呼出。
@@ -740,6 +748,16 @@ export default function App() {
             }, SEARCH_KEEP_MS);
           } else {
             resetRetainedUiState();
+          }
+
+          if (clipboardCategoryKeepTimer !== null) clearTimeout(clipboardCategoryKeepTimer);
+          if (clipboardCategoryRef.current !== "all") {
+            clipboardCategoryKeepTimer = setTimeout(() => {
+              clipboardCategoryKeepTimer = null;
+              setClipboardCategory("all");
+            }, CLIPBOARD_CATEGORY_KEEP_MS);
+          } else {
+            clipboardCategoryKeepTimer = null;
           }
         }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；菜单/toast 同样立即清）
         // 性能优化步骤2：image 条目 content 已不入前端 state，无法再按 content 做乐观去重。
@@ -922,7 +940,7 @@ export default function App() {
         // badge 是主提示；toast 只在界面仍可见的首次消费降级时补一句，避免粘贴已隐藏后留下幽灵提示。
         await register<ClipboardOriginalDegradedPayload>("clipboard-original-degraded", event => passiveEventHandlers.onClipboardOriginalDegraded(event.payload));
     });
-    return () => { eventScope.dispose(); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); if (uiKeepTimer) clearTimeout(uiKeepTimer); };
+    return () => { eventScope.dispose(); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); if (uiKeepTimer) clearTimeout(uiKeepTimer); if (clipboardCategoryKeepTimer) clearTimeout(clipboardCategoryKeepTimer); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
@@ -1134,20 +1152,10 @@ export default function App() {
     setMissingPaths(new Set());
   }, [missingPaths, saveStage]);
   // 剪贴板历史：同上
-  const clipboardPageSearch = useMemo(() => {
-    const q = deferredSearch.trim();
-    if (!q) return { items: clipboard, highlights: new Map<number, TextRange[]>() };
-    const items: ClipItem[] = [];
-    const highlights = new Map<number, TextRange[]>();
-    for (const c of clipboard) {
-      const name = c.type === "text" ? (c.content || "") : c.type === "image" ? "图片" : (c.items?.[0]?.name || "文件");
-      const match = matchPageSearch(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
-      if (!match.matches) continue;
-      items.push(c);
-      highlights.set(c.time, match.ranges);
-    }
-    return { items, highlights };
-  }, [clipboard, deferredSearch]);
+  const clipboardPageSearch = useMemo(
+    () => buildClipboardPageSearch(clipboard, deferredSearch, clipboardCategory),
+    [clipboard, clipboardCategory, deferredSearch],
+  );
   const filteredClip = clipboardPageSearch.items;
   // 启动器过滤：有 search 时按名称模糊过滤，无 search 直接返回原列表（持久化/拖入/picker 行为不受影响）
   const launcherPageSearch = useMemo(() => {
@@ -2316,7 +2324,7 @@ export default function App() {
     <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
-        <WorkbenchSearchHeader search={headerSearchTarget === "enhanced" ? enhQuery : search} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>
+        <WorkbenchSearchHeader search={headerSearchTarget === "enhanced" ? enhQuery : search} enhanced={headerSearchTarget === "enhanced"} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>
         <div className="top-right">
           <Clock lang={lang}/>
           <button className="settings-btn" onClick={()=>setSettingsOpen(true)} title={t("设置")} aria-label={t("设置")}>
@@ -2440,12 +2448,14 @@ export default function App() {
         <ClipboardPanel
           items={filteredClip}
           search={deferredSearch}
+          category={clipboardCategory}
           thumbnails={clipThumbs}
           copiedTime={copiedTime}
           t={t}
           actions={clipboardPanelActions}
           drag={clipboardPanelDrag}
           highlights={clipboardPageSearch.highlights}
+          onCategoryChange={setClipboardCategory}
         />
       </main>
       {/* ── 增强搜索层：轻量 shell 常驻以保留呼出动画；结果 DOM / preview 仅在打开时挂载 ── */}

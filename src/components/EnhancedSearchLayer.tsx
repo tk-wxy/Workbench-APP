@@ -98,7 +98,7 @@ export default function EnhancedSearchLayer({
         <input
           ref={inputRef}
           className="enh-search-input"
-          placeholder={t("搜索应用、中转、剪贴板…")}
+          placeholder={t("搜索应用、文件、中转、剪贴板…")}
           value={inputValue}
           onChange={event => handleInputChange(event.target.value)}
           spellCheck={false}

@@ -1,5 +1,6 @@
 import type { MouseEvent, PointerEvent } from "react";
 import { ago, fileGlyphFor } from "../lib/format";
+import type { ClipboardCategory } from "../domain/clipboardCategory";
 import { buildSearchExcerpt, CLIPBOARD_SEARCH_EXCERPT, type TextRange } from "../domain/pageSearchPresentation";
 import HighlightText from "./HighlightText";
 import {
@@ -108,32 +109,64 @@ function ClipboardCard({
 interface ClipboardPanelProps {
   items: ClipItem[];
   search: string;
+  category: ClipboardCategory;
   thumbnails: Record<number, string>;
   copiedTime: number | null;
   t: Translate;
   actions: ClipboardPanelActions;
   drag: ClipboardPanelDragHandlers;
   highlights: ReadonlyMap<number, TextRange[]>;
+  onCategoryChange: (category: ClipboardCategory) => void;
+}
+
+const CATEGORY_OPTIONS: ReadonlyArray<{ value: ClipboardCategory; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "text", label: "文本" },
+  { value: "image", label: "截图" },
+  { value: "file", label: "文件" },
+];
+
+function CategoryIcon({ category }: { category: ClipboardCategory }) {
+  if (category === "text") return <FileGlyph size={14} cat="text"/>;
+  if (category === "image") return <IconCamera size={14}/>;
+  if (category === "file") return <IconPaperclip size={14}/>;
+  return <IconClipboard size={14}/>;
 }
 
 function ClipboardPanel({
   items,
   search,
+  category,
   thumbnails,
   copiedTime,
   t,
   actions,
   drag,
   highlights,
+  onCategoryChange,
 }: ClipboardPanelProps) {
   const hasSearch = !!search.trim();
+  const hasActiveFilter = hasSearch || category !== "all";
 
   return (
     <section className="clip-panel">
       <div className="stage-section-header">
         <span className="section-label">{t("剪贴板历史")}</span>
+        <div className="clip-category-tabs" role="group" aria-label={t("剪贴板分类")}>
+          {CATEGORY_OPTIONS.map(option => (
+            <button
+              key={option.value}
+              type="button"
+              className={`clip-category-btn${category === option.value ? " active" : ""}`}
+              aria-pressed={category === option.value}
+              aria-label={t(option.label)}
+              title={t(option.label)}
+              onClick={() => onCategoryChange(option.value)}
+            ><CategoryIcon category={option.value}/></button>
+          ))}
+        </div>
       </div>
-      <div className={`clip-list${!items.length && !hasSearch ? " clip-list-empty" : ""}`}>
+      <div className={`clip-list${!items.length && !hasActiveFilter ? " clip-list-empty" : ""}`}>
         {items.length ? items.map(item => (
           <ClipboardCard
             key={item.time}
@@ -146,7 +179,7 @@ function ClipboardPanel({
             highlightRanges={highlights.get(item.time) ?? []}
             searchActive={hasSearch}
           />
-        )) : hasSearch ? <p className="empty-hint">{t("无匹配")}</p> : (
+        )) : hasActiveFilter ? <p className="empty-hint">{t("无匹配")}</p> : (
           <div className="clip-empty-guide" aria-label={t("复制内容会自动出现在这里")}>
             <span className="clip-empty-guide-icon"><IconClipboard size={26}/></span>
             <span className="clip-empty-guide-title">{t("复制内容会自动出现在这里")}</span>
