@@ -1,14 +1,14 @@
 {
   "name": "workbench-app",
   "private": true,
-  "version": "0.26.2",
+  "version": "0.27.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "npm run version:check && npm run frontend:check && npm run typecheck && vite build",
     "test": "npm run verify",
     "verify": "npm run build && npm run clippy && npm run test:rust",
-    "frontend:check": "node scripts/test-enh-sections.mjs && node scripts/test-enhanced-search-domain.mjs && node scripts/test-enhanced-search-results.mjs && node scripts/test-format.mjs && node scripts/test-fuzzy.mjs && node scripts/test-pinyin.mjs && node scripts/test-hotkey.mjs && node scripts/test-ui-policies.mjs && node scripts/test-native-events.mjs && node scripts/test-startup-platform.mjs && node scripts/test-cache-api.mjs && node scripts/test-search-api.mjs && node scripts/test-search-preview-api.mjs && node scripts/test-search-selection.mjs && node scripts/test-passive-event-handlers.mjs && node scripts/test-launcher-layout.mjs && node scripts/test-persist-queue.mjs && node scripts/test-thumbnail-caches.mjs && node scripts/test-perf-trace.mjs && node scripts/test-components.mjs && node scripts/check-i18n.mjs && node scripts/check-ipc.mjs && node scripts/check-css.mjs",
+    "frontend:check": "node scripts/test-version-sync.mjs && node scripts/test-enh-sections.mjs && node scripts/test-enhanced-search-domain.mjs && node scripts/test-enhanced-search-results.mjs && node scripts/test-search-synchronization.mjs && node scripts/test-format.mjs && node scripts/test-fuzzy.mjs && node scripts/test-pinyin.mjs && node scripts/test-hotkey.mjs && node scripts/test-ui-policies.mjs && node scripts/test-keyboard-navigation.mjs && node scripts/test-native-events.mjs && node scripts/test-startup-platform.mjs && node scripts/test-cache-api.mjs && node scripts/test-search-api.mjs && node scripts/test-search-synchronization-api.mjs && node scripts/test-search-preview-api.mjs && node scripts/test-search-selection.mjs && node scripts/test-passive-event-handlers.mjs && node scripts/test-launcher-layout.mjs && node scripts/test-launcher-actions-api.mjs && node scripts/test-clipboard-drag.mjs && node scripts/test-clipboard-drag-api.mjs && node scripts/test-stage-item-identity.mjs && node scripts/test-stage-interaction.mjs && node scripts/test-persist-queue.mjs && node scripts/test-thumbnail-caches.mjs && node scripts/test-perf-trace.mjs && node scripts/test-components.mjs && node scripts/check-i18n.mjs && node scripts/check-ipc.mjs && node scripts/check-css.mjs",
     "typecheck": "tsc",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",

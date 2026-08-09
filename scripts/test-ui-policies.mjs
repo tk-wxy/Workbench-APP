@@ -48,13 +48,13 @@ const priority = [
   ["clipDragActive", "clip-drag"],
   ["lassoActive", "lasso"],
   ["contextMenuOpen", "context-menu"],
+  ["settingsOpen", "settings"],
   ["enhancedSearchOpen", "enhanced-search"],
   ["stageRecoveryOpen", "stage-recovery"],
   ["launcherManagerOpen", "launcher-manager"],
   ["appPickerOpen", "app-picker"],
   ["stageSelectionActive", "stage-selection"],
   ["launcherSelectionActive", "launcher-selection"],
-  ["settingsOpen", "settings"],
 ];
 for (let index = 0; index < priority.length; index++) {
   const snapshot = { ...base };
@@ -64,6 +64,10 @@ for (let index = 0; index < priority.length; index++) {
   check(`${expected} 优先于其后所有层`, actual === expected, `实际: ${actual}`);
 }
 check("无浮层时 Esc 关闭工作台", resolveEscapeTarget(base) === "workbench");
+check(
+  "设置与增强搜索同时显示时先关闭设置",
+  resolveEscapeTarget({ ...base, settingsOpen: true, enhancedSearchOpen: true }) === "settings",
+);
 
 check(
   "无搜索现场时立即复位搜索",

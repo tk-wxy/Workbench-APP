@@ -36,6 +36,9 @@ export const EN_DICT: Record<string, string> = {
   "切换": "Toggle",
   "核": "cores",
   "复制到剪贴板": "Copy to clipboard",
+  "无法粘贴到以管理员身份运行的应用": "Can't paste into an app running as administrator",
+  "请松开修饰键后重试粘贴": "Release Ctrl, Shift, Alt, or Win, then try pasting again",
+  "粘贴失败": "Paste failed",
 
   // ── 启动器 ──
   "启动器": "Launcher",

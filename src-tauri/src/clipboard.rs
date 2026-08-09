@@ -85,6 +85,10 @@ const FOCUS_HANDBACK_POLL_MS: u64 = 10;
 const FOCUS_HANDBACK_MAX_MS: u64 = 500;
 /// 前台交接确认后的落定余量：前台切换先于目标线程键盘焦点落定，立即注入可能丢键
 const FOCUS_HANDBACK_SETTLE_MS: u64 = 50;
+/// Ctrl+V 注入前的物理修饰键释放确认。绝不伪造 key-up（会破坏用户真实按键状态）；
+/// 仍按住时在窗口可见阶段拒绝本次粘贴，让用户松键重试。
+const PASTE_MODIFIER_RELEASE_POLL_MS: u64 = 10;
+const PASTE_MODIFIER_RELEASE_MAX_MS: u64 = 300;
 
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
@@ -960,7 +964,7 @@ pub(crate) fn set_clip_cache_max(n: usize) {
 /// 窗口 → 点击粘贴偶发失败。改为守卫轮询：前台既非本窗口也非 NULL 即交接完成
 ///（上限 FOCUS_HANDBACK_MAX_MS，超时保底继续不阻断），再留 FOCUS_HANDBACK_SETTLE_MS
 /// 让目标线程键盘焦点落定（前台切换先于键盘焦点落定）。日志带 tag 便于分路径诊断。
-fn wait_foreground_handback(app: &AppHandle, tag: &str) {
+fn wait_foreground_handback(app: &AppHandle, tag: &str) -> isize {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
     let self_hwnd = app.get_webview_window("main")
         .and_then(|w| w.hwnd().ok())
@@ -980,6 +984,162 @@ fn wait_foreground_handback(app: &AppHandle, tag: &str) {
     let fg = unsafe { GetForegroundWindow() }.0 as isize;
     println!("[{tag}] handback waited={waited}ms timeout={timed_out} fg class=\"{}\"",
         get_window_class(fg));
+    fg
+}
+
+fn resolve_paste_target(app: &AppHandle, tag: &str) -> isize {
+    let current = wait_foreground_handback(app, tag);
+    let target = crate::paste_target_hwnd(app, current);
+    println!("[{tag}] paste target class=\"{}\" remembered={}",
+        get_window_class(target), target != current);
+    target
+}
+
+fn activate_paste_target(target: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    if target != 0 {
+        unsafe { let _ = SetForegroundWindow(HWND(target as *mut _)); }
+    }
+}
+
+fn token_is_elevated(process: windows::Win32::Foundation::HANDLE) -> Option<bool> {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+    use windows::Win32::System::Threading::OpenProcessToken;
+
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?; }
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut returned = 0u32;
+    let result = unsafe {
+        GetTokenInformation(
+            token,
+            TokenElevation,
+            Some((&mut elevation as *mut TOKEN_ELEVATION).cast()),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut returned,
+        )
+    };
+    unsafe { let _ = CloseHandle(token); }
+    result.ok().map(|_| elevation.TokenIsElevated != 0)
+}
+
+fn process_is_elevated_for_window(hwnd: isize) -> Option<bool> {
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+    if hwnd == 0 { return None; }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid)); }
+    if pid == 0 { return None; }
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
+    let elevated = token_is_elevated(process);
+    unsafe { let _ = CloseHandle(process); }
+    elevated
+}
+
+fn current_process_is_elevated() -> Option<bool> {
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    token_is_elevated(unsafe { GetCurrentProcess() })
+}
+
+pub(crate) fn uipi_blocks_paste(target_elevated: bool, self_elevated: bool) -> bool {
+    target_elevated && !self_elevated
+}
+
+pub(crate) fn paste_access_error(
+    target_elevated: Option<bool>,
+    self_elevated: Option<bool>,
+) -> Option<&'static str> {
+    match (target_elevated, self_elevated) {
+        (Some(target), Some(current)) if uipi_blocks_paste(target, current) => {
+            Some("paste-target-elevated")
+        }
+        // A standard process is normally unable to open an elevated target for
+        // PROCESS_QUERY_LIMITED_INFORMATION. Treat that inspection failure as
+        // the same actionable UIPI error instead of allowing a silent paste.
+        (None, Some(false)) => Some("paste-target-elevated"),
+        // If our own token cannot be inspected, or an elevated Workbench still
+        // cannot inspect the target, the security preflight is inconclusive.
+        (_, None) | (None, Some(true)) => Some("paste-security-check-failed"),
+        _ => None,
+    }
+}
+
+fn ensure_paste_target_allowed(target: isize) -> Result<(), String> {
+    let target_elevated = process_is_elevated_for_window(target);
+    let self_elevated = current_process_is_elevated();
+    if let Some(error) = paste_access_error(target_elevated, self_elevated) {
+        eprintln!(
+            "[paste] security preflight blocked target_inspected={} self_inspected={}",
+            target_elevated.is_some(),
+            self_elevated.is_some()
+        );
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn preflight_paste_target(app: &AppHandle) -> Result<(), String> {
+    let target = crate::paste_target_hwnd(app, 0);
+    if target == 0 {
+        return Err("paste-target-unavailable".into());
+    }
+    ensure_paste_target_allowed(target)
+}
+
+fn physical_modifier_mask() -> u8 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    const VK_SHIFT: i32 = 0x10;
+    const VK_CONTROL: i32 = 0x11;
+    const VK_MENU: i32 = 0x12;
+    const VK_LWIN: i32 = 0x5B;
+    const VK_RWIN: i32 = 0x5C;
+    let down = |vk| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
+    (down(VK_SHIFT) as u8)
+        | ((down(VK_CONTROL) as u8) << 1)
+        | ((down(VK_MENU) as u8) << 2)
+        | (((down(VK_LWIN) || down(VK_RWIN)) as u8) << 3)
+}
+
+pub(crate) fn modifier_mask_is_clear(mask: u8) -> bool { mask == 0 }
+
+fn wait_for_physical_modifiers_release() -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let max = std::time::Duration::from_millis(PASTE_MODIFIER_RELEASE_MAX_MS);
+    loop {
+        if modifier_mask_is_clear(physical_modifier_mask()) { return Ok(()); }
+        if start.elapsed() >= max { return Err("paste-modifier-held".into()); }
+        std::thread::sleep(std::time::Duration::from_millis(PASTE_MODIFIER_RELEASE_POLL_MS));
+    }
+}
+
+fn preflight_paste(app: &AppHandle) -> Result<(), String> {
+    wait_for_physical_modifiers_release()?;
+    preflight_paste_target(app)
+}
+
+#[tauri::command]
+pub(crate) fn check_paste_ready(app: AppHandle) -> Result<(), String> {
+    preflight_paste(&app)
+}
+
+fn send_ctrl_v(target: isize) -> Result<(), String> {
+    use enigo::Direction::{Press, Release};
+    use enigo::Keyboard;
+    wait_for_physical_modifiers_release()?;
+    activate_paste_target(target);
+    let mut enigo = enigo::Enigo::new(&enigo::Settings::default())
+        .map_err(|e| format!("enigo: {e}"))?;
+    let _ = enigo.key(enigo::Key::Control, Press);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::V, Press);
+    let _ = enigo.key(enigo::Key::V, Release);
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let _ = enigo.key(enigo::Key::Control, Release);
+    Ok(())
 }
 
 /// 获取窗口类名
@@ -1163,20 +1323,18 @@ fn write_cf_hdrop(paths: &[String]) -> Result<(), String> {
 /// 将文件路径列表写回剪贴板（CF_HDROP 格式）或桌面落地 + 粘贴
 #[tauri::command]
 pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-
     // 脱敏：只记条数，不逐条打印完整文件路径（可能泄露目录结构/文件名）。
     println!("[filepaste] paths count={}", paths.len());
+    preflight_paste(&app)?;
 
     // Bug A 修复：场景判断提到写剪贴板之前，桌面直接落地不碰剪贴板
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
         crate::set_webview_memory_low(&window, true);
     }
-    wait_foreground_handback(&app, "filepaste"); // 交接完成后 class 判断才可信（含日志）
-    let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
+    let target = resolve_paste_target(&app, "filepaste");
+    ensure_paste_target_allowed(target)?;
+    let class1 = get_window_class(target);
 
     if class1 == "WorkerW" || class1 == "Progman" {
         return desktop_copy_files(&paths);
@@ -1193,15 +1351,7 @@ pub(crate) fn set_clipboard_files(app: AppHandle, paths: Vec<String>) -> Result<
     }
     suppress_clip_until_now(); // 锁后水位补检：与文本路径对齐，封住 SKIP_CLIP_EVENTS 的竞态死角
 
-    let target = unsafe { GetForegroundWindow() };
-    unsafe { let _ = SetForegroundWindow(target); }
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+    send_ctrl_v(target)?;
     Ok(())
 }
 
@@ -1265,18 +1415,15 @@ fn desktop_copy_files(paths: &[String]) -> Result<(), String> {
 
 #[tauri::command]
 pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Option<String>, time: Option<i64>) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-
+    preflight_paste(&app)?;
     // 先隐藏窗口，再判断目标（与 set_clipboard_files 逻辑对齐）
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
         crate::set_webview_memory_low(&window, true);
     }
-    wait_foreground_handback(&app, "imgpaste"); // 交接完成后 class 判断才可信（含日志）
-
-    let class1 = get_window_class(unsafe { GetForegroundWindow() }.0 as isize);
+    let target = resolve_paste_target(&app, "imgpaste");
+    ensure_paste_target_allowed(target)?;
+    let class1 = get_window_class(target);
 
     if class1 == "WorkerW" || class1 == "Progman" {
         // 桌面：PNG 落地。优先用原图文件（已是 PNG，无需重编码）
@@ -1353,15 +1500,7 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         }
         suppress_clip_until_now();
 
-        let target = unsafe { GetForegroundWindow() };
-        unsafe { let _ = SetForegroundWindow(target); }
-        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-        let _ = enigo.key(enigo::Key::Control, Press);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::V, Press);
-        let _ = enigo.key(enigo::Key::V, Release);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::Control, Release);
+        send_ctrl_v(target)?;
 
         // 临时文件不在此删：大图用的是 clip_images/ 原图（缓存管理）；小图也写在 clip_images/、
         // 由 janitor 孤儿清理（不被任何 orig_path 引用）。无脆弱定时 race，Explorer 读多久都安全。
@@ -1399,15 +1538,7 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
         }
         suppress_clip_until_now();
 
-        let target = unsafe { GetForegroundWindow() };
-        unsafe { let _ = SetForegroundWindow(target); }
-        let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-        let _ = enigo.key(enigo::Key::Control, Press);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::V, Press);
-        let _ = enigo.key(enigo::Key::V, Release);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::Control, Release);
+        send_ctrl_v(target)?;
 
         return Ok(());
     }
@@ -1464,29 +1595,17 @@ pub(crate) fn set_clipboard_image(app: AppHandle, base64: String, orig_path: Opt
             suppress_clip_until_now();
         }
 
-        let target = unsafe { GetForegroundWindow() };
-        unsafe { let _ = SetForegroundWindow(target); }
-        let mut enigo = match enigo::Enigo::new(&enigo::Settings::default()) {
-            Ok(e) => e,
-            Err(e) => { eprintln!("[imgpaste] enigo: {e}"); return; }
-        };
-        let _ = enigo.key(enigo::Key::Control, Press);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::V, Press);
-        let _ = enigo.key(enigo::Key::V, Release);
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let _ = enigo.key(enigo::Key::Control, Release);
+        if let Err(error) = send_ctrl_v(target) {
+            eprintln!("[imgpaste] Ctrl+V 注入失败: {error}");
+        }
     });
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String> {
-    use enigo::Direction::{Press, Release};
-    use enigo::Keyboard;
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
-
     let t0 = std::time::Instant::now();
+    preflight_paste(&app)?;
     {
         // 仅罩写入临界区；绝不跨下面的 hide/sleep/焦点交还/Ctrl+V 持锁（否则阻塞监听线程）
         let _g = CLIPBOARD_LOCK.lock().unwrap();
@@ -1499,20 +1618,8 @@ pub(crate) fn paste_clipboard(app: AppHandle, text: String) -> Result<(), String
         let _ = window.hide();
         crate::set_webview_memory_low(&window, true);
     }
-    wait_foreground_handback(&app, "paste"); // 文本路径原先零日志，失败不可诊断；此处补齐
-
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        let _ = SetForegroundWindow(hwnd);
-    }
-
-    let mut enigo = enigo::Enigo::new(&enigo::Settings::default()).map_err(|e| format!("enigo: {}", e))?;
-    let _ = enigo.key(enigo::Key::Control, Press);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::V, Press);
-    let _ = enigo.key(enigo::Key::V, Release);
-    std::thread::sleep(std::time::Duration::from_millis(20));
-    let _ = enigo.key(enigo::Key::Control, Release);
+    let target = resolve_paste_target(&app, "paste");
+    send_ctrl_v(target)?;
     println!("[paste] done at {:?}", t0.elapsed());
     Ok(())
 }

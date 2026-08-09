@@ -32,13 +32,13 @@ export function resolveEscapeTarget(snapshot: EscapeSnapshot): EscapeTarget {
   if (snapshot.clipDragActive) return "clip-drag";
   if (snapshot.lassoActive) return "lasso";
   if (snapshot.contextMenuOpen) return "context-menu";
+  if (snapshot.settingsOpen) return "settings";
   if (snapshot.enhancedSearchOpen) return "enhanced-search";
   if (snapshot.stageRecoveryOpen) return "stage-recovery";
   if (snapshot.launcherManagerOpen) return "launcher-manager";
   if (snapshot.appPickerOpen) return "app-picker";
   if (snapshot.stageSelectionActive) return "stage-selection";
   if (snapshot.launcherSelectionActive) return "launcher-selection";
-  if (snapshot.settingsOpen) return "settings";
   return "workbench";
 }
 
