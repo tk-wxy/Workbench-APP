@@ -1,54 +1,89 @@
-import { useState, useEffect, useCallback, useMemo, useRef, Fragment } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fragment } from "react";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
-import { IMG_EXTS, fmtSize, ago, extIcon, dirOf } from "./lib/format";
-import { fuzzyScore, typeKeywords, matchItem } from "./lib/fuzzy";
-import { IconCheck, IconCopy, IconTrash, IconOpen, IconPin, IconSearch } from "./icons";
+import { IMG_EXTS, dirOf, fileGlyphFor } from "./lib/format";
+import { fuzzyScore, typeKeywords } from "./lib/fuzzy";
+import { tokenFromCode, parseComboStr, comboLabel } from "./lib/hotkey";
+import LauncherPanel from "./components/LauncherPanel";
+import ClipboardPanel, { type ClipboardPanelActions, type ClipboardPanelDragHandlers } from "./components/ClipboardPanel";
+import { StageGridCard, StageListRow, type StageItemActions, type StageItemPointerHandlers } from "./components/StageItems";
+import EnhancedSearchLayer, { type EnhancedSearchActions, type EnhancedSearchPreview } from "./components/EnhancedSearchLayer";
+import { Clock, WorkbenchFooter, WorkbenchSearchHeader } from "./components/WorkbenchChrome";
+import HighlightText from "./components/HighlightText";
+import SettingsDialog, { type SettingsTab } from "./components/SettingsDialog";
+import { LauncherManagerDialog, LauncherPickerDialog, StageRecoveryDialog } from "./components/WorkbenchDialogs";
+import { enhancedResultKey as enhKey } from "./domain/enhancedSearch";
+import { type ClipboardCategory } from "./domain/clipboardCategory";
+import { buildClipboardPageSearch } from "./domain/clipboardPageSearch";
+import { appUsageScore } from "./domain/appUsage";
+import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
+import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
+import { matchPageSearch, type TextRange } from "./domain/pageSearchPresentation";
+import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
+import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
+import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
+import { useEnhancedSearchPreview } from "./hooks/useEnhancedSearchPreview";
+import { useEnhancedSearchSelection } from "./hooks/useEnhancedSearchSelection";
+import { useEnhancedSearchResults } from "./hooks/useEnhancedSearchResults";
+import { useSearchSynchronization } from "./hooks/useSearchSynchronization";
+import { useClipboardDragController } from "./hooks/useClipboardDragController";
+import { useLauncherActions, type AddResult } from "./hooks/useLauncherActions";
+import { useStageInteractionController } from "./hooks/useStageInteractionController";
+import { useGlobalKeyboardRouter } from "./hooks/useGlobalKeyboardRouter";
+import { createIdleStageInteraction, type StageInteractionState } from "./domain/stageInteraction";
+import { resolveWorkbenchFileDropZone } from "./domain/clipboardDrag";
+import { perf } from "./lib/perfTrace";
+import { cacheApi } from "./platform/cacheApi";
+import { clipboardApi } from "./platform/clipboardApi";
+import { subscribeNativeEvents } from "./platform/nativeEvents";
+import { openWorkbenchStore, runStartupStep, startupNative, type WorkbenchStore } from "./platform/workbenchStartup";
+import { createPassiveEventHandlers, normalizeClipboardHistory, type ClipboardOriginalDegradedPayload } from "./shell/passiveEventHandlers";
+import { resolveHeaderSearchTarget, resolveHideResetPlan } from "./shell/uiPolicies";
+import type {
+  AppInfo,
+  AppUsage,
+  ClipItem,
+  EnhResult,
+  FileEntry,
+  FileItem,
+  LauncherItem,
+  Pasteable,
+  StageItem,
+} from "./types";
+import { IconCheck, IconSettings, FileGlyph,
+         IconCamera, IconExplorer, IconDownload, IconMonitor, IconTerminal, IconCalculator, IconDrop } from "./icons";
 
 // ── 类型 ──
-interface AppInfo { name: string; path: string; icon: string | null; }
-interface AppUsage { count: number; last_used: number; } // last_used = Unix 秒
-interface FileEntry { path: string; name: string; isDir: boolean; size: number; ext: string; icon?: string | null; }
-interface FileItem { path: string; name: string; ext: string; isImage: boolean; icon?: string | null; }
-interface ClipItem { type: "text" | "image" | "file"; content?: string; time: number; items?: FileItem[]; count?: number; orig_path?: string; }
-// 文件中转条目：与 ClipItem 同构（type/content/items/count）以复用现成粘贴/复制链路；
-// 额外带 id（稳定 key + 去重）和 file 显示辅助字段（name/ext/isDir/size，可选）。
-interface StageItem { id: number; type: "text" | "image" | "file"; content?: string; items?: FileItem[]; count?: number; name?: string; ext?: string; isDir?: boolean; size?: number; orig_path?: string; pinned?: boolean; }
-// copyAndPaste/复制 只读这几个字段，ClipItem 与 StageItem 都满足 → 两个面板共用同一套出口
-type Pasteable = { type: "text" | "image" | "file"; content?: string; items?: FileItem[]; orig_path?: string; };
 const STAGE_MAX_DEFAULT = 20; // 中转区上限默认值（可在设置→中转站调整，纯前端概念，Rust 侧无对应数组/上限）
-const STAGE_MAX_OPTIONS = [20, 50, 100, 200] as const;
+// 失效扫描只是提示补全，绝不能占用工作台呼出的关键路径。
+// 每批很小；预算到即停，下一次呼出再续扫。
+const STAGE_MISSING_SCAN_DELAY_MS = 250;
+const STAGE_MISSING_SCAN_BUDGET_MS = 750;
+const STAGE_MISSING_SCAN_BATCH_SIZE = 24;
+const STAGE_MISSING_SCAN_YIELD_MS = 32;
 // 增强搜索（Ctrl+K）文件结果上限：内置仅扫用户目录够用；Everything 覆盖全盘，给大得多的上限（列表可滚动）
-const ENH_FILE_LIMIT_BUILTIN = 50;
-const ENH_FILE_LIMIT_EVERYTHING = 200;
-const DRAG_THRESHOLD_PX = 8; // 剪贴板卡片按下后移动超过此距离才激活拖拽，防误触（短按仍走 onClick 粘贴）
-const LASSO_THRESHOLD_PX = 6; // 中转区框选：按下后移动超过此距离才激活框选，防误触（纯点击空白不进多选）
-const DRAG_OUT_THRESHOLD_PX = 12; // 中转条目拖出：按下后移动超过此距离才触发 OLE DoDragDrop（高于框选/卡片拖拽阈值，防误触）
-const STAGE_REORDER_ESCAPE_PX = 6; // 中转区内重排：光标离开 .drop-area 边界超过此距离才升级为真实拖出（防边缘抖动误触发）
+// 分组不足此条数则并入「其他文件」（续114b）。没有这道闸，一个只返回 3 个文件的查询会得到
+// 3 个标题配 3 条内容——标题比内容还多，比不分组更难看。这条阈值对实际观感的影响大于分类表本身。
+const ENH_MIN_SECTION = 3;
+const ENH_FILE_LIMIT_BUILTIN = 150;
+const ENH_FILE_LIMIT_EVERYTHING = 500;
+// 文件查询的防抖，**按引擎分档**（续131）。防抖的目的是压住"每敲一键一次查询"的开销，
+// 那个开销两个引擎差着数量级，用同一个值必然有一边配错：
+//   内置 = 纯内存读索引，V2 真机 4.47 万项总体 p95≈29ms → 150ms 里绝大部分仍是白等；
+//   Everything = 跨进程 IPC + 全盘查询 + 5000 条候选池重排，量级完全不同，150ms 是它的保险。
+// 故内置降到 50ms（仍能吃掉连续击键，正常打字相邻间隔 80~200ms），Everything 保持 150ms。
+const ENH_DEBOUNCE_BUILTIN_MS = 50;
+const ENH_DEBOUNCE_EVERYTHING_MS = 150;
 
 
-// 启动器收藏条目：手动策展的常用 app/file/folder「托盘」，独立于 StageItem（左键动作契约不同：启动器=打开/启动，中转=取走粘贴）。
-// 持久化到 store key "launcher-items"，不参与自动扫描；扫描链(filteredApps)仅供搜索，不再全量平铺到此面板。
-interface LauncherItem {
-  id: number;
-  kind: "app" | "file" | "folder";
-  name: string;
-  icon?: string | null;   // app 图标 base64（来自 AppInfo.icon）；file/folder 无，用 emoji
-  path: string;           // app=launch_app 的 path；file/folder=open_file 的 path
-  ext?: string;           // file 显示图标用
-}
-const LAUNCHER_MAX = 60;
-const launcherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
-
-
-// ── 应用使用打分：频率为主 × 近期乘数（频率高且近期用过的排前）──
-// score = count × 0.5^(距上次使用 / 半衰期)。30 天没用，权重掉一半。要调"近期"敏感度改这个常量。
-const USAGE_HALFLIFE_S = 30 * 24 * 3600;
-function usageScore(u: AppUsage | undefined, nowS: number): number {
-  if (!u || u.count <= 0) return 0;
-  return u.count * Math.pow(0.5, (nowS - u.last_used) / USAGE_HALFLIFE_S);
-}
-
+/// 搜索现场（页面搜索/增强搜索）保留时长：隐藏时若仍带着搜索现场则不立即复位，保留此时长供用户
+/// 多次呼出继续浏览；每次隐藏重新起算，呼出即取消计时；超时在隐藏中静默复位，下次呼出全新。
+const SEARCH_KEEP_MS = 10_000;
+// 剪贴板分类仅是临时视图上下文：隐藏后给快速来回切换保留 10 秒，超时回到“全部”。
+const CLIPBOARD_CATEGORY_KEEP_MS = 10_000;
+/// 续146 起废弃的 store key（功能已删，但 plugin-store 不会自动回收未知 key，会一直躺在 JSON 里）。
+/// ⚠ 别把 `file-list` 加进来——它是只写不读的**老格式迁移兜底**，仍在 store 载入路径上用着。
+const DEAD_STORE_KEYS = ["standalone-enh-hotkey", "stage-drag-out-enabled", "stage-drag-auto-hide"] as const;
 async function hideWorkbench() { try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("hide_window"); } catch{} }
 
 // ── 文件中转：转换 + 写剪贴板助手 ──
@@ -60,130 +95,63 @@ function fileEntryToStage(f: FileEntry): StageItem {
 function clipToStage(c: ClipItem): StageItem {
   return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path };
 }
+// 图片大内容不常驻前端 state：剪贴板按 time 从 CLIP_CACHE 现取，中转图片按 contentFile 从
+// stage_images/ 现取。拖出路径另由 Rust 同步自查，绝不在前端 await（R13）。
+async function hydrateContent(item: { type: string; content?: string; contentFile?: string; time?: number }): Promise<string | undefined> {
+  if (item.content || item.type !== "image") return item.content;
+  const { invoke } = await import("@tauri-apps/api/core");
+  if (item.time != null) return (await invoke<string | null>("get_clip_content", { time: item.time })) ?? undefined;
+  if (item.contentFile) return await invoke<string>("get_stage_image_content", { file: item.contentFile });
+  return undefined;
+}
 // 只写当前系统剪贴板（不粘贴、不隐藏 overlay），复用现成 copy_* 命令；剪贴板卡片与中转条目共用
 async function writeItemToClipboard(item: Pasteable) {
   const { invoke } = await import("@tauri-apps/api/core");
   if (item.type === "text") await invoke("copy_text_to_clipboard", { text: item.content });
   else if (item.type === "file" && item.items) await invoke("copy_files_to_clipboard", { paths: item.items.map(f => f.path) });
-  else await invoke("copy_image_to_clipboard", { base64: item.content, origPath: item.orig_path ?? null });
-}
-
-// 高亮命中字符（色用 --accent 兜底，贴合主题系统）
-function HighlightText({ text, ranges }: { text: string; ranges: [number, number][] }) {
-  if (!ranges.length) return <>{text}</>;
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  for (const [start, end] of ranges) {
-    if (start > cursor) parts.push(text.slice(cursor, start));
-    parts.push(<span key={start} style={{ color: "var(--accent, #60a5fa)", fontWeight: 600 }}>{text.slice(start, end + 1)}</span>);
-    cursor = end + 1;
-  }
-  if (cursor < text.length) parts.push(text.slice(cursor));
-  return <>{parts}</>;
+  else await invoke("copy_image_to_clipboard", { base64: (await hydrateContent(item)) ?? "", origPath: item.orig_path ?? null, time: item.time ?? null });
 }
 
 // 自定义右键菜单（浮层）
 type CtxMenuItem = { label: string; action: () => void; disabled?: boolean };
 type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
 
-// 设置条目（左侧导航）；随后续开发逐步扩展，每项独立成区
-const SETTINGS_TABS = [
-  { id: "general",   icon: "⚙",  label: "常规" },
-  { id: "launcher",  icon: "🚀", label: "启动台" },
-  { id: "stage",     icon: "📦", label: "中转站" },
-  { id: "clipboard", icon: "📋", label: "剪贴板" },
-  { id: "search",    icon: "🔍", label: "搜索" },
-  { id: "hotkeys",   icon: "⌨",  label: "快捷键" },
-  { id: "about",     icon: "ℹ",  label: "关于" },
-] as const;
-type SettingsTab = typeof SETTINGS_TABS[number]["id"];
-
 const SHORTCUTS = [
-  { l: "文件管理器", e: "🖥️", a: "explorer.exe"    },
-  { l: "下载",       e: "⬇️", a: "shell:Downloads" },
-  { l: "桌面",       e: "🖼️", a: "shell:Desktop"   },
-  { l: "终端",       e: "⬛", a: "wt"              },
-  { l: "计算器",     e: "🔢", a: "calc"            },
-  { l: "设置",       e: "⚙️", a: "ms-settings:"   },
+  { l: "文件管理器", Icon: IconExplorer,   a: "explorer.exe"    },
+  { l: "下载",       Icon: IconDownload,   a: "shell:Downloads" },
+  { l: "桌面",       Icon: IconMonitor,    a: "shell:Desktop"   },
+  { l: "终端",       Icon: IconTerminal,   a: "wt"              },
+  { l: "计算器",     Icon: IconCalculator, a: "calc"            },
+  { l: "设置",       Icon: IconSettings,   a: "ms-settings:"   },
 ] as const;
 
 // 应用启动「放大暂留」动画（Mac 启动台式）：点击后图标放大淡出、覆盖层淡出露桌面，暗示刚启动了什么。
 // 时长可调；放大幅度在 CSS @keyframes launch-pop 里（克制档 scale 1.4）。
 const LAUNCH_ANIM_MS = 200;
+// 全局轻提示（toast）驻留时长，须与 App.css 的 @keyframes toast-flash 总时长一致（进 12% / 停 / 出 18%）。
+// 「一闪而过」定位：只报「做成了什么」，不承载可交互内容、不要求用户确认、绝不拦截点击。
+const TOAST_MS = 1600;
+// 「加入启动台/中转区」的结果：重复与超上限此前都是静默失败（early-return / slice 丢弃），
+// 调用方分辨不出，直接报「已添加」会说谎。三态回报让提示与实际结果一致。
 // 顶层克隆浮层的数据：图标 + 点击瞬间的屏幕坐标（getBoundingClientRect）。
 // 用克隆而非就地 transform——避开 .app-grid/.app-panel/.main-area 的 overflow 裁剪。
-interface LaunchAnim { icon: string | null; name: string; iconText?: string; rect: { top: number; left: number; width: number; height: number }; }
-
-function getFileIcon(item: ClipItem): string {
-  const items = item.items ?? [];
-  if (items.length > 1) return "📦";
-  const first = items[0];
-  if (!first) return "📎";
-  if (first.isImage) return "🖼️"; // 剪贴板图片（可能无扩展名）
-  const ext = first.ext || first.path.split(".").pop() || "";
-  return extIcon(ext);
-}
-
-// ── 增强搜索结果（Ctrl+K 独立视图层；范围=应用 + 中转区 file 条目）──
-type EnhResult =
-  | { kind: "app";   app: AppInfo;  ranges: [number, number][] }
-  | { kind: "stage"; item: StageItem; name: string; ranges: [number, number][] }
-  | { kind: "clip";  item: ClipItem; name: string; ranges: [number, number][] } // 剪贴板历史结果；activate=取走粘贴（copyAndPaste）
-  | { kind: "fs";    path: string; name: string; ext: string; isDir: boolean; icon?: string | null }; // 文件系统结果（无 ranges，Rust 侧已打分排序）
-
-// ── 热键 token 工具（录制 + 应用内快捷键匹配 + 展示共用；映射对齐 Rust key_token 54 条）──
-const HOTKEY_MAIN_TOKENS = new Set<string>([
-  ..."abcdefghijklmnopqrstuvwxyz".split(""),
-  ..."0123456789".split(""),
-  ...Array.from({length:12},(_,i)=>`f${i+1}`),
-  "space","tab","up","down","left","right",
-]);
-// 浏览器 KeyboardEvent.code → token（KeyA→a / Digit1→1 / F12→f12 / Space→space / Arrow*→方向）
-const tokenFromCode = (code: string): string | null => {
-  if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
-  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
-  if (/^F([1-9]|1[0-2])$/.test(code)) return code.toLowerCase();
-  if (code === "Space") return "space";
-  if (code === "Tab") return "tab";
-  if (code === "ArrowUp") return "up";
-  if (code === "ArrowDown") return "down";
-  if (code === "ArrowLeft") return "left";
-  if (code === "ArrowRight") return "right";
-  return null;
-};
-// 解析 combo 串 → {ctrl,shift,alt,main} 或 null（非法）。规则同 Rust parse_combo：禁 Win + 裸 Alt+Space/Alt+F4，恰 1 主键。
-const parseComboStr = (combo: string): {ctrl:boolean;shift:boolean;alt:boolean;main:string} | null => {
-  const toks = combo.toLowerCase().split("+").map(s=>s.trim()).filter(Boolean);
-  if (toks.some(t => ["win","super","meta","windows"].includes(t))) return null;
-  const ctrl = toks.some(t => t==="ctrl"||t==="control");
-  const shift = toks.includes("shift");
-  const alt = toks.some(t => t==="alt"||t==="option");
-  const mains = toks.filter(t => !["ctrl","control","shift","alt","option"].includes(t));
-  if (mains.length !== 1 || !HOTKEY_MAIN_TOKENS.has(mains[0])) return null;
-  if (alt && !ctrl && !shift && (mains[0]==="space"||mains[0]==="f4"||mains[0]==="tab")) return null; // OS 占用（系统菜单/关窗/窗口切换）
-  return {ctrl,shift,alt,main:mains[0]};
-};
-// keydown 事件是否精确匹配 combo（修饰键全等 + 主键一致；Win 键按下则不匹配）
-const matchComboEvent = (e: KeyboardEvent, combo: string): boolean => {
-  const p = parseComboStr(combo);
-  if (!p) return false;
-  if (e.ctrlKey!==p.ctrl || e.shiftKey!==p.shift || e.altKey!==p.alt || e.metaKey) return false;
-  return tokenFromCode(e.code) === p.main;
-};
-// combo 串 → 展示文案（ctrl→Ctrl / 方向→箭头）
-const comboLabel = (combo: string): string =>
-  combo.split("+").map(t=>t==="ctrl"?"Ctrl":t==="shift"?"Shift":t==="alt"?"Alt":t==="space"?"Space":t==="tab"?"Tab":t==="up"?"↑":t==="down"?"↓":t==="left"?"←":t==="right"?"→":t.toUpperCase()).join("+");
+// 续142b：克隆改 cloneNode(源图标容器)，尺寸/底色由克隆自身携带、精确贴合，不再靠 React 重渲 + 猜百分比（旧 75% → 比磁贴小一圈、点击瞬间"缩一下"）。
 
 // ── App（简化版：无动画，纯条件渲染）──
 export default function App() {
   const [visible, setVisible] = useState(false);
   const [search, setSearch] = useState("");
-  const [time, setTime] = useState("");
+  const searchValueRef = useRef(""); searchValueRef.current = search; // 供 hotkey-hide 闭包读最新值（判定有无搜索现场）
+  const [clipboardCategory, setClipboardCategory] = useState<ClipboardCategory>("all");
+  const clipboardCategoryRef = useRef<ClipboardCategory>("all"); clipboardCategoryRef.current = clipboardCategory;
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
+  // 启动台不预扫：只记录用户点击过的条目的最近一次存在性结果，且不落盘，避免下次显示陈旧状态。
+  const [missingLauncherIds, setMissingLauncherIds] = useState<Set<number>>(new Set());
+  const launcherMissingScanTokenRef = useRef(new Map<number, number>()); // 同项连点时，只采用最后一次检查结果
   const [appUsage, setAppUsage] = useState<Record<string,AppUsage>>({});
-  const [store, setStore] = useState<any>(null);
+  const [store, setStore] = useState<WorkbenchStore | null>(null);
   const [clipboard, setClipboard] = useState<ClipItem[]>([]);
   const [theme, setTheme] = useState<"dark"|"light"|"system">("dark");
   const [lang, setLang] = useState<Lang>("zh"); // 界面语言，默认中文，持久化到 store（与 Rust 托盘菜单同步）
@@ -194,7 +162,6 @@ export default function App() {
   const [copiedStageId, setCopiedStageId] = useState<number|null>(null); // 中转条目"复制到剪贴板"的 ✓ 反馈
   const [imgCacheCleared, setImgCacheCleared] = useState(false); // 设置面板「清空缓存」✓ 反馈
   const [thumbCacheCleared, setThumbCacheCleared] = useState(false); // 中转区缩略图缓存「清空」✓ 反馈（续99f）
-  const [launchAnim, setLaunchAnim] = useState<LaunchAnim|null>(null); // 启动放大暂留动画的克隆数据，null=无动画
   const [dismissing, setDismissing] = useState(false); // 覆盖层「快速淡出露桌面」——启动应用与剪贴板粘贴共用同一套消失观感
   const [clipCacheMax, setClipCacheMax] = useState(20); // 剪贴板历史保存条数（与 Rust CLIP_CACHE_MAX_RUNTIME 同步）
   const [stageMax, setStageMax] = useState(STAGE_MAX_DEFAULT); // 中转区上限（纯前端，无需 Rust 同步）
@@ -214,9 +181,22 @@ export default function App() {
   const loadedRef = useRef(false);
   const appsRef = useRef<AppInfo[]>(apps); appsRef.current = apps; // 供 [visible] 兜底扫描闭包读最新 apps（apps-ready 是否已填充）
   const launchingRef = useRef(false); // 防连点/重复触发（setState 异步，用 ref 即时锁）
+  // 启动放大暂留期间被点的那个图标：即时隐藏它，让顶层克隆独自弹出，否则原图标随覆盖层慢淡出 → 与克隆同框（"两个图标"）。复位时还原。
+  const launchSrcElRef = useRef<HTMLElement|null>(null);
+  // 顶层启动克隆节点（cloneNode 生成，挂在 dragLayer）：复位/下次启动前移除，防残留。
+  const launchCloneNodeRef = useRef<HTMLElement|null>(null);
   const stageRef = useRef<StageItem[]>(stage); stageRef.current = stage; // 给 []-注册的 files-dropped 监听取最新 stage（避开闭包过期）
   const launcherRef = useRef<LauncherItem[]>(launcher); launcherRef.current = launcher; // 给 []-注册监听用（S3b 拖入落点会用到，先备好）
   const storeRef = useRef<any>(null); storeRef.current = store;
+  const {
+    persistStage,
+    persistLauncher,
+    rememberStageReferences,
+    rememberLauncherReferences,
+    hasStageContentFile,
+    rememberStageContentFile,
+    hasLauncherIconFile,
+  } = useWorkbenchPersistence({ storeRef, setStage });
   const [stageSel, setStageSel] = useState<Set<number>>(new Set<number>()); // 中转区多选（选中的 StageItem.id）
   const [stageMultiselect, setStageMultiselect] = useState(false); // 多选模式开关（显式进入，非按住修饰键）
   const [stageLayout, setStageLayout] = useState<"list"|"grid">("list"); // 中转区布局：列表 / 方格
@@ -225,38 +205,34 @@ export default function App() {
   const [stagePersist, setStagePersist] = useState(false); // 中转站文件持久化：开启后移出/拖出不再自动移除条目，需手动删除（纯前端，无需 Rust 同步）
   const stagePersistRef = useRef(stagePersist); stagePersistRef.current = stagePersist; // 供 drag-out-done 监听闭包读最新值
   const [showShortcuts, setShowShortcuts] = useState(true); // 中转区下方「快捷入口」行是否显示（纯前端 store 持久化）；关闭时空间归还给中转区 drop-area（flex:1 自动铺满）
-  // 续99b：中转区图片文件缩略图缓存（path → data URL）。由 Rust get_stage_thumbnail 生成小图，避免前端直接加载原图全分辨率致内存暴涨/卡顿。仅会话内内存缓存，不落盘。
-  const [stageThumbs, setStageThumbs] = useState<Record<string,string>>({});
-  const stageThumbPendingRef = useRef<Set<string>>(new Set()); // 已发起/已失败的 path（失败不重试，卡片回退 emoji）
-  // 续100：中转区 file 条目「原文件失踪」路径集。每次呼出时后台批量 exists() 扫一遍（check_stage_paths）。
+  const { stageThumbs, clipThumbs } = useThumbnailCaches({ stage, launcher, clipboard });
+  // 中转区 file 条目「原文件失踪」路径集。每次呼出时后台批量 exists() 扫一遍（check_stage_paths）。
   // 不用实时文件监听（分散父目录 watcher 代价高/网络盘不支持），只在呼出这个「该看的时刻」懒扫。
-  // 处理按「拖出移除」同一豁免规则（见 scanStageMissing）：`!persist && !pinned` 直接移除；固定/持久化则留存并进本集合，供 ⚠️ 标记。
+  // 失效引用必须保留给用户处理：重新定位、复制原路径或删除整项，绝不静默删掉。
   const [missingPaths, setMissingPaths] = useState<Set<string>>(new Set()); // 复用既有 stageRef（行 216）读最新 stage
+  const missingPathsRef = useRef<Set<string>>(new Set()); missingPathsRef.current = missingPaths;
+  const stageMissingScanGenerationRef = useRef(0); // 新一轮或 hide 后，旧结果一律作废
+  const stageMissingScanTimerRef = useRef<number | null>(null);
+  const [stageRecoveryOpen, setStageRecoveryOpen] = useState(false);
+  const stageRecoveryOpenRef = useRef(false); stageRecoveryOpenRef.current = stageRecoveryOpen;
   const [batchCopied, setBatchCopied] = useState(false); // 批量复制 ✓ 反馈
   const stageSelRef = useRef<Set<number>>(new Set<number>()); stageSelRef.current = stageSel; // 供 Esc keydown 闭包读最新（仿 ctxMenuRef 模式）
   const stageMultiselectRef = useRef(false); stageMultiselectRef.current = stageMultiselect; // 同上
   const stageAnchorRef = useRef<number|null>(null); // shift 区间选择锚点 index
-  // 剪贴板卡片长按拖拽到中转区（纯前端，Pointer Events，移动超阈值才激活）
-  const [dragState, setDragState] = useState<{ item: ClipItem; originX: number; originY: number; currentX: number; currentY: number; active: boolean } | null>(null);
-  const dragStateRef = useRef(dragState); // 供 pointermove/up 闭包读最新值（setState 异步）
-  useEffect(() => { dragStateRef.current = dragState; }, [dragState]);
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const dragLayerRef = useRef<HTMLDivElement | null>(null); // 顶层拖拽预览层，承载 DOM clone ghost
-  const suppressClickRef = useRef(false); // 激活拖拽后抑制随之而来的 onClick（防拖拽落点误触发粘贴）
-  // 中转区鼠标框选多选（续70，纯前端）：在 .drop-area 空白处按下拖拽，扫过的条目实时选中
-  type LassoState = { active: boolean; origin: { x: number; y: number }; current: { x: number; y: number } };
-  const [lassoState, setLassoState] = useState<LassoState>({ active: false, origin: { x: 0, y: 0 }, current: { x: 0, y: 0 } });
-  const lassoStateRef = useRef(lassoState); lassoStateRef.current = lassoState; // 供 move/up 闭包读最新值（仿 stageSelRef 渲染时同步）
-  const lassoArmedRef = useRef(false); // down 通过排除判定才布防；move/up 据此区分「框选拖拽」与「条目上拖拽」
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
   // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
-  const dragOutRef = useRef<{ pressing: boolean; itemId: number | null; origin: { x: number; y: number }; draggedIds: number[]; mode: "idle" | "reorder" | "native" }>({ pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" });
+  const dragOutRef = useRef<StageInteractionState>(createIdleStageInteraction());
   // 续97：本次 OLE 拖出的落点其实落回自身 overlay（内部拖，非真正投放到外部）→ files-dropped 置位、drag-out-done 据此不删条目。
   const droppedOnSelfRef = useRef(false);
-  const suppressStageClickRef = useRef(false); // 拖出触发后抑制随之而来的 onClick（防误触取走粘贴）
-  // 中转区内重排（续87，仿启动台 FLIP 方案）：单项拖动、光标仍在 .drop-area 内时走此逻辑；
-  // 光标离开区域边界 → 升级为原生 OLE 拖出（沿用既有 start_drag_out 链路，见 beginNativeDragOut）。
+  // 续110：本次原生拖出的来源——中转站(stage) 还是剪贴板(clip)。drag-out-done handler 据此分流：
+  //   clip 来源"拖出后剪贴板不变"，不走任何删条目/copyAndPaste 逻辑（中转站的 draggedIds 与其无关）。
+  const dragOutSourceRef = useRef<"stage" | "clip">("stage");
+  // 中转区内重排（续87，仿启动台 FLIP 方案）：仅「拖出后自动关闭」关闭时，单项拖动走此逻辑，ghost 跟手 + FLIP 排序。
+  // 自动关闭开启时，超过阈值直接进入原生拖出并隐藏；关闭时仍不使用曾被否决的越界/时间升级，
+  // 如需去外部则在重排中按热键，经 stage-drag-hotkey → beginNativeDragOut 交接。
   const stageReorderRef = useRef<{
     active: boolean; tiles: HTMLElement[]; rects: { left: number; top: number; width: number; height: number }[];
     ghostEl: HTMLElement | null; srcEl: HTMLElement | null; srcIdx: number; insertIdx: number;
@@ -272,33 +248,85 @@ export default function App() {
   const [fileDragOver, setFileDragOver] = useState(false);
   // 增强搜索（Ctrl+K 独立全屏视图层；同一 overlay 内的视图层，不开新窗、不碰 show/hide/焦点/粘贴高危区）
   const [enhOpen, setEnhOpen] = useState(false);
+  const [enhContentReady, setEnhContentReady] = useState(false);
   const [enhPinned, setEnhPinned] = useState(false); // true=打字触发（顶栏为输入框，不覆盖顶栏）；false=Ctrl+K触发（全覆盖+独立搜索框）
   const [enhQuery, setEnhQuery] = useState("");
-  const [enhSelIdx, setEnhSelIdx] = useState(0);
   const [launcherSelIdx, setLauncherSelIdx] = useState(-1); // 启动器网格键盘选中项（-1=未选中，焦点在搜索框）
   const [enhAdded, setEnhAdded] = useState<{path:string;target:"stage"|"launcher"}|null>(null); // 操作按钮 ✓ 反馈
   const enhInputRef = useRef<HTMLInputElement>(null);
+  const enhResultsRef = useRef<HTMLDivElement>(null); // 结果列表容器：选中高亮命令式加 class 时的查询根（续127）
   const enhOpenRef = useRef(false); enhOpenRef.current = enhOpen; // 供 Esc keydown 闭包读最新
   const enhPinnedRef = useRef(false); enhPinnedRef.current = enhPinned; // 供 onChange 闭包读最新 pinned 状态
   const pageSearchForcedRef = useRef(false); // enhanced 模式下用户主动按 Ctrl+K 切到界面搜索，本次呼出有效
-  // 文件系统搜索结果（S4b）：增强搜索 Tier 2，来自 Rust 后台索引 search_files；150ms 防抖查询；icon 随结果同步返回
-  const [fsResults, setFsResults] = useState<{ path: string; name: string; ext: string; isDir: boolean; icon?: string | null }[]>([]);
-  const [indexReady, setIndexReady] = useState(false); // 文件索引是否就绪（未就绪时显示「建立中…」，不阻塞 Tier 1）
+  // 先让常驻的轻量 shell 开始入场，再挂结果行与预览。否则快捷键打开的同一帧既要
+  // 建立/布局至多 500 行，又要把整层变换送进合成器，动画首帧会被主线程工作截断。
+  useEffect(() => {
+    if (!enhOpen) {
+      setEnhContentReady(false);
+      return;
+    }
+    let contentFrame = 0;
+    const shellFrame = requestAnimationFrame(() => {
+      contentFrame = requestAnimationFrame(() => setEnhContentReady(true));
+    });
+    return () => {
+      cancelAnimationFrame(shellFrame);
+      if (contentFrame) cancelAnimationFrame(contentFrame);
+    };
+  }, [enhOpen]);
   // 搜索引擎（续57）：内置自建索引 / 可选 Everything；持久化 store，运行时由 Rust set_search_engine 应用
   const [searchEngine, setSearchEngine] = useState<"builtin"|"everything">("builtin");
+  const {
+    pinyin,
+    itemsRevision: searchItemsRevision,
+    indexReady,
+    setIndexReady,
+    everythingAvailable,
+    setEverythingAvailable,
+  } = useSearchSynchronization({
+    apps,
+    stage,
+    clipboard,
+    appUsage,
+    t,
+    enhancedOpen: enhOpen,
+    settingsOpen,
+    searchEngine,
+  });
+  // 双引擎查询、分档防抖和迟到响应守卫由查询控制器统一持有；App 只消费两种结果投影。
+  const { fileResults: fsResults, builtinHits, clearResults: clearEnhancedSearchResults } = useEnhancedSearchQuery({
+    open: enhOpen,
+    query: enhQuery,
+    engine: searchEngine,
+    itemsRevision: searchItemsRevision,
+    builtinLimit: ENH_FILE_LIMIT_BUILTIN,
+    everythingLimit: ENH_FILE_LIMIT_EVERYTHING,
+    builtinDebounceMs: ENH_DEBOUNCE_BUILTIN_MS,
+    everythingDebounceMs: ENH_DEBOUNCE_EVERYTHING_MS,
+  });
   const [searchDirs, setSearchDirs] = useState<string[]>([]); // 内置引擎额外扫描根目录（如 D:\）
-  const [searchDirInput, setSearchDirInput] = useState(""); // 添加目录输入框
-  const [everythingAvailable, setEverythingAvailable] = useState(false); // Everything 是否可用（DLL 加载且服务运行）
+  const [dirPicking, setDirPicking] = useState(false); // 文件夹选择框是否已弹出（防重复弹）
+  // ── 全局轻提示（续113）──
+  // 定位：补「无锚点操作」的反馈空白——右键菜单项、模态里点完就关的按钮，动作一完成界面上什么都没变，
+  // 用户不知道成没成。**不替换已有的 7 处按钮原地 ✓ 反馈**（copiedTime/enhAdded/imgCacheCleared…）：
+  // 那些反馈与按钮同位、指向明确，比飘到屏幕另一头的 toast 更好，换成 toast 是倒退。
+  // id 用自增计数器：同一句提示连点两次也能重放动画（靠 key 重挂 DOM 节点重启 CSS animation）。
+  const [toast, setToast] = useState<{id:number;msg:string}|null>(null);
+  const toastTimerRef = useRef<number|null>(null);
+  const toastIdRef = useRef(0);
+  // deps[] 核心监听无法捕获后面声明的 showToast；用恒稳 ref 复用同一 toast 状态机。
+  const showToastRef = useRef((msg:string) => {
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    setToast({ id: ++toastIdRef.current, msg });
+    toastTimerRef.current = window.setTimeout(() => { setToast(null); toastTimerRef.current = null; }, TOAST_MS);
+  });
+  const langRef = useRef<Lang>(lang); langRef.current = lang;
   const [evtRedetected, setEvtRedetected] = useState(false); // 「重新检测」✓ 反馈
   // 呼出默认搜索模式：page=顶栏界面搜索（默认），enhanced=直接进增强搜索层
   const [searchDefaultMode, setSearchDefaultMode] = useState<"page"|"enhanced">("page");
   const searchDefaultModeRef = useRef<"page"|"enhanced">("page");
   searchDefaultModeRef.current = searchDefaultMode;
   // 启动器「添加应用」picker 模态（复用 settings-modal 样式）
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerQuery, setPickerQuery] = useState("");
-  const pickerOpenRef = useRef(false); pickerOpenRef.current = pickerOpen; // 供 Esc keydown 闭包读最新
-  const pickerInputRef = useRef<HTMLInputElement>(null);
 
   // 同步 ctxMenu ref（供 keydown 闭包读取，无需加入 deps）
   useEffect(() => { ctxMenuRef.current = ctxMenu; }, [ctxMenu]);
@@ -310,9 +338,6 @@ export default function App() {
     return () => window.removeEventListener("mousedown", close);
   }, [ctxMenu]);
 
-  // ── 时钟 ──
-  useEffect(() => { const u=()=>setTime(new Date().toLocaleTimeString(lang==="en"?"en-US":"zh-CN",{hour:"2-digit",minute:"2-digit"})); u(); const iv=setInterval(u,1000); return ()=>clearInterval(iv); }, [lang]);
-
   // ── 主题：把 theme 解析为 data-theme（"system" 跟随 OS prefers-color-scheme 并实时响应切换）──
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -322,17 +347,317 @@ export default function App() {
   }, [theme]);
 
   // ── Store ──
-  useEffect(() => { (async()=>{ try { const {load}=await import("@tauri-apps/plugin-store"); const s=await load("workbench-data.json",{autoSave:true,defaults:{}}); setStore(s); const raw=await s.get<Record<string,number|AppUsage>>("app-frequency")??{}; const nowS=Math.floor(Date.now()/1000); const usage:Record<string,AppUsage>={}; for(const[k,v]of Object.entries(raw)){ usage[k]= typeof v==="number" ? {count:v,last_used:nowS} : v; } setAppUsage(usage); const savedTheme=await s.get<string>("theme"); if(savedTheme==="dark"||savedTheme==="light"||savedTheme==="system") setTheme(savedTheme); const savedLang=await s.get<string>("language"); const initLang:Lang=(savedLang==="en"?"en":"zh"); setLang(initLang); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_tray_language",{lang:initLang});}catch{} const savedMax=await s.get<number>("clip-cache-max"); if(typeof savedMax==="number"&&savedMax>=10&&savedMax<=100){ setClipCacheMax(savedMax); clipCacheMaxRef.current=savedMax; try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_clip_cache_max",{n:savedMax});}catch{} } const savedStageMax=await s.get<number>("stage-max"); let stageMaxLoaded:number=STAGE_MAX_DEFAULT; if(typeof savedStageMax==="number"&&(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)){ stageMaxLoaded=savedStageMax; setStageMax(savedStageMax); stageMaxRef.current=savedStageMax; } const savedHotkey=await s.get<string>("hotkey-combo"); if(typeof savedHotkey==="string"&&savedHotkey.trim()){const hk=savedHotkey.trim();setHotkeyCombo(hk);setHotkeyInput(hk);} /* 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册 */ const savedEnh=await s.get<string>("enh-hotkey"); if(typeof savedEnh==="string"&&savedEnh.trim()&&parseComboStr(savedEnh.trim())){const eh=savedEnh.trim();setEnhHotkey(eh);setEnhHotkeyInput(eh);} /* 增强搜索键纯前端，无需 invoke */ const savedEngine=await s.get<string>("search-engine"); const savedDirs=await s.get<string[]>("search-dirs")??[]; const eng:("builtin"|"everything")=savedEngine==="everything"?"everything":"builtin"; setSearchEngine(eng); setSearchDirs(savedDirs); try{const{invoke}=await import("@tauri-apps/api/core"); if(savedDirs.length){await invoke("set_search_dirs",{dirs:savedDirs});} /* 空目录无需 invoke：默认已扫用户目录，避免启动期冗余重建 */ await invoke("set_search_engine",{engine:eng});}catch{} const savedStage=await s.get<StageItem[]>("stage-items"); if(savedStage&&savedStage.length){ const loaded=savedStage.slice(0,stageMaxLoaded); setStage(loaded); scanStageMissing(loaded); /* 续100：启动即扫一遍失踪（重启后原文件可能已被删） */ } else { const fps=await s.get<string[]>("file-list")??[]; if(fps.length){ const {invoke}=await import("@tauri-apps/api/core"); const items:StageItem[]=[]; for(const fp of fps.slice(0,stageMaxLoaded)){ try { items.push(fileEntryToStage(await invoke<FileEntry>("get_file_info",{path:fp}))); } catch{} } setStage(items); scanStageMissing(items); } } const savedLauncher=await s.get<LauncherItem[]>("launcher-items"); if(savedLauncher&&savedLauncher.length){ setLauncher(savedLauncher.slice(0,LAUNCHER_MAX)); } const savedStageLayout=await s.get<string>("stage-layout"); if(savedStageLayout==="list"||savedStageLayout==="grid")setStageLayout(savedStageLayout); const savedDragoutAutoClose=await s.get<boolean>("dragout-auto-close"); if(typeof savedDragoutAutoClose==="boolean"){ setDragoutAutoClose(savedDragoutAutoClose); try{const{invoke}=await import("@tauri-apps/api/core");await invoke("set_dragout_auto_close",{enabled:savedDragoutAutoClose});}catch{} } const savedStagePersist=await s.get<boolean>("stage-persist"); if(typeof savedStagePersist==="boolean"){ setStagePersist(savedStagePersist); } const savedShowShortcuts=await s.get<boolean>("show-shortcuts"); if(typeof savedShowShortcuts==="boolean"){ setShowShortcuts(savedShowShortcuts); } const savedSearchMode=await s.get<string>("search-default-mode"); if(savedSearchMode==="enhanced"||savedSearchMode==="page")setSearchDefaultMode(savedSearchMode as "enhanced"|"page"); } catch{} })(); }, []);
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await openWorkbenchStore();
+        setStore(s);
+
+        await runStartupStep("加载应用使用记录", async () => {
+          const raw = await s.get<Record<string, number | AppUsage>>("app-frequency") ?? {};
+          const nowS = Math.floor(Date.now() / 1000);
+          const usage: Record<string, AppUsage> = {};
+          for (const [k, v] of Object.entries(raw)) {
+            usage[k] = typeof v === "number" ? { count: v, last_used: nowS } : v;
+          }
+          setAppUsage(usage);
+        });
+
+        await runStartupStep("加载主题", async () => {
+          const savedTheme = await s.get<string>("theme");
+          if (savedTheme === "dark" || savedTheme === "light" || savedTheme === "system") setTheme(savedTheme);
+        });
+
+        await runStartupStep("加载语言", async () => {
+          const savedLang = await s.get<string>("language");
+          const initLang: Lang = savedLang === "en" ? "en" : "zh";
+          setLang(initLang);
+          await runStartupStep("同步托盘语言", async () => {
+            await startupNative.setTrayLanguage(initLang);
+          });
+        });
+
+        await runStartupStep("加载剪贴板上限", async () => {
+          const savedMax = await s.get<number>("clip-cache-max");
+          if (typeof savedMax !== "number" || savedMax < 10 || savedMax > 100) return;
+          setClipCacheMax(savedMax);
+          clipCacheMaxRef.current = savedMax;
+          await runStartupStep("同步剪贴板上限", async () => {
+            await startupNative.setClipCacheMax(savedMax);
+          });
+        });
+
+        let stageMaxLoaded: number = STAGE_MAX_DEFAULT;
+        await runStartupStep("加载中转站上限", async () => {
+          const savedStageMax = await s.get<number>("stage-max");
+          if (typeof savedStageMax !== "number" || !(STAGE_MAX_OPTIONS as readonly number[]).includes(savedStageMax)) return;
+          stageMaxLoaded = savedStageMax;
+          setStageMax(savedStageMax);
+          stageMaxRef.current = savedStageMax;
+        });
+
+        await runStartupStep("加载主热键", async () => {
+          const savedHotkey = await s.get<string>("hotkey-combo");
+          if (typeof savedHotkey === "string" && savedHotkey.trim()) {
+            const hk = savedHotkey.trim();
+            setHotkeyCombo(hk);
+            setHotkeyInput(hk);
+          }
+          // 不 invoke set_hotkey——Rust setup 已按 store 同步落地，避免重复注册。
+        });
+
+        await runStartupStep("加载增强搜索热键", async () => {
+          const savedEnh = await s.get<string>("enh-hotkey");
+          if (typeof savedEnh === "string" && savedEnh.trim() && parseComboStr(savedEnh.trim())) {
+            const eh = savedEnh.trim();
+            setEnhHotkey(eh);
+            setEnhHotkeyInput(eh);
+          }
+          // 增强搜索键纯前端，无需 invoke。
+        });
+
+        let searchEngineLoaded: "builtin" | "everything" = "builtin";
+        let searchDirsLoaded: string[] = [];
+        const searchSettingsLoaded = await runStartupStep("加载搜索设置", async () => {
+          const savedEngine = await s.get<string>("search-engine");
+          searchDirsLoaded = await s.get<string[]>("search-dirs") ?? [];
+          searchEngineLoaded = savedEngine === "everything" ? "everything" : "builtin";
+          setSearchEngine(searchEngineLoaded);
+          setSearchDirs(searchDirsLoaded);
+        });
+        if (searchSettingsLoaded && searchDirsLoaded.length) {
+          await runStartupStep("应用搜索目录", async () => {
+            await startupNative.setSearchDirs(searchDirsLoaded);
+          });
+        }
+        if (searchSettingsLoaded) {
+          await runStartupStep("应用搜索引擎", async () => {
+            await startupNative.setSearchEngine(searchEngineLoaded);
+          });
+        }
+
+        await runStartupStep("加载中转站", async () => {
+          const savedStage = await s.get<StageItem[]>("stage-items");
+          if (savedStage && savedStage.length) {
+            let loaded = savedStage.slice(0, stageMaxLoaded);
+            // image content 不再启动补水：只校验 contentFile 仍存在，动作时按需读取。
+            if (loaded.some(it => it.contentFile)) {
+              await runStartupStep("校验中转图片引用", async () => {
+                const files = [...new Set(loaded.flatMap(it => it.contentFile ? [it.contentFile] : []))];
+                const existing = new Set(await startupNative.existingStageImages(files));
+                loaded = loaded.map(it => {
+                  if (!it.contentFile || existing.has(it.contentFile)) return it;
+                  const { contentFile: _gone, ...rest } = it;
+                  return rest;
+                });
+              });
+            }
+            rememberStageReferences(loaded);
+            setStage(loaded);
+            scanStageMissing(loaded); // 续100：启动即扫一遍失踪（重启后原文件可能已被删）
+            return;
+          }
+
+          const fps = await s.get<string[]>("file-list") ?? [];
+          if (!fps.length) return;
+          const items: StageItem[] = [];
+          for (const fp of fps.slice(0, stageMaxLoaded)) {
+            try {
+              items.push(fileEntryToStage(await startupNative.getFileInfo(fp)));
+            } catch (error) {
+              console.warn(`[startup] 恢复旧中转条目失败：${fp}`, error);
+            }
+          }
+          setStage(items);
+          scanStageMissing(items);
+        });
+
+        await runStartupStep("加载启动台", async () => {
+          const savedLauncher = await s.get<LauncherItem[]>("launcher-items");
+          if (!savedLauncher?.length) return;
+          let items = savedLauncher.slice(0, LAUNCHER_MAX);
+          // 只读取当前条目实际引用的 iconFile，孤儿文件不进 IPC/JS 堆。
+          if (items.some(it => it.iconFile)) {
+            await runStartupStep("加载启动台图标", async () => {
+              const files = [...new Set(items.flatMap(it => it.iconFile ? [it.iconFile] : []))];
+              const iconMap = await startupNative.loadLauncherIcons(files);
+              items = items.map(it => {
+                if (!it.iconFile) return it;
+                const hit = iconMap[it.iconFile];
+                if (hit) return { ...it, icon: hit };
+                const { iconFile: _gone, ...rest } = it;
+                return rest;
+              });
+            });
+          }
+          rememberLauncherReferences(items);
+          setLauncher(items);
+        });
+
+        await runStartupStep("加载中转站布局", async () => {
+          const savedStageLayout = await s.get<string>("stage-layout");
+          if (savedStageLayout === "list" || savedStageLayout === "grid") setStageLayout(savedStageLayout);
+        });
+
+        await runStartupStep("加载拖出后关闭设置", async () => {
+          const savedDragoutAutoClose = await s.get<boolean>("dragout-auto-close");
+          if (typeof savedDragoutAutoClose !== "boolean") return;
+          setDragoutAutoClose(savedDragoutAutoClose);
+          await runStartupStep("同步拖出后关闭设置", async () => {
+            await startupNative.setDragoutAutoClose(savedDragoutAutoClose);
+          });
+        });
+
+        await runStartupStep("加载中转站持久化设置", async () => {
+          const savedStagePersist = await s.get<boolean>("stage-persist");
+          if (typeof savedStagePersist === "boolean") setStagePersist(savedStagePersist);
+        });
+        await runStartupStep("加载快捷入口设置", async () => {
+          const savedShowShortcuts = await s.get<boolean>("show-shortcuts");
+          if (typeof savedShowShortcuts === "boolean") setShowShortcuts(savedShowShortcuts);
+        });
+        await runStartupStep("加载默认搜索模式", async () => {
+          const savedSearchMode = await s.get<string>("search-default-mode");
+          if (savedSearchMode === "enhanced" || savedSearchMode === "page") setSearchDefaultMode(savedSearchMode);
+        });
+
+        // plugin-store 不回收未知 key；单个删除失败不阻塞其余 key 和后续启动流程。
+        await runStartupStep("清理旧设置键", async () => {
+          let pruned = false;
+          for (const k of DEAD_STORE_KEYS) {
+            try {
+              if (await s.delete(k)) pruned = true;
+            } catch (error) {
+              console.warn(`[startup] 清理旧设置键失败：${k}`, error);
+            }
+          }
+          if (pruned) await s.save();
+        });
+      } catch (error) {
+        // store 本身不可用时没有可继续读取的配置域；保留内存默认值启动。
+        console.error("[startup] 加载 workbench-data.json 失败，使用默认设置：", error);
+      }
+    })();
+  }, []);
 
   // ── 开机自启：启动时读取当前状态 ──
-  useEffect(() => { (async()=>{ try { const {invoke}=await import("@tauri-apps/api/core"); const enabled=await invoke<boolean>("plugin:autostart|is_enabled"); setAutostartEnabled(enabled); } catch{} })(); }, []);
+  useEffect(() => { (async()=>{ try { setAutostartEnabled(await startupNative.isAutostartEnabled()); } catch(error){ console.warn("[startup] 读取开机自启状态失败：", error); } })(); }, []);
 
-  const saveStage = useCallback(async (list:StageItem[]) => { setStage(list); if(store){ await store.set("stage-items",list); await store.save(); } }, [store]);
+  const saveStage = useCallback(async (list:StageItem[]) => {
+    setStage(list);                                 // 先上屏；落盘成功后 persistStage 自动脱去 image content
+    await persistStage(list);
+  }, [persistStage]);
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
   const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
-  const saveLauncher = useCallback(async (list:LauncherItem[]) => { setLauncher(list); if(store){ await store.set("launcher-items",list); await store.save(); } }, [store]);
+  const saveLauncher = useCallback(async (list:LauncherItem[]) => {
+    setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
+    await persistLauncher(list);
+  }, [persistLauncher]);
+  const showToast = useCallback((msg:string) => showToastRef.current(msg), []);
+  const toastAddResult = useCallback((res:AddResult, target:"launcher"|"stage", name:string) => {
+    const where = target==="launcher" ? t("启动台") : t("中转站");
+    if (res==="duplicate") showToast(t("已在{where}中：{name}", {where, name}));
+    else if (res==="full") showToast(t("{where}已满（{n}）", {where, n:target==="launcher"?LAUNCHER_MAX:stageMax}));
+    else showToast(t("已添加到{where}：{name}", {where, name}));
+  }, [showToast, t, stageMax]);
+  const {
+    pickerOpen,
+    pickerQuery,
+    setPickerQuery,
+    pickerOpenRef,
+    pickerInputRef,
+    launcherPicking,
+    managerOpen: launcherManageOpen,
+    managerOpenRef: launcherManageOpenRef,
+    managerSelected: launcherManageSelected,
+    importPreview: launcherImportPreview,
+    layoutBusy: launcherLayoutBusy,
+    addApp: addAppToLauncher,
+    addFileSystemItem: addFsToLauncher,
+    pickPath: pickLauncherPath,
+    openManager: openLauncherManager,
+    closeManager: closeLauncherManager,
+    openPicker: openLauncherPicker,
+    closePicker: closeLauncherPicker,
+    toggleManagerItem: toggleLauncherManageItem,
+    toggleManagerAll: toggleLauncherManageAll,
+    deleteManagerSelection: deleteSelectedLauncherItems,
+    exportLayout: exportLauncherLayout,
+    chooseLayoutImport: chooseLauncherLayoutImport,
+    confirmLayoutImport: confirmLauncherLayoutImport,
+    removeItem: removeLauncherItem,
+    clearImportPreview: clearLauncherImportPreview,
+  } = useLauncherActions({
+    launcher,
+    saveLauncher,
+    setSettingsOpen,
+    notifyAddResult: toastAddResult,
+    showToast,
+    t,
+  });
+  // 启动台文件/文件夹图标回填：历史存的旧条目 icon 为 null（走 Solar 兜底），这里补取系统默认图标（与桌面一致）。
+  // tried 集合防止对提取失败（返回 null）的路径反复 invoke；每个缺图路径只尝试一次。
+  const launcherIconTriedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const need = launcher
+      .filter(it => (it.kind==="file"||it.kind==="folder") && !it.icon && !launcherIconTriedRef.current.has(it.path))
+      .map(it => it.path);
+    if (!need.length) return;
+    need.forEach(p => launcherIconTriedRef.current.add(p));
+    let cancelled = false;
+    (async () => {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const res = await invoke<[string, string|null][]>("get_file_icons", { paths: need });
+        if (cancelled) return;
+        const map = new Map(res);
+        const cur = launcherRef.current;
+        // 仅当确有取到图标时才写回并持久化，避免无意义的 store 写入
+        if (cur.some(it => !it.icon && map.get(it.path))) {
+          saveLauncher(cur.map(it => (!it.icon && map.get(it.path)) ? { ...it, icon: map.get(it.path)! } : it));
+        }
+      } catch {}
+    })();
+    return () => { cancelled = true; };
+  }, [launcher, saveLauncher]);
+
+  // 续146 一次性迁移：老条目的图标还内嵌在 store JSON 里（400KB），搬进 launcher_icons/。
+  // 不塞进上面的 store 载入 effect——那里 saveLauncher 尚未初始化（同 copyAndPasteRef 那次 TDZ 教训）。
+  // 只跑一次：迁移本身会触发 saveLauncher → launcher 变化 → 本 effect 重入，靠 ref 闸住。
+  const launcherMigratedRef = useRef(false);
+  useEffect(() => {
+    if (launcherMigratedRef.current || !store || !launcher.length) return;
+    if (!launcher.some(it => it.icon && !it.iconFile && !hasLauncherIconFile(it.id))) return;
+    launcherMigratedRef.current = true;
+    saveLauncher(launcher);
+  }, [launcher, store, saveLauncher, hasLauncherIconFile]);
+
+  // 续146b 同款一次性迁移：中转站 image 条目的内嵌 content 搬进 stage_images/。
+  const stageMigratedRef = useRef(false);
+  useEffect(() => {
+    if (stageMigratedRef.current || !store || !stage.length) return;
+    if (!stage.some(it => it.type==="image" && it.content && !it.contentFile && !hasStageContentFile(it.id))) return;
+    stageMigratedRef.current = true;
+    saveStage(stage);
+  }, [stage, store, saveStage, hasStageContentFile]);
   const changeStageLayout = useCallback(async (v:"list"|"grid") => { setStageLayout(v); if(store){ await store.set("stage-layout",v); await store.save(); } }, [store]);
-  const changeDragoutAutoClose = useCallback(async (v:boolean) => { setDragoutAutoClose(v); if(store){ await store.set("dragout-auto-close",v); await store.save(); } try{ const{invoke}=await import("@tauri-apps/api/core"); await invoke("set_dragout_auto_close",{enabled:v}); }catch{} }, [store]);
+  const changeDragoutAutoClose = useCallback(async (v:boolean) => {
+    const previous = dragoutAutoClose;
+    setDragoutAutoClose(v);
+    try {
+      // 运行时行为必须先同步：store.save() 是整文件写，若排在 invoke 前，UI 已显示新档位时
+      // 立即起手的拖拽仍会读到 Rust 旧值（实测日志进入了“保持界面模式”）。
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("set_dragout_auto_close", { enabled: v });
+      if (store) { await store.set("dragout-auto-close", v); await store.save(); }
+    } catch {
+      setDragoutAutoClose(previous);
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("set_dragout_auto_close", { enabled: previous });
+      } catch {}
+    }
+  }, [dragoutAutoClose, store]);
   const changeStagePersist = useCallback(async (v:boolean) => { setStagePersist(v); if(store){ await store.set("stage-persist",v); await store.save(); } }, [store]);
   const changeShowShortcuts = useCallback(async (v:boolean) => { setShowShortcuts(v); if(store){ await store.set("show-shortcuts",v); await store.save(); } }, [store]);
   const changeStageMax = useCallback(async (n:number) => { setStageMax(n); if(store){ await store.set("stage-max",n); await store.save(); } if(stage.length>n){ await saveStage(stage.slice(0,n)); } }, [store,stage,saveStage]);
@@ -341,43 +666,135 @@ export default function App() {
 
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
-    let cleanup: (() => void)[] = [];
     let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
-    (async () => {
-      try {
-        const { listen } = await import("@tauri-apps/api/event");
-        const un1 = await listen("hotkey-show", () => { setVisible(true); scanStageMissing(); }); // 续100：呼出即后台扫一遍中转区失踪文件（<1ms，不阻塞渲染）
-        const un2 = await listen("hotkey-hide", () => { if (stageReorderRef.current.active) { cancelStageReorder(); setStageReorderActiveNative(false); } dragOutRef.current.pressing = false; dragOutRef.current.mode = "idle"; setVisible(false); setLaunchAnim(null); setDismissing(false); launchingRef.current = false; setStageSel(new Set<number>()); setStageMultiselect(false); stageAnchorRef.current = null; setLassoState({active:false,origin:{x:0,y:0},current:{x:0,y:0}}); lassoArmedRef.current=false; dropAreaRef.current?.classList.remove("lasso-active"); setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); setFsResults([]); setPickerOpen(false); setPickerQuery(""); setSearch(""); pageSearchForcedRef.current=false; setCtxMenu(null); }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；含右键菜单，防隐藏后残留）
-        const un3 = await listen("clipboard-update", (event: any) => {
-          const item: ClipItem = { type: event.payload.type as "text"|"image"|"file", content: event.payload.content, time: event.payload.time, items: event.payload.items, count: event.payload.count, orig_path: event.payload.orig_path };
-          setClipboard(prev => {
-            const filtered = prev.filter(x => {
-              if (item.type === "file" && x.type === "file") return x.items?.[0]?.path !== item.items?.[0]?.path;
-              if (item.type !== "file" && x.type !== "file") return x.content !== item.content;
-              return true; // 不同类型保留
-            });
-            return [item, ...filtered].slice(0, clipCacheMaxRef.current);
+    let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
+    let uiKeepTimer: ReturnType<typeof setTimeout> | null = null;
+    let clipboardCategoryKeepTimer: ReturnType<typeof setTimeout> | null = null;
+    // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
+    const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); clearEnhancedSearchResults(); setSearch(""); pageSearchForcedRef.current = false; };
+    // 可恢复工作现场与危险瞬态分开：多选/管理弹层保留 10 秒；拖拽、框选、菜单仍在 hide 当场清。
+    const resetRetainedUiState = () => {
+      setStageSel(new Set<number>());
+      setStageMultiselect(false);
+      stageAnchorRef.current = null;
+      closeLauncherPicker();
+      closeLauncherManager();
+      setStageRecoveryOpen(false);
+    };
+    const passiveEventHandlers = createPassiveEventHandlers({
+      loadClipboardHistory: clipboardApi.getHistory,
+      replaceClipboard: history => setClipboard(history),
+      updateClipboard: update => setClipboard(update),
+      setIndexReady,
+      setApps,
+      notifyOriginalFallback: () => {
+        showToastRef.current(makeT(langRef.current)("原图不可用，本次已使用缩略图"));
+      },
+    });
+    // 监听作用域统一承担动态加载、逐项隔离和 StrictMode 的异步注册清理竞态（R47）。
+    const eventScope = subscribeNativeEvents(async register => {
+        await register("hotkey-show", () => {
+          if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; }
+          if (uiKeepTimer !== null) { clearTimeout(uiKeepTimer); uiKeepTimer = null; }
+          if (clipboardCategoryKeepTimer !== null) { clearTimeout(clipboardCategoryKeepTimer); clipboardCategoryKeepTimer = null; }
+          setVisible(true);
+          scheduleStageMissingScan();
+        }); // 失效检查延后到首屏可操作后，绝不阻塞呼出。
+        await register("hotkey-hide", () => {
+          cancelStageMissingScan();
+          endClipDrag();
+          resetStageInteractionForHide();
+          setVisible(false);
+          if (launchCloneNodeRef.current) {
+            launchCloneNodeRef.current.remove();
+            launchCloneNodeRef.current = null;
+          }
+          setDismissing(false);
+          launchingRef.current = false;
+          if (launchSrcElRef.current) {
+            launchSrcElRef.current.style.opacity = "";
+            launchSrcElRef.current = null;
+          }
+          setCtxMenu(null);
+          if (toastTimerRef.current !== null) {
+            clearTimeout(toastTimerRef.current);
+            toastTimerRef.current = null;
+          }
+          setToast(null);
+
+          // 搜索现场例外：带着搜索现场隐藏时不立即复位，保留 SEARCH_KEEP_MS 供多次呼出继续浏览。
+          const resetPlan = resolveHideResetPlan({
+            pageSearchActive: !!searchValueRef.current,
+            enhancedSearchOpen: enhOpenRef.current,
           });
-        });
-        // 原生拖入（S3b）：落点在启动器区→入启动器，否则→入中转（兜底）；落地区域闪烁确认。
+          if (searchKeepTimer !== null) {
+            clearTimeout(searchKeepTimer);
+            searchKeepTimer = null;
+          }
+          if (resetPlan.search === "delayed") {
+            searchKeepTimer = setTimeout(() => {
+              searchKeepTimer = null;
+              resetSearchState();
+            }, SEARCH_KEEP_MS);
+          } else {
+            resetSearchState();
+          }
+
+          if (uiKeepTimer !== null) clearTimeout(uiKeepTimer);
+          if (resetPlan.retainedUi === "delayed") {
+            uiKeepTimer = setTimeout(() => {
+              uiKeepTimer = null;
+              resetRetainedUiState();
+            }, SEARCH_KEEP_MS);
+          } else {
+            resetRetainedUiState();
+          }
+
+          if (clipboardCategoryKeepTimer !== null) clearTimeout(clipboardCategoryKeepTimer);
+          if (clipboardCategoryRef.current !== "all") {
+            clipboardCategoryKeepTimer = setTimeout(() => {
+              clipboardCategoryKeepTimer = null;
+              setClipboardCategory("all");
+            }, CLIPBOARD_CATEGORY_KEEP_MS);
+          } else {
+            clipboardCategoryKeepTimer = null;
+          }
+        }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；菜单/toast 同样立即清）
+        // 性能优化步骤2：image 条目 content 已不入前端 state，无法再按 content 做乐观去重。
+        // 改为回拉 Rust 权威历史（get_clipboard_history 已剥图片 content、且 Rust 侧已按 ahash 去重 R24）。
+        // 事件仅在真实外部复制时触发（自写回流被 R21 抑制），此处一次 IPC 开销可忽略。
+        await register("clipboard-update", passiveEventHandlers.onClipboardUpdate);
+        // 原生拖入（S3b）：只接受启动台/中转站两个明确区域；落在剪贴板或空白区不产生项目。
         // pt 是 Windows 屏幕物理像素，÷ devicePixelRatio 转 CSS px 后与 getBoundingClientRect 比对。
-        const un4 = await listen("files-dropped", async (event: any) => {
+        await register("files-dropped", async (event: any) => {
           const payload = event.payload as { paths: string[]; x: number; y: number };
           const paths = payload.paths ?? [];
           if (!paths.length) return;
           // 「保持界面」模式下，我们自己的中转拖出落回窗口内也会经 IDropTarget→files-dropped（draggedIds 尚未清）。
           // 与外部文件拖入区分：区内拖出且落点在启动台 → 走下方启动台添加（等同拖入收藏）；落回中转区 →
           // 区内重排属后续阶段，暂跳过（避免把自身当外部文件重复添加）。
-          const internalDrag = dragOutRef.current.draggedIds.length > 0;
+          const internalStageDrag = dragOutRef.current.draggedIds.length > 0;
+          const internalWorkbenchDrag = internalStageDrag || dragOutSourceRef.current === "clip";
           const cssX = payload.x / window.devicePixelRatio;
           const cssY = payload.y / window.devicePixelRatio;
+          const stageRect = dropAreaRef.current?.getBoundingClientRect();
           const launcherRect = launcherDropRef.current?.getBoundingClientRect();
-          const inLauncher = !!launcherRect && cssX >= launcherRect.left && cssX <= launcherRect.right && cssY >= launcherRect.top && cssY <= launcherRect.bottom;
+          const dropZone = resolveWorkbenchFileDropZone({ x: cssX, y: cssY }, stageRect, launcherRect);
           // 续97：内部拖出落回自身 overlay（非启动台）——即"拖了一下又落回本窗口"，属未真正投放到外部。
           // 标记之，供随后到达的 drag-out-done 跳过删除（OS 仍会回传 copy，否则会误判成功投放而删条目）。
-          if (internalDrag && !inLauncher) { droppedOnSelfRef.current = true; setFileDragOver(false); return; }
+          if (internalStageDrag && dropZone !== "launcher") {
+            droppedOnSelfRef.current = true;
+          }
+          if (!dropZone) {
+            // 尤其是剪贴板项经热键升级为原生拖出、隐藏后又重新呼出：松手若在剪贴板区，
+            // 不能沿用之前悬停过中转站的高亮/兜底路由，把它误加进中转站。
+            if (internalWorkbenchDrag) droppedOnSelfRef.current = true;
+            setFileDragOver(false);
+            return;
+          }
+          if (internalStageDrag && dropZone === "stage") { setFileDragOver(false); return; }
           const { invoke } = await import("@tauri-apps/api/core");
-          if (inLauncher) {
+          if (dropZone === "launcher") {
             // 落点在启动器：.lnk → resolve_lnk → kind:"app"；其余 → get_file_info → file/folder
             let next = [...launcherRef.current];
             for (const p of paths) {
@@ -387,33 +804,40 @@ export default function App() {
                 let newItem: LauncherItem;
                 if (p.toLowerCase().endsWith(".lnk")) {
                   const lnk = await invoke<{ name: string; path: string; icon: string | null }>("resolve_lnk", { path: p });
-                  newItem = { id: launcherId(), kind: "app", name: lnk.name, icon: lnk.icon, path: lnk.path };
+                  newItem = { id: createLauncherId(), kind: "app", name: lnk.name, icon: lnk.icon, path: lnk.path };
                 } else {
                   const f = await invoke<FileEntry>("get_file_info", { path: p });
-                  newItem = { id: launcherId(), kind: f.isDir ? "folder" : "file", name: f.name, path: f.path, ext: f.ext };
+                  newItem = { id: createLauncherId(), kind: f.isDir ? "folder" : "file", name: f.name, path: f.path, ext: f.ext, icon: f.icon ?? null };
                 }
                 next = [...next, newItem];
-              } catch {}
+              } catch (error) {
+                console.warn(`[events] files-dropped 加入启动台失败：${p}`, error);
+              }
             }
             next = next.slice(0, LAUNCHER_MAX);
             setLauncher(next);
-            if (storeRef.current) { try { await storeRef.current.set("launcher-items", next); await storeRef.current.save(); } catch {} }
+            await persistLauncher(next); // 续146b：改道唯一出口（脱水后落盘）
             launcherDropRef.current?.classList.add("drop-flash");
             setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
           } else {
-            // 落点在中转区或区域外（兜底）：转 StageItem 入中转（原有行为）
+            // 仅落点明确位于中转区时，转为 StageItem。
             const built: StageItem[] = [];
-            for (const p of paths) { try { built.push(fileEntryToStage(await invoke<FileEntry>("get_file_info", { path: p }))); } catch {} }
+            for (const p of paths) {
+              try {
+                built.push(fileEntryToStage(await invoke<FileEntry>("get_file_info", { path: p })));
+              } catch (error) {
+                console.warn(`[events] files-dropped 加入中转站失败：${p}`, error);
+              }
+            }
             if (!built.length) return;
             let next = [...stageRef.current];
             for (const it of built) {
               if (next.length >= stageMaxRef.current) break;
-              if (next.some(s => s.type === "file" && s.items?.[0]?.path === it.items?.[0]?.path)) continue;
               next.push(it);
             }
             next = next.slice(0, stageMaxRef.current);
             setStage(next);
-            if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+            await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
             // 续99d：中转区不再播落地闪烁（drop-flash）——卡片冒出即确认，且与缩略图生成窗口重合像闪 bug（染色确认根因）。启动台仍保留（走 .app-grid.drop-flash）。
           }
           setFileDragOver(false);
@@ -421,15 +845,15 @@ export default function App() {
           try { const { getCurrentWindow } = await import("@tauri-apps/api/window"); await getCurrentWindow().setFocus(); } catch {}
         });
         // 文件索引就绪（S4b）：后台线程每次建/重建完成 emit 条目数，>0 视为就绪
-        const un5 = await listen("file-index-ready", (e: any) => setIndexReady((e.payload ?? 0) > 0));
+        await register<number>("file-index-ready", event => passiveEventHandlers.onFileIndexReady(event.payload));
         // 应用扫描就绪（S4c）：后台预扫线程扫完一次性推送 apps，呼出前填充、消除首次卡顿
-        const un6 = await listen("apps-ready", (e: any) => { const list = (e.payload ?? []) as AppInfo[]; if (list.length) setApps(list); });
+        await register<AppInfo[]>("apps-ready", event => passiveEventHandlers.onAppsReady(event.payload));
         // 外部文件拖入悬停高亮（S5a）：Rust DragEnter/DragLeave emit，前端 100ms 防抖过滤 HWND 间快速 leave-enter
-        const un7 = await listen("file-drag-enter", () => {
+        await register("file-drag-enter", () => {
           if (fileDragLeaveTimer) { clearTimeout(fileDragLeaveTimer); fileDragLeaveTimer = null; }
           setFileDragOver(true);
         });
-        const un8 = await listen("file-drag-leave", () => {
+        await register("file-drag-leave", () => {
           fileDragLeaveTimer = setTimeout(() => setFileDragOver(false), 100);
         });
         // 拖出完成（续71，续86 修正）：effect==="move"|"copy" 均视为投放成功 → 从中转区移除被拖出的条目
@@ -440,9 +864,16 @@ export default function App() {
         // （非取消/none）即视为已移出。overlay 已被 Rust 隐藏，此处只改状态 + 落盘，用户重按热键再呼出。
         // 持久化开关（stagePersistRef，续86 同批新增）——开启时跳过下方两处移除，条目仅可手动删除；
         // 移除仍严格挂在 Rust 回传的「非 none」（已确认成功投放）之后，只是多加一道门。
-        const un9 = await listen<string>("drag-out-done", async (event) => {
+        await register<string>("drag-out-done", async (event) => {
           const dr = dragOutRef.current;
-          console.log("[stage-drag] drag-out-done effect=", event.payload, "draggedIds=", dr.draggedIds, "onSelf=", droppedOnSelfRef.current); // 续88/续97 诊断
+          // 续110：剪贴板来源的原生拖出——"拖出后剪贴板不变"。中转站的 draggedIds/持久化/copyAndPaste
+          // 逻辑与其无关，全部跳过；复位来源 + 兜底清 clip 让路标志（Rust do_drag_on_main 通常已清，幂等）后返回。
+          if (dragOutSourceRef.current === "clip") {
+            dragOutSourceRef.current = "stage";
+            droppedOnSelfRef.current = false;
+            setClipDragActiveNative(false);
+            return;
+          }
           // 续97：本次 OLE 落点落回自身 overlay（files-dropped 已置位 droppedOnSelfRef）——非真正外部投放。
           // OS 仍回传 copy（overlay 自身 IDropTarget 接受），但不应删条目/清选区。命中则保留一切、直接返回。
           // 这正是"多选拖动后什么也没做（区内小幅拖动+立刻松手，落回本窗口）却误删选中项"的根因（单项因先走区内重排、
@@ -450,7 +881,6 @@ export default function App() {
           if (droppedOnSelfRef.current) {
             droppedOnSelfRef.current = false;
             dr.draggedIds = [];
-            console.log("[stage-drag] 落回自身 overlay → 视为未投放，保留条目与选区");
             return;
           }
           const dropped = event.payload === "move" || event.payload === "copy"; // 真正投放成功；取消/none 一律不算
@@ -471,7 +901,7 @@ export default function App() {
             if (!stagePersistRef.current && !item.pinned) { // 续99：固定条目豁免自动移除
               const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
               setStage(next);
-              if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+              await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
             }
             setStageSel(new Set<number>());
             setStageMultiselect(false);
@@ -485,7 +915,7 @@ export default function App() {
               if (ids.size) {
                 const next = stageRef.current.filter(s => !ids.has(s.id));
                 setStage(next);
-                if (storeRef.current) { try { await storeRef.current.set("stage-items", next); await storeRef.current.save(); } catch {} }
+                await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
               }
             }
             setStageSel(new Set<number>());
@@ -496,19 +926,21 @@ export default function App() {
         // 续88：区内重排期间用户按热键 → Rust monitor emit 此事件（而非直接 hide）。把纯 JS 重排**升级为原生拖出**：
         // 先起手 DoDragDrop（此刻窗口仍可见，SetCapture 成功），再由 Rust force_hide 隐藏 overlay，用户即可拖到
         // 外部目标投放。若直接让 monitor hide，DoDragDrop 起手前窗口已隐藏→拖拽不启动→松手无文件落地（四轮反馈根因）。
-        const un10 = await listen("stage-drag-hotkey", () => {
-          const dr = dragOutRef.current;
-          if (dr.mode !== "reorder" || !stageReorderRef.current.active || dr.itemId === null) return;
-          const itemId = dr.itemId;
-          console.log("[stage-drag] hotkey during reorder → 升级为原生拖出 + 隐藏", itemId); // 续88 诊断
-          cancelStageReorder();               // 仅清 JS 重排现场；STAGE_REORDER_ACTIVE 留给 Rust 交接
-          dr.mode = "native";
-          beginNativeDragOut([itemId], true); // force_hide：起手 DoDragDrop（窗口仍可见）后由 dragout 自身隐藏
+        await register("stage-drag-hotkey", () => {
+          upgradeReorderFromHotkey();
         });
-        cleanup = [un1, un2, un3, un4, un5, un6, un7, un8, un9, un10];
-      } catch (e) { console.error("listen error:", e); }
-    })();
-    return () => { cleanup.forEach(fn => fn()); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); };
+        // 续110：剪贴板项纯 JS 拖动中按热键 → Rust monitor emit 此事件（而非直接 hide）。仿 un10：把纯 JS ghost
+        // 升级为原生拖出（beginClipDragOut：force_hide=true，窗口仍可见时先起手 DoDragDrop，再由 Rust 隐藏 overlay）。
+        await register("clip-drag-hotkey", () => {
+          const ds = clipDragRef.current;
+          if (!ds?.active) return; // 未激活（理论上 monitor 不会在此发）——保险起见忽略
+          beginClipDragOut(ds.item);
+        });
+        // D2：Rust 在粘贴/复制/拖出消费时首次发现原图不可用，持久标记后同步当前卡片。
+        // badge 是主提示；toast 只在界面仍可见的首次消费降级时补一句，避免粘贴已隐藏后留下幽灵提示。
+        await register<ClipboardOriginalDegradedPayload>("clipboard-original-degraded", event => passiveEventHandlers.onClipboardOriginalDegraded(event.payload));
+    });
+    return () => { eventScope.dispose(); if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer); if (searchKeepTimer) clearTimeout(searchKeepTimer); if (uiKeepTimer) clearTimeout(uiKeepTimer); if (clipboardCategoryKeepTimer) clearTimeout(clipboardCategoryKeepTimer); };
   }, []);
 
   // ── 窗口显示时从后台缓存加载剪贴板历史（毫秒级）──
@@ -516,10 +948,9 @@ export default function App() {
     if (!visible) return;
     (async () => {
       try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
+        const history = await clipboardApi.getHistory();
         if (history.length) {
-          setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+          setClipboard(normalizeClipboardHistory(history));
         }
       } catch {}
     })();
@@ -544,7 +975,7 @@ export default function App() {
 
   // ── 按使用打分排序（频率为主×近期乘数：常用且近期用过的浮前；同分按名字兜底）──
   const sortedApps = useMemo(() => { const nowS=Math.floor(Date.now()/1000); return [...apps].sort((a,b) =>
-    usageScore(appUsage[b.path],nowS) - usageScore(appUsage[a.path],nowS) || a.name.localeCompare(b.name)
+    appUsageScore(appUsage[b.path],nowS) - appUsageScore(appUsage[a.path],nowS) || a.name.localeCompare(b.name)
   ); }, [apps, appUsage]);
 
   // ── 搜索过滤（模糊打分 + 相关度排序）。统一输出 {app, ranges}，空查询时 ranges 为空 ──
@@ -563,65 +994,11 @@ export default function App() {
       .filter(it => it.score > 0) // 子序列不成立的淘汰
       .sort((a, b) =>
         b.score - a.score                                                              // 相关度降序
-        || usageScore(appUsage[b.app.path],nowS) - usageScore(appUsage[a.app.path],nowS) // 同分按使用打分
+        || appUsageScore(appUsage[b.app.path],nowS) - appUsageScore(appUsage[a.app.path],nowS) // 同分按使用打分
         || a.app.name.localeCompare(b.app.name))                                       // 再按字母
       .slice(0, 200)
       .map(({ app, ranges }) => ({ app, ranges }));
   }, [search, sortedApps, appUsage]);
-
-  // ── 增强搜索 Tier 1（应用 + 中转区 file 条目；空查询=常用应用兜底，可直接 Enter）──
-  // 有查询时上限 10（D5）；空查询兜底仍给 30 常用应用（此时无文件结果，总数 ≤30 不超）。
-  const enhTier1 = useMemo<EnhResult[]>(() => {
-    const q = enhQuery.trim();
-    const nowS = Math.floor(Date.now() / 1000);
-    if (!q) return sortedApps.slice(0, 30).map(app => ({ kind: "app" as const, app, ranges: [] as [number, number][] }));
-    const appHits = apps.map(app => { const r = fuzzyScore(q, app.name); return { kind: "app" as const, app, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    const stageHits = stage.filter(s => s.type === "file").map(s => { const nm = s.name || s.items?.[0]?.name || "文件"; const r = fuzzyScore(q, nm); return { kind: "stage" as const, item: s, name: nm, score: r.score, ranges: r.ranges }; }).filter(x => x.score > 0);
-    // 剪贴板历史条目（续101）：名称=文本内容/文件名/图片标签；名称模糊未命中时用类型词（"图片""txt"）兜底给基础分。
-    const ql = q.toLowerCase();
-    const clipHits = clipboard.map(c => {
-      const nm = c.type === "text" ? (c.content || "").trim().slice(0, 80)
-        : c.type === "image" ? t("图片")
-        : (c.count !== 1 ? t("{n} 个文件", { n: c.count ?? 0 }) : (c.items?.[0]?.name || t("文件")));
-      const r = fuzzyScore(q, nm);
-      let score = r.score, ranges = r.ranges;
-      if (score === 0 && typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }).some(k => k.toLowerCase().includes(ql))) { score = 5; ranges = []; }
-      return { kind: "clip" as const, item: c, name: nm, score, ranges };
-    }).filter(x => x.score > 0);
-    return [...appHits, ...stageHits, ...clipHits]
-      .sort((a, b) => b.score - a.score || (a.kind === "app" && b.kind === "app" ? usageScore(appUsage[b.app.path], nowS) - usageScore(appUsage[a.app.path], nowS) : 0))
-      .slice(0, 10)
-      .map(({ score, ...rest }) => rest as EnhResult);
-  }, [enhQuery, apps, stage, clipboard, sortedApps, appUsage, t]);
-
-  // ── 文件查询：150ms 防抖（每次 search_files 是 Rust 命令往返，避免逐键 invoke）──
-  useEffect(() => {
-    if (!enhOpen) return;
-    const q = enhQuery.trim();
-    if (!q) { setFsResults([]); return; }
-    // Everything 覆盖全盘、结果量大，给更高 limit；内置仅用户目录，50 足够
-    const lim = searchEngine==="everything" ? ENH_FILE_LIMIT_EVERYTHING : ENH_FILE_LIMIT_BUILTIN;
-    const t = setTimeout(async () => {
-      try {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const r = await invoke<{ path: string; name: string; ext: string; isDir: boolean }[]>("search_files", { query: q, limit: lim });
-        setFsResults(r);
-      } catch { setFsResults([]); }
-    }, 150);
-    return () => clearTimeout(t);
-  }, [enhQuery, enhOpen, searchEngine]);
-
-  // 增强搜索/设置打开或引擎切换时主动查一次状态（含 Everything 可用性；事件 file-index-ready 之外的兜底）
-  useEffect(() => {
-    if (!enhOpen && !settingsOpen) return;
-    (async () => { try { const { invoke } = await import("@tauri-apps/api/core"); const s = await invoke<{ ready: boolean; count: number; everythingAvailable: boolean }>("get_index_status"); setIndexReady(s.ready); setEverythingAvailable(!!s.everythingAvailable); } catch {} })();
-  }, [enhOpen, settingsOpen, searchEngine]);
-
-  // 长结果列表下让键盘选中项滚入视野（否则 ↑↓ 导航会移出可视区）
-  useEffect(() => {
-    if (!enhOpen) return;
-    document.querySelector(".enh-result.selected")?.scrollIntoView({ block: "nearest" });
-  }, [enhSelIdx, enhOpen]);
 
   // 启动器键盘选中：滚入视野；关闭覆盖层 / 搜索过滤态变化时复位到「未选中」（焦点回搜索框）
   useEffect(() => {
@@ -629,12 +1006,47 @@ export default function App() {
   }, [launcherSelIdx]);
   useEffect(() => { setLauncherSelIdx(-1); }, [visible, search]);
 
-  // ── 增强搜索合并结果：Tier 1（应用/中转）在前，Tier 2（文件，量由引擎决定）在后；索引连续供 ↑↓/Enter 跨组导航 ──
-  const enhResults = useMemo<EnhResult[]>(() => {
-    const tier2: EnhResult[] = fsResults.slice(0, ENH_FILE_LIMIT_EVERYTHING).map(f => ({ kind: "fs" as const, path: f.path, name: f.name, ext: f.ext, isDir: f.isDir, icon: f.icon }));
-    return [...enhTier1, ...tier2];
-  }, [enhTier1, fsResults]);
+  // One model is shared by rows, preview, Enter and cross-section keyboard navigation.
+  // Built-in hit order remains Rust-authoritative; Everything keeps the legacy local Tier1.
+  const {
+    sections: enhSections,
+    results: enhResults,
+    sectionStarts: enhSectionStarts,
+    headingByIndex: enhHeadAt,
+  } = useEnhancedSearchResults({
+    engine: searchEngine,
+    query: enhQuery,
+    apps,
+    sortedApps,
+    stage,
+    clipboard,
+    appUsage,
+    pinyin,
+    builtinHits,
+    fileResults: fsResults,
+    everythingFileLimit: ENH_FILE_LIMIT_EVERYTHING,
+    minFileSection: ENH_MIN_SECTION,
+    t,
+  });
+  const {
+    selectedIndex: enhSelIdx,
+    setSelectedIndex: setEnhSelIdx,
+    selectByKeyboard,
+    onRowEnter: onEnhRowEnter,
+    cancelPendingHover: cancelHoverSelect,
+    trackPointer: trackEnhResultsPointer,
+  } = useEnhancedSearchSelection(enhOpen, enhResults);
+  // Selection still owns only interaction intent; its input is the flattened domain model above.
 
+  // Async metadata, image caches and the synchronous preview view model share one feature controller.
+  const enhPreview = useEnhancedSearchPreview({
+    open: enhOpen && enhContentReady,
+    results: enhResults,
+    selectedIndex: enhSelIdx,
+    stageThumbnails: stageThumbs,
+    clipboardThumbnails: clipThumbs,
+    t,
+  });
   // ── 启动器「添加应用」picker 结果：排除已加入的 app，空查询=常用前 50，有查询=fuzzyScore 排序 ──
   const pickerResults = useMemo<{ app: AppInfo; ranges: [number, number][] }[]>(() => {
     const q = pickerQuery.trim();
@@ -645,99 +1057,138 @@ export default function App() {
   }, [pickerQuery, sortedApps, launcher]);
 
   // ── 顶栏普通搜索：三区联动过滤（与 Ctrl+K 增强搜索的 enhQuery 完全独立）──
+  // 性能优化步骤4a：三区过滤用 `deferredSearch`（React 18 useDeferredValue），输入框仍绑即时 `search`
+  // → 敲键先让输入框回显下一字符（高优先级），启动台/中转/剪贴板三列表的重过滤+重渲被延后且**可打断**，
+  // 消除「每键同步重建整棵列表」的输入掉帧。控制逻辑（键盘导航/enh 同步）仍读即时 `search`，deferred
+  // 只喂视觉列表；两者相差至多一两帧内收敛，打字停下即一致，不影响回车/方向键选中。
+  const deferredSearch = useDeferredValue(search);
   // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
-  const filteredStage = useMemo(() => {
-    const q = search.trim();
-    if (!q) return stage;
-    return stage.filter(s => {
+  const stagePageSearch = useMemo(() => {
+    const q = deferredSearch.trim();
+    if (!q) return { items: stage, highlights: new Map<number, TextRange[]>() };
+    const items: StageItem[] = [];
+    const highlights = new Map<number, TextRange[]>();
+    for (const s of stage) {
       const name = s.type === "text" ? (s.content || "") : s.type === "image" ? "图片" : (s.name || s.items?.[0]?.name || "文件");
-      return matchItem(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
-    });
-  }, [stage, search]);
-  // 续99b：为中转区图片文件懒生成缩略图（Rust 侧解码缩图，前端只缓存小 base64）。pending ref 去重：每个 path 只发起一次，失败不重试（回退 emoji）。
-  useEffect(() => {
-    const paths = stage
-      .filter(s => s.type === "file" && s.items?.[0]?.isImage && s.items?.[0]?.path)
-      .map(s => s.items![0].path);
-    for (const p of paths) {
-      if (stageThumbPendingRef.current.has(p)) continue;
-      stageThumbPendingRef.current.add(p);
-      (async () => {
-        try {
-          const { invoke } = await import("@tauri-apps/api/core");
-          const url = await invoke<string>("get_stage_thumbnail", { path: p });
-          setStageThumbs(prev => ({ ...prev, [p]: url }));
-        } catch { /* 失败：保留 pending 标记不再重试，卡片显示 emoji 兜底 */ }
-      })();
+      const match = matchPageSearch(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
+      if (!match.matches) continue;
+      items.push(s);
+      highlights.set(s.id, match.ranges);
     }
-  }, [stage]);
-  // 续100：中转区失踪扫描。收集所有 file 条目路径 → Rust 批量 exists() → 记下失踪集合。
-  // 复用既有 stageRef（行 216，已随渲染更新）供 hotkey-show 闭包读最新 stage；scanStageMissing 无依赖、稳定。
-  const scanStageMissing = useCallback(async (list?: StageItem[]) => {
-    const src = list ?? stageRef.current;
+    return { items, highlights };
+  }, [stage, deferredSearch]);
+  const filteredStage = stagePageSearch.items;
+  // 中转区失踪扫描是低优先级任务：呼出后才延迟启动；按小批次检查并让出执行机会。
+  // 预算耗尽时不清空未检查路径的旧状态，避免“尚未检查”被误标；下一次呼出再继续。
+  const scanStageMissing = useCallback(async (generationOrInitial: number | StageItem[]) => {
+    const initialList = Array.isArray(generationOrInitial) ? generationOrInitial : null;
+    const generation = initialList ? stageMissingScanGenerationRef.current : generationOrInitial;
+    // 初始载入也不抢首屏：延后后沿用同一批次/预算策略；若期间已呼出新一轮则直接作废。
+    if (initialList) await new Promise<void>(resolve => window.setTimeout(resolve, STAGE_MISSING_SCAN_DELAY_MS));
+    if (generation !== stageMissingScanGenerationRef.current) return;
     const paths = Array.from(new Set(
-      src.flatMap(s => s.type === "file" ? (s.items?.map(i => i.path).filter(Boolean) ?? []) : [])
+      (initialList ?? stageRef.current).flatMap(s => s.type === "file" ? (s.items?.map(i => i.path).filter(Boolean) ?? []) : [])
     )) as string[];
-    if (!paths.length) { setMissingPaths(new Set()); return; }
+    if (!paths.length) {
+      if (generation === stageMissingScanGenerationRef.current) setMissingPaths(new Set());
+      return;
+    }
+    const checked = new Set<string>();
+    const missing = new Set<string>();
+    const deadline = performance.now() + STAGE_MISSING_SCAN_BUDGET_MS;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      const missing = await invoke<string[]>("check_stage_paths", { paths });
-      const missSet = new Set(missing);
-      if (!missSet.size) { setMissingPaths(new Set()); return; }
-      // 续100：源文件失踪按「拖出移除」同一条豁免规则处理——`!persist && !pinned` 直接移除，固定/持久化则保留 + ⚠️ 标记。
-      const persist = stagePersistRef.current;
-      const removeIds = new Set<number>();       // 默认模式：自动移除
-      const keepMissing = new Set<string>();      // 固定/持久化：留存路径（供 missingIds 标记）
-      for (const it of src) {
-        if (it.type !== "file" || !it.items?.length) continue;
-        if (!it.items.every(f => missSet.has(f.path))) continue; // 批量条目部分尚在 → 不算失踪
-        if (!persist && !it.pinned) removeIds.add(it.id);
-        else it.items.forEach(f => keepMissing.add(f.path));
+      for (let offset = 0; offset < paths.length && performance.now() < deadline; offset += STAGE_MISSING_SCAN_BATCH_SIZE) {
+        if (generation !== stageMissingScanGenerationRef.current) return;
+        const batch = paths.slice(offset, offset + STAGE_MISSING_SCAN_BATCH_SIZE);
+        const gone = await invoke<string[]>("check_stage_paths", { paths: batch });
+        if (generation !== stageMissingScanGenerationRef.current) return;
+        batch.forEach(path => checked.add(path));
+        gone.forEach(path => missing.add(path));
+        if (performance.now() < deadline && offset + STAGE_MISSING_SCAN_BATCH_SIZE < paths.length) {
+          await new Promise<void>(resolve => window.setTimeout(resolve, STAGE_MISSING_SCAN_YIELD_MS));
+        }
       }
-      if (removeIds.size) {
-        // 函数式更新读最新 stage；storeRef 落盘（复用 files-dropped 同款 idiom，避免 saveStage 的闭包过期）。
-        setStage(prev => {
-          const next = prev.filter(s => !removeIds.has(s.id));
-          if (storeRef.current) { storeRef.current.set("stage-items", next).then(() => storeRef.current!.save()).catch(() => {}); }
-          return next;
-        });
-      }
-      setMissingPaths(keepMissing);
-    } catch { /* 检查失败不改变现状，下次呼出再扫 */ }
+      if (generation !== stageMissingScanGenerationRef.current) return;
+      // 只覆写本轮已经确认过的路径；预算外路径保持上次确认状态。
+      setMissingPaths(prev => {
+        const next = new Set(prev);
+        checked.forEach(path => next.delete(path));
+        missing.forEach(path => next.add(path));
+        return next;
+      });
+    } catch { /* 当前批检查失败：保持上次状态，下次呼出重试 */ }
   }, []);
-  // 条目粒度：file 条目的全部文件都失踪才判该条目失踪（批量条目部分尚在则不误标）。
+  const cancelStageMissingScan = useCallback(() => {
+    stageMissingScanGenerationRef.current += 1;
+    if (stageMissingScanTimerRef.current !== null) {
+      window.clearTimeout(stageMissingScanTimerRef.current);
+      stageMissingScanTimerRef.current = null;
+    }
+  }, []);
+  const scheduleStageMissingScan = useCallback(() => {
+    cancelStageMissingScan();
+    const generation = stageMissingScanGenerationRef.current;
+    stageMissingScanTimerRef.current = window.setTimeout(() => {
+      stageMissingScanTimerRef.current = null;
+      void scanStageMissing(generation);
+    }, STAGE_MISSING_SCAN_DELAY_MS);
+  }, [cancelStageMissingScan, scanStageMissing]);
+  useEffect(() => () => cancelStageMissingScan(), [cancelStageMissingScan]);
+  // 多文件条目的语义尚未定型；只要其中任一路径失效，先整体视为不可消费，避免擅自定义“部分取走”。
   const missingIds = useMemo(() => {
     const s = new Set<number>();
-    if (!missingPaths.size) return s;
     for (const it of stage) {
       if (it.type !== "file" || !it.items?.length) continue;
-      if (it.items.every(f => missingPaths.has(f.path))) s.add(it.id);
+      if (it.items.some(f => missingPaths.has(f.path))) s.add(it.id);
     }
     return s;
   }, [stage, missingPaths]);
+  const missingStageItems = useMemo(() => stage.filter(s => missingIds.has(s.id)), [stage, missingIds]);
   const missingIdsRef = useRef<Set<number>>(new Set()); missingIdsRef.current = missingIds; // 给 []-注册的拖出/点击 handler 读最新失踪集
   const cleanupMissingStage = useCallback(() => {
-    if (!missingIds.size) return;
-    saveStage(stageRef.current.filter(s => !missingIds.has(s.id)));
+    if (!missingPaths.size) return;
+    saveStage(stageRef.current.filter(it => !missingIdsRef.current.has(it.id)));
     setMissingPaths(new Set());
-  }, [missingIds, saveStage]);
+  }, [missingPaths, saveStage]);
   // 剪贴板历史：同上
-  const filteredClip = useMemo(() => {
-    const q = search.trim();
-    if (!q) return clipboard;
-    return clipboard.filter(c => {
-      const name = c.type === "text" ? (c.content || "") : c.type === "image" ? "图片" : (c.items?.[0]?.name || "文件");
-      return matchItem(q, name, typeKeywords({ type: c.type, ext: c.items?.[0]?.ext, isImage: c.items?.[0]?.isImage }));
-    });
-  }, [clipboard, search]);
+  const clipboardPageSearch = useMemo(
+    () => buildClipboardPageSearch(clipboard, deferredSearch, clipboardCategory),
+    [clipboard, clipboardCategory, deferredSearch],
+  );
+  const filteredClip = clipboardPageSearch.items;
   // 启动器过滤：有 search 时按名称模糊过滤，无 search 直接返回原列表（持久化/拖入/picker 行为不受影响）
-  const filteredLauncher = useMemo(() => {
-    const q = search.trim();
-    if (!q) return launcher;
-    return launcher.filter(it => matchItem(q, it.name, []));
-  }, [launcher, search]);
+  const launcherPageSearch = useMemo(() => {
+    const q = deferredSearch.trim();
+    if (!q) return { items: launcher, highlights: new Map<number, TextRange[]>() };
+    const items: LauncherItem[] = [];
+    const highlights = new Map<number, TextRange[]>();
+    for (const item of launcher) {
+      const match = matchPageSearch(q, item.name, []);
+      if (!match.matches) continue;
+      items.push(item);
+      highlights.set(item.id, match.ranges);
+    }
+    return { items, highlights };
+  }, [launcher, deferredSearch]);
+  const filteredLauncher = launcherPageSearch.items;
 
   // ── 操作函数 ──
+  // 启动放大暂留：深拷贝源图标容器（.app-tile-icon / .enh-result-icon）到顶层 dragLayer，按源 rect 定位，
+  // 自播 scale+淡出（.launch-clone）。克隆自带精确尺寸与底色 → 任何上下文像素级贴合、无缩放跳变。
+  // 调用前源图标应仍可见（克隆保真），调用后再隐藏源。复位/下次启动前由 launchCloneNodeRef 移除。
+  const spawnLaunchClone = useCallback((iconEl: HTMLElement, r: DOMRect) => {
+    launchCloneNodeRef.current?.remove(); // 防上一枚残留（正常已由 hotkey-hide 清）
+    const clone = iconEl.cloneNode(true) as HTMLElement;
+    clone.style.margin = "0"; clone.style.opacity = ""; // 保证克隆可见（源随后才置 opacity:0）
+    const wrap = document.createElement("div");
+    wrap.className = "launch-clone";
+    wrap.style.top = `${r.top}px`; wrap.style.left = `${r.left}px`;
+    wrap.style.width = `${r.width}px`; wrap.style.height = `${r.height}px`;
+    wrap.appendChild(clone);
+    (dragLayerRef.current ?? document.body).appendChild(wrap);
+    launchCloneNodeRef.current = wrap;
+  }, []);
   const launchApp = useCallback((app:AppInfo, iconEl?:HTMLElement|null) => {
     if (launchingRef.current) return; // 防连点：动画进行中忽略后续触发
     recordUse(app.path);
@@ -749,10 +1200,11 @@ export default function App() {
     // 放大暂留：克隆图标到顶层浮层做 scale+淡出，覆盖层整体淡出露桌面，LAUNCH_ANIM_MS 后再 Rust hide
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
-    setLaunchAnim({ icon: app.icon, name: app.name, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）
+    iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
     setDismissing(true); // 覆盖层淡出（与剪贴板粘贴共用）
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [recordUse]);
+  }, [recordUse, spawnLaunchClone]);
   // 增强搜索激活：app 复用 launchApp（含放大动画+淡出+hide，不在此 setEnhOpen，让整层随 overlay dismiss 一起淡出，hotkey-hide 复位）；
   // stage file 走 hide + open_file（fire-and-forget）。两条都不碰粘贴/焦点交还/CLIPBOARD_LOCK。
   const copyAndPasteRef = useRef<((item: Pasteable) => void) | null>(null); // copyAndPaste 定义在后，activateEnh 经此 ref 调用
@@ -769,6 +1221,21 @@ export default function App() {
   const openLauncherItem = useCallback((it:LauncherItem, iconEl?:HTMLElement|null) => {
     // 排序拖拽激活后抑制 onClick（pointer 事件顺序：up → click，ref 比 state 更即时）
     if (suppressLaunchClickRef.current) { suppressLaunchClickRef.current = false; return; }
+    // 点击照常打开；后台只检查这一个真实路径并更新标记。UWP shell 路径不是文件系统路径，跳过。
+    if (!it.path.startsWith("shell:AppsFolder\\")) {
+      const token = (launcherMissingScanTokenRef.current.get(it.id) ?? 0) + 1;
+      launcherMissingScanTokenRef.current.set(it.id, token);
+      import("@tauri-apps/api/core").then(({ invoke }) => invoke<string[]>("check_stage_paths", { paths: [it.path] }))
+        .then(missing => {
+          if (launcherMissingScanTokenRef.current.get(it.id) !== token) return;
+          setMissingLauncherIds(prev => {
+            const next = new Set(prev);
+            if (missing.includes(it.path)) next.add(it.id); else next.delete(it.id);
+            return next;
+          });
+        })
+        .catch(() => {}); // 检查失败不影响打开，也不改旧标记。
+    }
     if (it.kind === "app") {
       launchApp({ name: it.name, path: it.path, icon: it.icon ?? null }, iconEl ?? null);
       return;
@@ -780,12 +1247,11 @@ export default function App() {
     if (reduce || !iconEl) { hideWorkbench(); return; }
     launchingRef.current = true;
     const r = iconEl.getBoundingClientRect();
-    // 用 emoji 文字作克隆内容（与 .app-tile-icon 里 <span> 保持一致）
-    const iconText = it.kind === "folder" ? "📁" : extIcon(it.ext ?? "");
-    setLaunchAnim({ icon: null, name: it.name, iconText, rect: { top:r.top, left:r.left, width:r.width, height:r.height } });
+    spawnLaunchClone(iconEl, r); // 克隆（源仍可见时）——磁贴图标含真实系统图标/缩略图/FileGlyph，cloneNode 一律精确保真
+    iconEl.style.opacity = "0"; launchSrcElRef.current = iconEl; // 源图标即时隐藏，克隆顶替（防"两个图标"）
     setDismissing(true);
     setTimeout(() => hideWorkbench(), LAUNCH_ANIM_MS);
-  }, [launchApp]);
+  }, [launchApp, spawnLaunchClone]);
 
   // ── 启动台排序拖拽（续75 打磨：Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起）──
   // 核心原则：ghost 位置 / 让路 transform 全走 DOM 直操作，零 React 渲染，彻底保证跟手。
@@ -849,15 +1315,18 @@ export default function App() {
         launcherDragActiveRef.current = true;
         suppressLaunchClickRef.current = true;
         ghostEl = srcEl.cloneNode(true) as HTMLElement;
-        ghostEl.classList.remove("selected", "launcher-dragging-src");
+        ghostEl.classList.remove("selected", "launcher-dragging-src", "launcher-shift"); // 续143：摘掉继承的 launcher-shift（transition:transform 200ms → 逐帧 transform 位移被动画化 → 滞后不跟手）
         ghostEl.classList.add("launcher-drag-ghost");
         ghostEl.querySelectorAll("img").forEach(img => { img.draggable = false; });
         const ghostHost = dragLayerRef.current ?? document.body;
         const inDragLayer = ghostHost === dragLayerRef.current;
+        // 续143：位移走 transform:translate3d 而非 left/top（后者逐帧 layout → 掉帧）；scale 并入同一 transform。同剪贴板 ghost。
         Object.assign(ghostEl.style, {
           position: inDragLayer ? "absolute" : "fixed",
-          left: `${me.clientX - grabOffsetX}px`,
-          top: `${me.clientY - grabOffsetY}px`,
+          left: "0",
+          top: "0",
+          transition: "none", // 续143：拖动期间瞬时跟手（落定时 onUp 再设 180ms）
+          transform: `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`,
           width: `${srcStartRect.width}px`,
           height: `${srcStartRect.height}px`,
           zIndex: inDragLayer ? "" : "100003",
@@ -870,10 +1339,9 @@ export default function App() {
         srcEl.classList.add("launcher-dragging-src");
         document.getElementById("overlay")?.classList.add("launcher-reordering");
       }
-      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 DOM style，零 React 渲染
+      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 transform，零 React 渲染、零 layout（续143）
       if (ghostEl) {
-        ghostEl.style.left = (me.clientX - grabOffsetX) + "px";
-        ghostEl.style.top = (me.clientY - grabOffsetY) + "px";
+        ghostEl.style.transform = `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`;
       }
       const ins = calcInsert(me.clientX, me.clientY);
       if (ins !== launcherDragInsertRef.current) {
@@ -899,9 +1367,8 @@ export default function App() {
       const landing = rects[target] ?? rects[srcIdx];
       launcherLandingRef.current = true;
       if (ghostEl && landing) {
-        ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
-        ghostEl.style.left = landing.left + "px";
-        ghostEl.style.top = landing.top + "px";
+        ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
+        ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.05)`;
       }
 
       // 180ms 回落结束后统一 commit：清 transform/class → 清 ghost → 重排持久化
@@ -926,14 +1393,8 @@ export default function App() {
     window.addEventListener("pointercancel", onUp);
   }, [search, saveLauncher]);
 
-  // 从 app picker 加入应用（按 path 去重）
-  const addAppToLauncher = useCallback((app:AppInfo) => {
-    if (launcher.some(x=>x.kind==="app" && x.path===app.path)) return;
-    saveLauncher([...launcher, { id:launcherId(), kind:"app" as const, name:app.name, icon:app.icon, path:app.path }].slice(0,LAUNCHER_MAX));
-  }, [launcher, saveLauncher]);
-  // 增强搜索 fs 结果加入中转区（按 path 去重，置顶）
-  const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}) => {
-    if (stage.some(s => s.items?.[0]?.path === r.path)) return;
+  // 增强搜索 fs 结果加入中转区（允许重复，置顶）。
+  const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}):Promise<AddResult> => {
     const isImage = IMG_EXTS.includes((r.ext||"").toLowerCase());
     let icon: string | null = null;
     try {
@@ -943,21 +1404,57 @@ export default function App() {
     } catch {}
     const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
     saveStage([item, ...stage].slice(0, stageMax));
+    return "added"; // 中转区是「置顶 + 截尾」，新项恒在，不会像启动台那样被上限挡在门外
   }, [stage, saveStage, stageMax]);
-  // 增强搜索 fs 结果加入启动台（按 path 去重）
-  const addFsToLauncher = useCallback((r:{path:string;name:string;ext?:string;isDir:boolean}) => {
-    if (launcher.some(x => x.path === r.path)) return;
-    saveLauncher([...launcher, {id:launcherId(), kind:r.isDir?"folder" as const:"file" as const, name:r.name, icon:null, path:r.path, ext:r.ext}].slice(0,LAUNCHER_MAX));
-  }, [launcher, saveLauncher]);
-  // 从启动器移除（右键）
-  const removeLauncherItem = useCallback((id:number) => { saveLauncher(launcher.filter(x=>x.id!==id)); }, [launcher, saveLauncher]);
-
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
-  // 剪贴板项「钉到中转」：同类型同内容已在则不重复；新项置顶；单文件异步补全 Windows 图标
+  // ── 中转站失效条目的恢复操作 ──
+  const openStageRecovery = useCallback(() => {
+    setSettingsOpen(false);
+    setStageRecoveryOpen(true);
+  }, []);
+  // 单文件条目可直接替换引用。多文件条目的语义尚未定型，先保留原状等待用户决定。
+  const relinkStageItem = useCallback(async (item: StageItem) => {
+    if (item.type !== "file" || item.items?.length !== 1 || !item.items[0] || !missingPathsRef.current.has(item.items[0].path)) return;
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const path = await invoke<string | null>(item.isDir ? "pick_folder" : "pick_file");
+      if (!path) return;
+      const info = await invoke<FileEntry>("get_file_info", { path });
+      const replacement: FileItem = { path: info.path, name: info.name, ext: info.ext, isImage: IMG_EXTS.includes(info.ext.toLowerCase()), icon: info.icon ?? null };
+      const next = stageRef.current.map(s => s.id === item.id
+        ? { ...s, items: [replacement], count: 1, name: info.name, ext: info.ext, isDir: info.isDir, size: info.size }
+        : s);
+      await saveStage(next);
+      setMissingPaths(prev => { const copy = new Set(prev); copy.delete(item.items![0].path); return copy; });
+      showToast(t("已重新定位：{name}", { name: info.name }));
+    } catch {
+      showToast(t("重新定位失败"));
+    }
+  }, [saveStage, showToast, t]);
+  const copyMissingStagePath = useCallback(async (path: string) => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("copy_text_to_clipboard", { text: path });
+      showToast(t("已复制原路径"));
+    } catch { showToast(t("复制失败")); }
+  }, [showToast, t]);
+  // 剪贴板项「加入中转站」：允许重复；每次操作都生成独立条目并置顶。
+  // 条目等价语义保留在 domain/stageItemIdentity.ts，但不参与插入决策。
   const addToStage = useCallback(async (c:ClipItem) => {
-    const exists = stage.some(s => s.type===c.type && (c.type==="file" ? s.items?.[0]?.path===c.items?.[0]?.path : s.content===c.content));
-    if (exists) return;
+    c = { ...c, content: await hydrateContent(c) }; // 剪贴板图片按 time 现取，仅在本次动作局部变量中短驻
+    let contentFile: string | undefined;
+    if (c.type==="image" && c.content) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        contentFile = (await invoke<(string|null)[]>("save_stage_images", { images:[c.content] }))[0] ?? undefined;
+      } catch {}
+    }
     let item = clipToStage(c);
+    if (contentFile) {
+      const { content:_omit, ...rest } = item;
+      item = { ...rest, contentFile };
+      rememberStageContentFile(item.id, contentFile);
+    }
     if (c.type==="file" && (c.count??0)<=1 && c.items?.[0]?.path && item.items?.[0]) {
       try {
         const { invoke } = await import("@tauri-apps/api/core");
@@ -966,107 +1463,38 @@ export default function App() {
       } catch {}
     }
     saveStage([item, ...stage].slice(0,stageMax));
-  }, [stage,saveStage,stageMax]);
-  // 拖拽：按下记录起点（不立刻激活，等移动超阈值），但跳过 .clip-actions 内的按钮区，且仅左键
-  const handleClipPointerDown = useCallback((e: React.PointerEvent, c: ClipItem) => {
-    if (e.button !== 0) return;
-    if ((e.target as Element).closest(".clip-actions")) return; // 复制/删除/📌 按钮区不参与拖拽
-    suppressClickRef.current = false; // 每次新交互复位，避免上次拖拽残留误抑制本次点击
-    setDragState({ item: c, originX: e.clientX, originY: e.clientY, currentX: e.clientX, currentY: e.clientY, active: false });
-    e.currentTarget.setPointerCapture(e.pointerId); // 捕获指针，移动出卡片也持续收到 move/up
-  }, []);
-  // 拖拽：移动超阈值激活；激活后跟手并按命中与否高亮中转区
-  const handleClipPointerMove = useCallback((e: React.PointerEvent) => {
-    const ds = dragStateRef.current;
-    if (!ds) return;
-    if (!ds.active) {
-      if (Math.hypot(e.clientX - ds.originX, e.clientY - ds.originY) < DRAG_THRESHOLD_PX) return;
-      document.getElementById("overlay")?.classList.add("dragging"); // 防泛蓝 + grabbing 光标
-      setDragState({ ...ds, active: true, currentX: e.clientX, currentY: e.clientY });
-      return;
-    }
-    const rect = dropAreaRef.current?.getBoundingClientRect();
-    const over = !!rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom;
-    dropAreaRef.current?.classList.toggle("drag-over", over);
-    setDragState({ ...ds, currentX: e.clientX, currentY: e.clientY });
-  }, []);
-  // 拖拽结束：仅在激活且落点命中中转区时入中转（不粘贴）；未激活则放手让 onClick 正常粘贴
-  const handleClipPointerUp = useCallback((e: React.PointerEvent) => {
-    const ds = dragStateRef.current;
-    document.getElementById("overlay")?.classList.remove("dragging");
-    dropAreaRef.current?.classList.remove("drag-over");
-    setDragState(null);
-    if (!ds?.active) return; // 短按 / cancel：不拦截，交给原有 onClick 粘贴
-    suppressClickRef.current = true; // 抑制紧随的 onClick（落点处可能触发粘贴）
-    const rect = dropAreaRef.current?.getBoundingClientRect();
-    if (rect && e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) addToStage(ds.item);
-  }, [addToStage]);
-  // ── 中转区框选多选（续70）──
-  // 实时计算选区矩形与各条目 DOM 的相交，命中者写入 stageSel；与显式多选共用同一套状态。
-  const computeLassoSelection = useCallback((origin:{x:number;y:number}, current:{x:number;y:number}) => {
-    const l = Math.min(origin.x, current.x), r = Math.max(origin.x, current.x);
-    const t = Math.min(origin.y, current.y), b = Math.max(origin.y, current.y);
-    const sel = new Set<number>();
-    // 列表/方格两种布局分别查不同选择器（move 时按当前 stageLayout 决定）
-    dropAreaRef.current?.querySelectorAll<HTMLElement>(stageLayout==="grid"?".stage-card":".stage-item").forEach(el => {
-      const rc = el.getBoundingClientRect();
-      if (rc.left <= r && rc.right >= l && rc.top <= b && rc.bottom >= t) { // 矩形相交
-        const id = Number(el.dataset.stageId);
-        if (!Number.isNaN(id)) sel.add(id);
-      }
-    });
-    setStageSel(sel);
-  }, [stageLayout]);
-  const handleLassoPointerDown = useCallback((e: React.PointerEvent) => {
-    lassoArmedRef.current = false;
-    if (e.button !== 0) return; // 仅左键
-    if (dragStateRef.current?.active) return; // 剪贴板卡片拖拽进行中不框选（复用现有 dragState 检查）
-    // 命中条目 / 操作按钮 / 工具栏则交给原有点击逻辑，不框选
-    if ((e.target as Element).closest(".stage-item,.stage-card,.stage-multi-toolbar,.stage-batch-bar,button")) return;
-    lassoArmedRef.current = true;
-    setLassoState({ active: false, origin: { x: e.clientX, y: e.clientY }, current: { x: e.clientX, y: e.clientY } });
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    // 不立即激活——等 move 超阈值
-  }, []);
-  const handleLassoPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!lassoArmedRef.current) return; // 未布防（如在条目上按下拖拽）
-    if (e.buttons === 0) return; // 未按下
-    const ls = lassoStateRef.current;
-    const cur = { x: e.clientX, y: e.clientY };
-    if (!ls.active) {
-      if (Math.hypot(cur.x - ls.origin.x, cur.y - ls.origin.y) <= LASSO_THRESHOLD_PX) return; // 未超阈值不激活
-      dropAreaRef.current?.classList.add("lasso-active"); // user-select:none + crosshair
-      setLassoState({ ...ls, active: true, current: cur });
-      setStageMultiselect(true);
-      computeLassoSelection(ls.origin, cur);
-      return;
-    }
-    setLassoState({ ...ls, current: cur }); // 触发重渲染刷新选区矩形
-    computeLassoSelection(ls.origin, cur);
-  }, [computeLassoSelection]);
-  const handleLassoPointerUp = useCallback((e: React.PointerEvent) => {
-    if (!lassoArmedRef.current) return;
-    lassoArmedRef.current = false;
-    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
-    const ls = lassoStateRef.current;
-    if (!ls.active) {
-      // 未激活=纯点击空白（未拖出框选）：若当前有选择则取消（点空白处取消选择）。
-      // armed 已保证点的是空白区——条目/按钮在 down 阶段被排除、不会 armed，故不影响条目自身的 toggle/取走。
-      if (stageSelRef.current.size || stageMultiselectRef.current) {
-        setStageSel(new Set<number>());
-        setStageMultiselect(false);
-        stageAnchorRef.current = null;
-      }
-      return;
-    }
-    dropAreaRef.current?.classList.remove("lasso-active");
-    setLassoState(s => ({ ...s, active: false }));
-    // 框中条目 → 保持多选；框中空白（选区为空）→ 退出多选
-    if (stageSelRef.current.size === 0) setStageMultiselect(false);
-  }, []);
+  }, [stage,saveStage,stageMax,rememberStageContentFile]);
+  // 清拖拽现场（**不投放**）：卸载 ghost + 复位光标/高亮。
+  // 凡非「正常松手」的收尾都必须走这里——热键关页 / Esc / pointercancel / 丢 capture。
+  // 续109 bug 根因：hotkey-hide 复位了重排/框选/多选等全部现场，唯独漏了剪贴板拖拽 →
+  //   拖着不松手按热键关页，pointerup 再也到不了卡片 → ghost 永久悬浮到下次呼出。
+  // 续109b bug（**由续109 修复衍生**）：热键关页时本函数清掉了 clipDragRef，再呼出松手时
+  //   handleClipPointerUp 已读不到拖拽态（active=false 提前 return、不设 suppress）→ 浏览器
+  //   随后在卡片上合成的 click 落到 onClick 的 copyAndPaste（写回剪贴板+焦点交还+Ctrl+V）
+  //   → 剪贴板项被"点击粘贴"进外部焦点窗口、界面消失。**根治**：凡在「已激活拖拽」中被清场
+  //   （含热键关页/丢 capture/cancel/正常松手），一律在此置 suppressClickRef，吞掉随后的 click。
+  //   （suppressClickRef 会被下次 pointerdown 复位 → 不会误伤后续正常点击粘贴，自愈。）
+  // 幂等：ref 已空 / state 已 null 时 React 自动 bail out，可安全重复调用。
+  // 续110 clearNativeFlag：默认 true=非升级收尾（落点 A/B/丢 capture/cancel/热键关页），一并清 Rust
+  //   CLIP_DRAG_ACTIVE 让路标志；升级为原生拖出时（beginClipDragOut）传 false——标志留给 Rust 无缝交接
+  //   （do_drag_on_main 先置 DRAG_IN_PROGRESS 再清它），中间不留空窗被 monitor/light-dismiss 钻空提前 hide。
+  const {
+    dragItem: clipDragItem,
+    dragStateRef: clipDragRef,
+    ghostRef: clipGhostRef,
+    suppressClickRef,
+    setNativeActive: setClipDragActiveNative,
+    endDrag: endClipDrag,
+    pointerDown: handleClipPointerDown,
+    pointerMove: handleClipPointerMove,
+    pointerUp: handleClipPointerUp,
+    pointerCancel: handleClipPointerCancel,
+    beginNativeDragOut: beginClipDragOut,
+  } = useClipboardDragController({ dropAreaRef, dragOutSourceRef, droppedOnSelfRef, addToStage });
   // ── 中转条目拖出（续71）+ 区内重排（续88）──
-  // 条目上按下→拖动超阈值：光标仍在 .drop-area 内→区内重排（FLIP，仿启动台）；光标离开区域→升级为
-  // 原生 OLE 拖出（emit drag-out-begin，Rust 侧 STA 线程跑 DoDragDrop，hide overlay 后接管鼠标）。
+  // 条目上按下→拖动超阈值：自动关闭开启时直接进入原生 OLE 拖出并隐藏；关闭时单项进入区内重排
+  // （FLIP，仿启动台），需要外部投放再按热键，经 stage-drag-hotkey 升级为原生 OLE 拖出。
+  // 两种原生路径都由 Rust 侧主线程跑 DoDragDrop、建立 capture 后再按模式隐藏 overlay。
   // 与框选互斥：down 在条目上时 .drop-area 的 lasso 不布防（closest 排除）；与左键取走互斥：未超阈值=普通点击。
   // 区内重排仅限单项拖动（多选拖多项 / 搜索过滤态 索引对不上）：两种情形直接走原生拖出，行为与重排功能加入前一致。
   // 续88 bug 修复：重排阶段窗口全程可见、尚未进入 Rust 的 DRAG_IN_PROGRESS——必须另行告知 Rust 侧
@@ -1076,16 +1504,17 @@ export default function App() {
     import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_stage_reorder_active", { active })).catch(() => {});
   }, []);
   // forceHide=true：由"区内重排中按热键"升级而来——Rust 侧无视 keepOpen 设置强制隐藏 overlay（用户已明确要隐藏
-  // 去外部投放）。边界越出触发的常规升级传 false，沿用中转站「拖出后自动关闭」设置。
+  // 去外部投放）。自动关闭开启时的直接原生拖出传 false，由 Rust 读取当前设置决定起手隐藏。
   const beginNativeDragOut = useCallback((ids: number[], forceHide = false) => {
     const dr = dragOutRef.current;
-    console.log("[stage-drag] → native drag-out", ids, "forceHide=", forceHide); // 续88 诊断
     dr.mode = "native";
     dr.draggedIds = ids;
+    dragOutSourceRef.current = "stage"; // 续110：中转站来源，drag-out-done 走原有删条目/持久化逻辑
     droppedOnSelfRef.current = false; // 续97：每次拖出重置「落回自身」标记，等 files-dropped 内部落点再置位
     const dragItems = stageRef.current.filter(s => ids.includes(s.id)).map(s => ({
       type: s.type,
       content: s.content ?? null,
+      content_file: s.contentFile ?? null,
       items: s.items?.map(f => f.path) ?? null,
       orig_path: s.orig_path ?? null,
     }));
@@ -1103,15 +1532,19 @@ export default function App() {
     const grabOffsetX = clientX - srcStartRect.left, grabOffsetY = clientY - srcStartRect.top;
     tiles.forEach(t => t.classList.add("stage-shift"));
     const ghostEl = srcEl.cloneNode(true) as HTMLElement;
-    ghostEl.classList.remove("selected");
+    ghostEl.classList.remove("selected", "stage-shift"); // 续143：摘掉克隆时继承来的 stage-shift（它带 transition:transform 200ms，会让逐帧 transform 位移被动画化 → 滞后不跟手）
     ghostEl.classList.add("stage-drag-ghost");
     ghostEl.querySelectorAll("img").forEach(img => { (img as HTMLImageElement).draggable = false; });
     const ghostHost = dragLayerRef.current ?? document.body;
     const inDragLayer = ghostHost === dragLayerRef.current;
+    // 续143：位移走 transform:translate3d 而非 left/top（left/top 逐帧触发 layout → 掉帧；transform 只走合成器）。
+    // 固定 left/top=0，位置全交给 translate3d；scale 并入同一 transform（合成器一次处理）。同剪贴板 ghost（续109）。
     Object.assign(ghostEl.style, {
       position: inDragLayer ? "absolute" : "fixed",
-      left: `${clientX - grabOffsetX}px`,
-      top: `${clientY - grabOffsetY}px`,
+      left: "0",
+      top: "0",
+      transition: "none", // 续143：拖动期间瞬时跟手（落定时 commitStageReorder 再设 180ms）
+      transform: `translate3d(${clientX - grabOffsetX}px,${clientY - grabOffsetY}px,0) scale(1.04)`,
       width: `${srcStartRect.width}px`,
       height: `${srcStartRect.height}px`,
       zIndex: inDragLayer ? "" : "100003",
@@ -1123,14 +1556,12 @@ export default function App() {
     srcEl.classList.add("stage-dragging-src");
     document.getElementById("overlay")?.classList.add("stage-reordering");
     stageReorderRef.current = { active: true, tiles, rects, ghostEl, srcEl, srcIdx, insertIdx: srcIdx, grabOffsetX, grabOffsetY };
-    console.log("[stage-drag] reorder start id=", id, "srcIdx=", srcIdx); // 续88 诊断
     setStageReorderActiveNative(true); // 告知 Rust：light-dismiss 本阶段让路（热键 monitor 续88 起不再让路）
   }, [stageLayout, setStageReorderActiveNative]);
   const updateStageReorder = useCallback((clientX: number, clientY: number) => {
     const st = stageReorderRef.current;
     if (!st.active || !st.ghostEl) return;
-    st.ghostEl.style.left = (clientX - st.grabOffsetX) + "px";
-    st.ghostEl.style.top = (clientY - st.grabOffsetY) + "px";
+    st.ghostEl.style.transform = `translate3d(${clientX - st.grabOffsetX}px,${clientY - st.grabOffsetY}px,0) scale(1.04)`; // 续143：合成器位移，零 layout
     // 按固定槽位快照判断插入点：同启动台 calcInsert（cy 落在某行 → 按 cx 半区决定插入本格前/继续找下一格）
     let ins = st.rects.length;
     for (let i = 0; i < st.rects.length; i++) {
@@ -1161,7 +1592,6 @@ export default function App() {
   const cancelStageReorder = useCallback(() => {
     const st = stageReorderRef.current;
     if (!st.active) return;
-    console.log("[stage-drag] reorder cancel (仅 JS 清场，标志留待 Rust/调用点处理)"); // 续88 诊断
     st.tiles.forEach(t => { t.style.transform = ""; t.classList.remove("stage-shift"); });
     st.srcEl?.classList.remove("stage-dragging-src");
     document.getElementById("overlay")?.classList.remove("stage-reordering");
@@ -1176,9 +1606,8 @@ export default function App() {
     const target = st.insertIdx > srcIdx ? st.insertIdx - 1 : st.insertIdx;
     const landing = st.rects[target] ?? st.rects[srcIdx];
     if (ghostEl && landing) {
-      ghostEl.style.transition = "left 180ms cubic-bezier(.2,.8,.2,1),top 180ms cubic-bezier(.2,.8,.2,1)";
-      ghostEl.style.left = landing.left + "px";
-      ghostEl.style.top = landing.top + "px";
+      ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
+      ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.04)`;
     }
     stageReorderRef.current = { ...st, active: false };
     setStageReorderActiveNative(false); // 重排结束（落定动画只是视觉收尾，与 Rust 让路无关，可立即清）
@@ -1195,81 +1624,115 @@ export default function App() {
       if (!unchanged) saveStage(list); // 位置不变则跳过 I/O
     }, 180);
   }, [saveStage, setStageReorderActiveNative]);
-  const handleStagePointerDown = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest("button")) return; // 悬浮操作按钮区不触发拖出
-    suppressStageClickRef.current = false; // 每次新交互复位
-    const id = Number((e.currentTarget as HTMLElement).dataset.stageId);
-    if (Number.isNaN(id)) return;
-    // 多选状态下按下选中项 → 拖全部选中（ids 在 move 时按 stageSel 决定）；未超阈值松手仍走 onClick 点选
-    dragOutRef.current = { pressing: true, itemId: id, origin: { x: e.clientX, y: e.clientY }, draggedIds: [], mode: "idle" };
-    try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch {}
-  }, []);
-  const handleStagePointerMove = useCallback((e: React.PointerEvent) => {
-    const dr = dragOutRef.current;
-    const itemId = dr.itemId;
-    // 注意：进入 reorder/native 后 dr.pressing 会置 false（表示"一次性阈值判定"已完成），
-    // 但重排/原生拖出仍需继续吃后续 move 事件——门槛判据只能用 itemId + mode，不能查 pressing。
-    if (itemId === null || dr.mode === "native") return; // native：已交给 Rust，JS 侧不再处理
-    if (dr.mode === "idle") {
-      if (!dr.pressing) return;
-      if (Math.hypot(e.clientX - dr.origin.x, e.clientY - dr.origin.y) < DRAG_OUT_THRESHOLD_PX) return;
-      dr.pressing = false; // 一次性阈值判定，避免重复进入下面的分支决策
-      suppressStageClickRef.current = true; // 抑制紧随的 onClick 取走粘贴
-      // 多选且按下项在选区内 → 拖全部选中项；否则 → 拖当前单项（与原有 ids 判定一致）
-      const sel = stageSelRef.current;
-      let ids = (sel.size > 0 && sel.has(itemId)) ? Array.from(sel) : [itemId];
-      // 续100：失踪项排除出拖出集——死路径进 OLE 会崩溃目标(cmd 等)+本进程。全为失踪则复位手势、不起拖动。
-      ids = ids.filter(id => !missingIdsRef.current.has(id));
-      if (ids.length === 0) { dr.mode = "idle"; dr.itemId = null; return; }
-      if (ids.length > 1 || search.trim() || ids[0] !== itemId) { // 多项 / 搜索过滤态 / 按下项被失踪过滤掉（重排要按下元素、故剩余单项非按下项时走原生）：直接原生拖出
-        dr.mode = "native";
-        beginNativeDragOut(ids);
-        return;
-      }
-      dr.mode = "reorder";
-      startStageReorder(itemId, e.currentTarget as HTMLElement, e.clientX, e.clientY);
-      return;
+  // 续143：单项重排松手落点在启动台 → 加入启动台（恢复旧「拖中转项目到启动台」功能——旧靠越界升级为原生 OLE
+  // 落到启动台再由 files-dropped 处理，续143 删了越界升级故改在此 JS 落点侧处理）。仅文件/文件夹项（有 path）可入；
+  // 忠实旧 OLE 行为的 move 语义：加入成功（added/duplicate）后，非持久 + 非固定则从中转移除。清 reorder 现场不回弹。
+  const dropStageItemToLauncher = useCallback(async (item: StageItem) => {
+    let path: string | undefined, name: string, ext: string | undefined, isDir = false, icon: string | null = null;
+    if (item.type === "file" && item.items?.[0]?.path) {
+      path = item.items[0].path; name = item.name ?? item.items[0].name; ext = item.ext; isDir = !!item.isDir; icon = item.items[0].icon ?? null;
+    } else if (item.type === "image") {
+      // 图片项无实体路径：物化成持久 PNG 文件再加入（恢复旧「拖截图到启动台」；旧靠 OLE 产 temp 文件、会被清理→死链，今写持久 launcher_images/）
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        path = await invoke<string>("save_image_as_launcher_file", { base64: item.content ?? null, origPath: item.orig_path ?? null, contentFile:item.contentFile ?? null });
+      } catch { showToast(t("图片加入启动台失败")); return; }
+      name = t("截图"); ext = "png";
+    } else { return; } // 文本等无实体，不该走到这
+    if (!path) return;
+    const res = await addFsToLauncher({ path, name, ext, isDir, icon });
+    toastAddResult(res, "launcher", name);
+    launcherDropRef.current?.classList.add("drop-flash");
+    setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
+    if ((res === "added" || res === "duplicate") && !stagePersistRef.current && !item.pinned) { // move 语义：非持久/非固定则从中转移除
+      const next = stageRef.current.filter(s => s.id !== item.id);
+      setStage(next);
+      await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
     }
-    if (dr.mode === "reorder") {
-      const rect = dropAreaRef.current?.getBoundingClientRect();
-      const outside = !rect || e.clientX < rect.left - STAGE_REORDER_ESCAPE_PX || e.clientX > rect.right + STAGE_REORDER_ESCAPE_PX
-        || e.clientY < rect.top - STAGE_REORDER_ESCAPE_PX || e.clientY > rect.bottom + STAGE_REORDER_ESCAPE_PX;
-      if (outside) { // 光标离开中转区：放弃重排、升级为原生拖出（单项，重排只处理单项拖动）
-        cancelStageReorder();
-        dr.mode = "native";
-        beginNativeDragOut([itemId]);
-        return;
-      }
-      updateStageReorder(e.clientX, e.clientY);
-    }
-  }, [search, beginNativeDragOut, startStageReorder, updateStageReorder, cancelStageReorder]);
-  const handleStagePointerUp = useCallback((e: React.PointerEvent) => {
-    try { (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId); } catch {}
-    if (dragOutRef.current.mode === "reorder") commitStageReorder();
-    dragOutRef.current.pressing = false; // 未超阈值=普通点击，交给 onClick（取走/选中）
-    dragOutRef.current.mode = "idle";
-  }, [commitStageReorder]);
-  // 安全网（续88）：capture 被外部原因（而非我们自己的 pointerup/releasePointerCapture）中途撤销时兜底清场。
-  // 典型触发场景：重排阶段窗口本应由 light-dismiss/热键 monitor 让路（见 dragout.rs stage_reorder_active），
-  // 但如果因未预见的原因窗口仍被意外隐藏，浏览器会静默丢弃 capture 而不发 pointerup——不兜底就会永久
-  // 卡住 ghost/让路 transform（下次呼出时"卡片悬浮"）。无论根因是否已堵上，这层兜底都应保留。
-  const handleStageLostPointerCapture = useCallback(() => {
-    console.log("[stage-drag] lost pointer capture", { mode: dragOutRef.current.mode, reorderActive: stageReorderRef.current.active }); // 续88 诊断
-    if (stageReorderRef.current.active) cancelStageReorder();
-    dragOutRef.current.pressing = false;
-    dragOutRef.current.mode = "idle";
-    setStageReorderActiveNative(false);
-  }, [cancelStageReorder, setStageReorderActiveNative]);
+  }, [addFsToLauncher, toastAddResult, showToast, t]);
+  const {
+    lasso: lassoState,
+    lassoRef: lassoStateRef,
+    suppressClickRef: suppressStageClickRef,
+    cancelLasso,
+    resetForHide: resetStageInteractionForHide,
+    upgradeReorderFromHotkey,
+    lassoPointerDown: handleLassoPointerDown,
+    lassoPointerMove: handleLassoPointerMove,
+    lassoPointerUp: handleLassoPointerUp,
+    itemPointerDown: handleStagePointerDown,
+    itemPointerMove: handleStagePointerMove,
+    itemPointerUp: handleStagePointerUp,
+    itemLostPointerCapture: handleStageLostPointerCapture,
+  } = useStageInteractionController({
+    interactionRef: dragOutRef,
+    dropAreaRef,
+    launcherDropRef,
+    stageRef,
+    selectedRef: stageSelRef,
+    multiselectRef: stageMultiselectRef,
+    missingIdsRef,
+    anchorRef: stageAnchorRef,
+    stageLayout,
+    autoClose: dragoutAutoClose,
+    searchActive: !!search.trim(),
+    clipDragActive: () => !!clipDragRef.current?.active,
+    setSelected: setStageSel,
+    setMultiselect: setStageMultiselect,
+    startReorder: startStageReorder,
+    updateReorder: updateStageReorder,
+    commitReorder: commitStageReorder,
+    cancelReorder: cancelStageReorder,
+    reorderActive: () => stageReorderRef.current.active,
+    setNativeReorderActive: setStageReorderActiveNative,
+    beginNativeDragOut,
+    dropToLauncher: dropStageItemToLauncher,
+    showToast,
+    t,
+  });
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:s.items![0].path})).catch(()=>{});
   }, []);
-  const deleteClipItem = useCallback(async (time:number) => {
-    setClipboard(prev => prev.filter(c => c.time !== time));
-    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("delete_clipboard_item",{time}); } catch{}
+  // 从 Rust 权威缓存（CLIP_CACHE）回拉历史覆盖前端 state（续147）。删除/清空乐观改前端后若落地失败，
+  // 用它把前端拽回权威真相，避免「前端删了、磁盘没删 → 重启复活」的静默分叉。
+  const refreshClipboard = useCallback(async () => {
+    setClipboard(normalizeClipboardHistory(await clipboardApi.getHistory()));
   }, []);
+  const openStageThumbnailDirectory = useCallback(() => {
+    cacheApi.openStageThumbnailDirectory().catch(() => {});
+  }, []);
+  const clearStageThumbnailCache = useCallback(async () => {
+    try {
+      await cacheApi.clearStageThumbnailCache();
+      setThumbCacheCleared(true);
+      setTimeout(() => setThumbCacheCleared(false), 1500);
+    } catch {}
+  }, []);
+  const openClipboardImageDirectory = useCallback(() => {
+    cacheApi.openClipboardImageDirectory().catch(() => {});
+  }, []);
+  const clearClipboardImageCache = useCallback(async () => {
+    try {
+      await cacheApi.clearClipboardImageCache();
+      await refreshClipboard();
+      setImgCacheCleared(true);
+      setTimeout(() => setImgCacheCleared(false), 1500);
+    } catch {}
+  }, [refreshClipboard]);
+  const deleteClipItem = useCallback(async (time:number) => {
+    setClipboard(prev => prev.filter(c => c.time !== time)); // 乐观：先从界面移除
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      await invoke("delete_clipboard_item",{time}); // 命令现返回 Result：落盘失败会 reject → 落入 catch
+    } catch {
+      // 删除未落地（IPC 失败 / 锁毒化 / 落盘失败）→ 前端已移除会与 Rust 权威缓存分叉、重启复活。
+      // 从权威缓存回同步（该条目会重新出现）+ 提示，绝不留静默分叉。
+      try { await refreshClipboard(); } catch {}
+      showToast(t("删除失败"));
+    }
+  }, [refreshClipboard, t]);
   const changeTheme = useCallback(async (t:"dark"|"light"|"system") => {
     setTheme(t);
     if(store){ await store.set("theme",t); await store.save(); }
@@ -1338,9 +1801,16 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [recording]);
   const clearClipboard = useCallback(async () => {
-    setClipboard([]);
-    try { const {invoke}=await import("@tauri-apps/api/core"); await invoke("clear_clipboard_history"); } catch{}
-  }, []);
+    setClipboard([]); // 乐观：先清界面
+    try {
+      const {invoke}=await import("@tauri-apps/api/core");
+      await invoke("clear_clipboard_history"); // 命令现返回 Result：落盘失败会 reject → 落入 catch
+    } catch {
+      // 清空未落地 → 前端已空会与权威缓存分叉、重启复活。回同步（条目重现）+ 提示（续147）。
+      try { await refreshClipboard(); } catch {}
+      showToast(t("清空失败"));
+    }
+  }, [refreshClipboard, t]);
   const clearStage = useCallback(async () => { await saveStage([]); }, [saveStage]);
   const clearLauncher = useCallback(async () => { await saveLauncher([]); }, [saveLauncher]);
   // ── 搜索引擎切换 + 额外目录配置（续57）：持久化 store + 运行时 invoke 应用 ──
@@ -1363,12 +1833,23 @@ export default function App() {
     if (store) { await store.set("search-dirs", dirs); await store.save(); }
     try { const { invoke } = await import("@tauri-apps/api/core"); await invoke("set_search_dirs", { dirs }); } catch {}
   }, [store]);
-  const addSearchDir = useCallback(async () => {
-    const d = searchDirInput.trim();
-    if (!d || searchDirs.includes(d)) { setSearchDirInput(""); return; }
-    await applySearchDirs([...searchDirs, d]);
-    setSearchDirInput("");
-  }, [searchDirInput, searchDirs, applySearchDirs]);
+  // 弹系统文件夹选择框加目录（续111，取代手输——打错路径会被 Rust 侧 exists() 静默跳过，用户无从察觉）。
+  // Rust 的 pick_folder 在对话框存续期间置 DIALOG_ACTIVE，light-dismiss / 热键让路，故此处**不需要**
+  // 也**不应该** hideWorkbench()：界面全程保持，对话框以主窗口为 owner 浮在其上。
+  // dirPicking 防重复弹（Show 是模态阻塞的，重入会叠出第二个对话框）。
+  const pickSearchDir = useCallback(async () => {
+    if (dirPicking) return;
+    setDirPicking(true);
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const d = await invoke<string|null>("pick_folder");
+      if (d && !searchDirs.includes(d)) await applySearchDirs([...searchDirs, d]);
+    } catch (e) {
+      console.error("[pick_folder]", e);
+    } finally {
+      setDirPicking(false);
+    }
+  }, [dirPicking, searchDirs, applySearchDirs]);
   const removeSearchDir = useCallback(async (d: string) => {
     await applySearchDirs(searchDirs.filter(x => x !== d));
   }, [searchDirs, applySearchDirs]);
@@ -1379,47 +1860,74 @@ export default function App() {
       const { invoke } = await import("@tauri-apps/api/core");
       await invoke("set_clip_cache_max", { n });
       // Rust 已截断缓存，重新拉取最新历史同步前端 state
-      const history = await invoke<{type:string;content?:string;time:number;items?:FileItem[];count?:number;orig_path?:string}[]>("get_clipboard_history");
-      setClipboard(history.map(e => ({ type: e.type as "text"|"image"|"file", content: e.content, time: e.time, items: e.items, count: e.count, orig_path: e.orig_path })));
+      setClipboard(normalizeClipboardHistory(await clipboardApi.getHistory()));
     } catch {}
   }, [store]);
   const copyAndPaste = useCallback((item:Pasteable) => { // 剪贴板历史 + 中转条目共用：取走（写回剪贴板+焦点交还+Ctrl+V）
     if (launchingRef.current) return; // 与启动共用锁：动画进行中忽略
-    // 实际粘贴：hide+交还焦点+Ctrl+V 全在 Rust 命令内（流程不变），此处仅负责调用
-    const doPaste = async () => {
-      const {invoke}=await import("@tauri-apps/api/core");
-      if (item.type === "text") { try { await invoke("paste_clipboard",{text:item.content}); } catch{ await hideWorkbench(); } }
-      else if (item.type === "file" && item.items) { try { await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)}); } catch{ await hideWorkbench(); } }
-      else { try { await invoke("set_clipboard_image",{base64:item.content,origPath:item.orig_path??null}); } catch{ await hideWorkbench(); } }
+    const showPasteError = (error: unknown) => {
+      const err = String(error);
+      const key = err.includes("paste-target-elevated")
+        ? "无法粘贴到以管理员身份运行的应用"
+        : err.includes("paste-modifier-held")
+          ? "请松开修饰键后重试粘贴"
+          : "粘贴失败";
+      showToastRef.current(makeT(langRef.current)(key));
     };
-    // 无障碍：跳过淡出，沿用即时粘贴
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) { doPaste(); return; }
-    // 与启动一致：先播 LAUNCH_ANIM_MS 覆盖层淡出露桌面，再调粘贴命令（命令自身会 hide+粘贴）
-    launchingRef.current = true;
-    setDismissing(true);
-    setTimeout(async () => {
-      if (!launchingRef.current) return; // 淡出期间被 Esc/热键复位（用户反悔）→ 放弃粘贴
-      try { await doPaste(); }
-      finally { setDismissing(false); launchingRef.current = false; } // 粘贴命令不发 hotkey-hide，手动复位（窗口此时已隐藏，复位不可见）
-    }, LAUNCH_ANIM_MS);
+    const startPaste = async () => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      // 安全预检必须发生在任何淡出/写剪贴板之前；实际命令仍会二次校验，封住动画期间目标变化。
+      try {
+        await invoke("check_paste_ready");
+      } catch (error) {
+        showPasteError(error);
+        return;
+      }
+      const doPaste = async () => {
+        try {
+          if (item.type === "text") await invoke("paste_clipboard",{text:item.content});
+          else if (item.type === "file" && item.items) await invoke("set_clipboard_files",{paths:item.items.map(f=>f.path)});
+          else await invoke("set_clipboard_image",{base64:(await hydrateContent(item)) ?? "",origPath:item.orig_path??null,time:item.time??null});
+        } catch (error) {
+          showPasteError(error);
+        }
+      };
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) { await doPaste(); return; }
+      launchingRef.current = true;
+      setDismissing(true);
+      setTimeout(async () => {
+        if (!launchingRef.current) return;
+        try { await doPaste(); }
+        finally { setDismissing(false); launchingRef.current = false; }
+      }, LAUNCH_ANIM_MS);
+    };
+    void startPaste();
   }, []);
   copyAndPasteRef.current = copyAndPaste; // 供 activateEnh（定义在前）对剪贴板结果取走粘贴，避开 TDZ
+  const activateClipboardItem = useCallback((item: ClipItem) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    copyAndPaste(item);
+  }, [copyAndPaste]);
   // 只复制到当前剪贴板（不粘贴、不隐藏 overlay）：内容进系统剪贴板供用户自行 Ctrl+V，且不回流历史面板
   const copyToClipboard = useCallback(async (item:ClipItem) => {
-    try {
-      await writeItemToClipboard(item);
-      setCopiedTime(item.time);
-      setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
-    } catch {}
+    setCopiedTime(item.time); // 续146c：同 copyStageToClipboard，✓ 先亮再干活（图片项的写入耗时可观）
+    setTimeout(()=>setCopiedTime(t=>t===item.time?null:t), 1000); // 1s 后还原 ✓（仅当未被更新的复制覆盖）
+    try { await writeItemToClipboard(item); }
+    catch { setCopiedTime(t=>t===item.time?null:t); }
   }, []);
   // 中转条目「复制到剪贴板」：同上，独立 ✓ 反馈（按 id）
+  // 续146c：✓ **先亮再干活**。原先 await 完写剪贴板才置 ✓——图片项要把 ~300KB base64 送过 IPC、
+  // Rust 再解码写剪贴板，于是「点了没反应」（文本项因为快才显得正常）。✓ 反馈的语义是「你这一下点到了」，
+  // 不是「剪贴板已写完」，故乐观置位；真失败时立刻撤掉 ✓，不会骗人。
   const copyStageToClipboard = useCallback(async (s:StageItem) => {
-    try {
-      await writeItemToClipboard(s);
-      setCopiedStageId(s.id);
-      setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
-    } catch {}
+    if (s.type === "file" && missingIdsRef.current.has(s.id)) return;
+    setCopiedStageId(s.id);
+    setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
+    try { await writeItemToClipboard(s); }
+    catch { setCopiedStageId(x=>x===s.id?null:x); }
   }, []);
 
   // 中转区单击 handler
@@ -1451,7 +1959,11 @@ export default function App() {
       }
       return;
     }
-    if (!stageMultiselect) { if (missingIdsRef.current.has(s.id)) return; copyAndPaste(s); return; } // 续100：失踪项不可取走（死路径粘贴无意义/可能崩目标）
+    if (!stageMultiselect) {
+      if (missingIdsRef.current.has(s.id)) return; // 含失效路径的条目只留恢复/清理动作，不把不完整引用送进粘贴链。
+      copyAndPaste(s);
+      return;
+    }
     setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
     stageAnchorRef.current = idx;
   }, [stageMultiselect, filteredStage, copyAndPaste]);
@@ -1470,7 +1982,7 @@ export default function App() {
   const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
     if (stageMultiselect && stageSel.size > 0) {
       const sel = stage.filter(x => stageSel.has(x.id));
-      const allFiles = sel.length > 0 && sel.every(x => x.type === "file");
+      const allFiles = sel.length > 0 && sel.every(x => x.type === "file" && !missingIds.has(x.id));
       const combined = (): Pasteable => ({ type: "file", items: sel.flatMap(x => x.items ?? []) });
       openCtxMenu(e, [
         { label: t("取走全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
@@ -1484,70 +1996,238 @@ export default function App() {
       return;
     }
     const items: CtxMenuItem[] = [];
-    if (s.type === "file" && s.items?.[0]?.path) {
+    const missingFile = missingIds.has(s.id) && s.type === "file" ? s.items?.find(f => missingPaths.has(f.path)) : undefined;
+    if (missingFile) {
+      if (s.items?.length === 1) items.push({ label: t("重新定位…"), action: () => relinkStageItem(s) });
+      items.push({ label: t("复制原路径"), action: () => copyMissingStagePath(missingFile.path) });
+    } else if (s.type === "file" && s.items?.[0]?.path) {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
+          hideWorkbench(); // 先隐藏全屏毛玻璃覆盖层，避免 explorer 在其下冷起时 backdrop-filter 抢 GPU 卡顿
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("reveal_in_explorer", { path: s.items![0].path });
         },
       });
+      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
+    } else {
+      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     }
-    items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     items.push({ label: t("删除该项目"),   action: () => removeStage(s.id) });
     openCtxMenu(e, items);
-  }, [stageMultiselect, stageSel, stage, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, t]);
+  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
+  const stageItemActions = useMemo<StageItemActions>(() => ({
+    activate: handleStageClick,
+    openContextMenu: openStageCtxMenu,
+    togglePin: toggleStagePin,
+    copy: copyStageToClipboard,
+    remove: removeStage,
+    open: openStageFile,
+  }), [handleStageClick, openStageCtxMenu, toggleStagePin, copyStageToClipboard, removeStage, openStageFile]);
+  const stageItemPointer = useMemo<StageItemPointerHandlers>(() => ({
+    pointerDown: handleStagePointerDown,
+    pointerMove: handleStagePointerMove,
+    pointerUp: handleStagePointerUp,
+    lostPointerCapture: handleStageLostPointerCapture,
+  }), [handleStagePointerDown, handleStagePointerMove, handleStagePointerUp, handleStageLostPointerCapture]);
 
   // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
   const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
+    // 拖拽中不弹菜单：右键的 pointerdown 因 button!==0 提前返回、不打断拖拽，但 contextmenu 照样触发 →
+    // 菜单浮出而 ghost 仍在跟手、松手照旧投放，纯属添乱。拖拽期间右键一律吞掉。
+    if (clipDragRef.current?.active) { e.preventDefault(); return; }
     const items: CtxMenuItem[] = [];
     if (c.type === "file" && c.items?.[0]?.path) {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
+          hideWorkbench(); // 同上：先隐藏覆盖层再唤起 explorer
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("reveal_in_explorer", { path: c.items![0].path });
         },
       });
     }
     items.push({ label: t("复制到剪贴板"), action: () => copyToClipboard(c) });
-    items.push({ label: t("📌 钉到中转区"),  action: () => addToStage(c) });
+    items.push({ label: t("加入中转站"),  action: () => addToStage(c) });
     items.push({ label: t("删除该条目"),    action: () => deleteClipItem(c.time) });
     openCtxMenu(e, items);
   }, [openCtxMenu, copyToClipboard, addToStage, deleteClipItem, t]);
+  const clipboardPanelActions = useMemo<ClipboardPanelActions>(() => ({
+    activate: activateClipboardItem,
+    addToStage,
+    copy: copyToClipboard,
+    delete: deleteClipItem,
+    openContextMenu: openClipCtxMenu,
+  }), [activateClipboardItem, addToStage, copyToClipboard, deleteClipItem, openClipCtxMenu]);
+  const clipboardPanelDrag = useMemo<ClipboardPanelDragHandlers>(() => ({
+    pointerDown: handleClipPointerDown,
+    pointerMove: handleClipPointerMove,
+    pointerUp: handleClipPointerUp,
+    pointerCancel: handleClipPointerCancel,
+    lostPointerCapture: () => endClipDrag(),
+  }), [handleClipPointerDown, handleClipPointerMove, handleClipPointerUp, handleClipPointerCancel, endClipDrag]);
 
   // 启动器条目右键菜单（file/folder 额外加「打开所在目录」；通用：从启动器移除）
   const openLauncherCtxMenu = useCallback((e: React.MouseEvent, it: LauncherItem) => {
-    const items: CtxMenuItem[] = [];
-    if (it.kind !== "app") items.push({ label: t("打开所在目录"), action: async () => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
+    // 「打开」置顶：左键本就能打开，但右键菜单里补一条更符合直觉（与增强搜索结果菜单一致）。
+    // 无图标元素调用 → openLauncherItem 走 !iconEl 分支直接打开并隐藏，不播放大动画。
+    const items: CtxMenuItem[] = [{ label: t("打开"), action: () => openLauncherItem(it) }];
+    if (it.kind !== "app") items.push({ label: t("打开所在目录"), action: async () => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path: it.path }); } });
     items.push({ label: t("从启动器移除"), action: () => removeLauncherItem(it.id) });
     openCtxMenu(e, items);
-  }, [openCtxMenu, removeLauncherItem, t]);
+  }, [openCtxMenu, removeLauncherItem, openLauncherItem, t]);
 
   // 增强搜索结果右键菜单：打开 / 复制到剪贴板 / 打开所在目录 / 加入启动台 / 加入中转区（按 kind 取可用子集）
   // stage 结果只有 file 类型（enhTier1 已按 type==="file" 过滤），故其 items[0].path 恒有效
-  const revealPath = useCallback(async (path: string) => { const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
+  const revealPath = useCallback(async (path: string) => { hideWorkbench(); const { invoke } = await import("@tauri-apps/api/core"); await invoke("reveal_in_explorer", { path }); }, []);
   const openEnhCtxMenu = useCallback((e: React.MouseEvent, r: EnhResult) => {
     const items: CtxMenuItem[] = [{ label: r.kind === "clip" ? t("取走粘贴") : t("打开"), action: () => activateEnh(r) }];
+    // 右键菜单项此前**全部静默**：菜单一收，界面无任何变化（不像那些按钮有原地 ✓ 可看）。
+    // 故凡「不离开本界面」的动作都补 toast；「打开/打开所在目录」不补——它们会隐藏 overlay
+    // 切到外部窗口，提示既看不到也没意义。
     if (r.kind === "fs") {
-      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }) });
+      items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.path, name: r.name, ext: r.ext, isImage: IMG_EXTS.includes((r.ext || "").toLowerCase()) }] }); showToast(t("已复制到剪贴板")); } });
       items.push({ label: t("打开所在目录"), action: () => revealPath(r.path) });
-      items.push({ label: t("加入启动台"), action: () => addFsToLauncher(r) });
-      items.push({ label: t("加入中转区"), action: () => addFsToStage(r) });
+      items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher(r), "launcher", r.name) });
+      items.push({ label: t("加入中转区"), action: async () => toastAddResult(await addFsToStage(r), "stage", r.name) });
     } else if (r.kind === "app") {
-      items.push({ label: t("复制到剪贴板"), action: () => writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }) });
-      items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
-      items.push({ label: t("加入启动台"), action: () => addAppToLauncher(r.app) });
+      // UWP 没有真实文件路径（path 是 shell:AppsFolder\AUMID），复制/定位这两项对它无意义——
+      // 不是置灰而是整条不出现，菜单里留个必然失败的项比没有更糟。「加入启动台」照常可用。
+      if (!r.app.packaged) {
+        items.push({ label: t("复制到剪贴板"), action: async () => { await writeItemToClipboard({ type: "file", items: [{ path: r.app.path, name: r.app.name, ext: "", isImage: false }] }); showToast(t("已复制到剪贴板")); } });
+        items.push({ label: t("打开所在目录"), action: () => revealPath(r.app.path) });
+      }
+      items.push({ label: t("加入启动台"), action: () => toastAddResult(addAppToLauncher(r.app), "launcher", r.app.name) });
     } else if (r.kind === "stage") { // stage（恒 file 类型）
       const path = r.item.items?.[0]?.path;
-      items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(r.item) });
+      items.push({ label: t("复制到剪贴板"), action: async () => { await copyStageToClipboard(r.item); showToast(t("已复制到剪贴板")); } });
       if (path) {
         items.push({ label: t("打开所在目录"), action: () => revealPath(path) });
-        items.push({ label: t("加入启动台"), action: () => addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }) });
+        items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }), "launcher", r.name) });
       }
     } // clip：仅默认「取走粘贴」，无附加项（已在剪贴板中，复制冗余）
     openCtxMenu(e, items);
-  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, t]);
+    // ↑ 该函数体结束于下方 deps；enhRows 紧随其后定义（它要用 openEnhCtxMenu）
+  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, toastAddResult, showToast, t]);
+
+  const changeEnhQuery = useCallback((query: string) => {
+    perf.mark("input"); // 性能专项 t0：input→echo / input→paint 两段以此为起点
+    setEnhQuery(query);
+    setEnhSelIdx(0);
+  }, []);
+  const addEnhancedPreviewToLauncher = useCallback(async (preview: EnhancedSearchPreview) => {
+    const r = preview.r;
+    const result = r.kind === "app" ? addAppToLauncher(r.app)
+      : await addFsToLauncher(r.kind === "fs"
+        ? r
+        : { path: preview.path, name: r.kind === "stage" ? r.name : preview.title, ext: r.kind === "stage" ? r.item.ext : undefined, isDir: r.kind === "stage" ? !!r.item.isDir : false });
+    toastAddResult(result, "launcher", preview.title);
+  }, [addAppToLauncher, addFsToLauncher, toastAddResult]);
+  const addEnhancedFileToStage = useCallback(async (result: Extract<EnhResult, { kind: "fs" }>, title: string) => {
+    toastAddResult(await addFsToStage(result), "stage", title);
+  }, [addFsToStage, toastAddResult]);
+  const enhancedSearchActions = useMemo<EnhancedSearchActions>(() => ({
+    activate: activateEnh,
+    reveal: revealPath,
+    addPreviewToLauncher: addEnhancedPreviewToLauncher,
+    addFileToStage: addEnhancedFileToStage,
+  }), [activateEnh, revealPath, addEnhancedPreviewToLauncher, addEnhancedFileToStage]);
+
+  // ── 增强搜索结果行（续127：从 JSX 内联的 map 提出来缓存）──
+  //
+  // **依赖里绝不能出现 enhSelIdx**——那正是本次优化的全部要点：↑↓ 只改选中项时，
+  // 这份元素数组保持同一批引用，React 直接 bail out，500 行一行都不 reconcile。
+  // 选中高亮由上面那个 effect 命令式加 class（行上有 data-idx 供其定位）。
+  //
+  // 其余依赖（enhAdded / 各 handler）变化时整批重建是可以接受的：那都是用户主动操作
+  // 且低频，而 ↑↓ 是按住方向键时每秒几十次的高频路径。
+  const enhRows = useMemo(() => perf.time("row-build", () => {
+    perf.record("rows", enhResults.length);
+    return enhResults.map((r,i)=>{
+            // ⚠️ key 必须带上行号（续131c）。`enhKey` 对文件结果是 `"fs:"+path`，
+            // 只要结果里出现两条同路径（续131c 之前索引嵌套根就会造出来），
+            // 同一列表里就有重复 key → React reconciliation 错乱：旧行残留在顶部、
+            // 段表头跟着错位（表头就包在这个 Fragment 里）。索引侧已去重，这里是兜底——
+            // Everything 引擎的结果不归我们控制，不能假设它一定没有重复。
+            // 结果列表每次查询整体重建、不是 prepend 列表，故带下标不会踩续96 那个「index key 错位复用」的坑。
+            const key = enhKey(r) + "#" + i;
+            const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
+                       : r.kind==="stage" ? <FileGlyph size={22} isDir={r.item.isDir} isImage={r.item.items?.[0]?.isImage} ext={r.item.ext??r.item.items?.[0]?.ext??""}/>
+                       : r.kind==="clip" ? (r.item.type==="text"?<FileGlyph cat="doc" size={22}/>:r.item.type==="image"?<FileGlyph isImage size={22}/>:<FileGlyph size={22} {...fileGlyphFor(r.item)}/>)
+                       : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
+                                                 : <FileGlyph size={22} isDir={r.kind==="fs" && r.isDir} ext={r.kind==="fs"?r.ext:""}/>;
+            const label = r.kind==="app" ? r.app.name : r.name;
+            const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
+            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
+            const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
+            // 段表头：本行是某段首项时插在其前（续114b 起由 enhHeadAt 驱动，段的增删无需改此处）
+            const head = enhHeadAt.get(i);
+            const divider = head ? <div key={`enh-head-${i}`} className="enh-divider">{head}</div> : null;
+            return (
+              <Fragment key={key}>
+                {divider}
+                <div className="enh-result" data-idx={i}
+                  onMouseEnter={e=>onEnhRowEnter(i,e)}
+                  onMouseLeave={cancelHoverSelect}
+                  onContextMenu={e=>openEnhCtxMenu(e,r)}
+                  onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
+                  <div className="enh-result-icon">{icon}</div>
+                  <div className="enh-result-meta">
+                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
+                    {r.kind==="fs" && <span className="enh-result-dir">{dirOf(r.path)}</span>}
+                  </div>
+                  <span className="enh-result-badge">{badge}</span>
+                  {(r.kind==="fs" || r.kind==="app") && (
+                    <div className="enh-result-actions">
+                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=await addFsToStage(r);if(res==="added"){setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"stage",r.name);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?<IconCheck size={13}/>:t("中转")}</button>}
+                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={async e=>{e.stopPropagation();const res=r.kind==="app"?addAppToLauncher(r.app):await addFsToLauncher(r);const nm=r.kind==="app"?r.app.name:r.name;if(res==="added"){setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}else toastAddResult(res,"launcher",nm);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?<IconCheck size={13}/>:t("启动台")}</button>
+                    </div>
+                  )}
+                </div>
+              </Fragment>
+            );
+          });
+  }), [enhResults, enhHeadAt, enhAdded, lang, t, onEnhRowEnter, cancelHoverSelect, openEnhCtxMenu, activateEnh, addFsToStage, addFsToLauncher, addAppToLauncher, toastAddResult]);
+
+  // 选中高亮 + 滚入视野。**高亮命令式加 class，不进 React**（续127，说明见 onEnhRowEnter 附近）。
+  //
+  // ⚠️ 依赖必须是 **enhRows 本身**，不能只写 enhResults：
+  // enhRows 重建时（如点了「中转/启动台」按钮使 enhAdded 变化）React 会按 `className="enh-result"`
+  // 重渲这些行，**把命令式加上的 .selected 抹掉**；此时 enhSelIdx/enhResults 都没变，
+  // effect 若不重跑，高亮就凭空消失、直到下次按 ↑↓ 才回来。
+  // enhRows 的引用恰好在「行被重建」时才变，正是需要的那个信号。
+  useEffect(() => {
+    if (!enhOpen || !enhContentReady) return;
+    const box = enhResultsRef.current;
+    if (!box) return;
+    box.querySelector(".enh-result.selected")?.classList.remove("selected");
+    const cur = box.querySelector<HTMLElement>(`.enh-result[data-idx="${enhSelIdx}"]`);
+    cur?.classList.add("selected");
+    cur?.scrollIntoView({ block: "nearest" });
+    // 性能专项：本 effect 在提交后跑，rAF 回调即绘制后——每个 mark 实例每段只记一次（perfTrace 内去重），
+    // 方向键导航导致的重跑不会污染「输入→绘制」。
+    requestAnimationFrame(() => {
+      perf.since("input", "input→paint");
+      perf.since("results", "results→paint");
+    });
+  }, [enhSelIdx, enhOpen, enhContentReady, enhRows]);
+
+  // 性能专项：输入回显段（enhQuery 提交 + 绘制后的第一帧）。
+  useEffect(() => {
+    if (!enhOpen) return;
+    const frame = requestAnimationFrame(() => {
+      perf.since("open", "open→first-paint");
+      perf.since("input", "input→echo");
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [enhQuery, enhOpen]);
+
+  // 性能专项：层开/关各采一次 JS heap；关闭时把本轮汇总经 perf_report 落到 Rust stderr（与 [perf] 分段同流）。
+  useEffect(() => {
+    if (!perf.on) return;
+    if (enhOpen) perf.heap("open");
+    else { perf.heap("close"); perf.dump(); }
+  }, [enhOpen]);
 
   // shell:/ms-settings:/wt 等系统路径走 cmd /c start，能找到 WindowsApps 里的 wt.exe
   const openShortcut = useCallback((target:string) => {
@@ -1563,121 +2243,123 @@ export default function App() {
     } catch {}
   }, []);
 
-  const fi = extIcon; // 文件类型图标统一走模块级 extIcon（搜索结果 + 中转条目共用）
+  const changePageSearch = useCallback((value: string) => {
+    const target = resolveHeaderSearchTarget({
+      defaultMode: searchDefaultModeRef.current,
+      pageSearchForced: pageSearchForcedRef.current,
+      enhancedPinned: enhPinnedRef.current,
+    });
+    if (target === "enhanced") {
+      // 顶栏虽由两种搜索共用，但两套 query 独立；增强模式输入不能污染底层页面筛选。
+      perf.mark("input");
+      setEnhQuery(value);
+      setEnhSelIdx(0);
+      if (value && !enhOpenRef.current) {
+        setEnhOpen(true);
+        setEnhPinned(true);
+      }
+    } else {
+      setSearch(value);
+    }
+  }, []);
 
-  // ── 键盘 ──
-  useEffect(() => {
-    if (!visible) return;
-    const onKey=(e:KeyboardEvent)=>{
-      // 右键菜单是纯鼠标浮层（无键盘交互）：任何键盘/热键操作都顺带关掉它，避免切页/关页后残留悬浮。
-      // Escape 交由下方分层逻辑处理（第一次 Esc 只关菜单、不关页），故此处排除。
-      if(ctxMenuRef.current && e.key!=="Escape") setCtxMenu(null);
-      if(e.key==="Escape"){e.preventDefault();if(lassoStateRef.current.active){setLassoState(s=>({...s,active:false}));dropAreaRef.current?.classList.remove("lasso-active");lassoArmedRef.current=false;return;}if(ctxMenuRef.current){setCtxMenu(null);return;}if(enhOpenRef.current){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();return;}if(pickerOpenRef.current){setPickerOpen(false);setPickerQuery("");return;}if(stageSelRef.current.size||stageMultiselectRef.current){setStageSel(new Set<number>());setStageMultiselect(false);stageAnchorRef.current=null;return;}if(launcherSelIdx>=0){setLauncherSelIdx(-1);searchRef.current?.focus();return;}if(settingsOpen){setSettingsOpen(false);return;}setVisible(false);hideWorkbench();return;}
-      if(matchComboEvent(e, enhHotkey)){e.preventDefault();if(enhOpen){setEnhOpen(false);setEnhPinned(false);setEnhQuery("");setSearch("");if(searchDefaultModeRef.current==="enhanced")pageSearchForcedRef.current=true;searchRef.current?.focus();}else{pageSearchForcedRef.current=false;setEnhQuery(search);setEnhSelIdx(0);setEnhOpen(true);setEnhPinned(true);searchRef.current?.focus();}return;}
-      // 中和默认 Tab 焦点遍历（防焦点逃逸到模态背后的按钮 / 旧死 filteredApps 导航）。Tab 作为热键已被上面 matchComboEvent 先处理。
-      if(e.key==="Tab"){e.preventDefault();return;}
-      if(settingsOpen||pickerOpen)return; // 设置 / picker 打开时屏蔽应用导航/启动按键
-      if(enhOpen){ // 增强搜索接管导航，屏蔽下面 launcher 键（字母键不拦截，正常输入到 enhInput）
-        if(e.key==="ArrowDown"){e.preventDefault();setEnhSelIdx(i=>Math.min(i+1,enhResults.length-1));}
-        else if(e.key==="ArrowUp"){e.preventDefault();setEnhSelIdx(i=>Math.max(i-1,0));}
-        else if(e.key==="Enter"){e.preventDefault();const r=enhResults[enhSelIdx]??enhResults[0];if(r)activateEnh(r, document.querySelector<HTMLElement>(".enh-result.selected .enh-result-icon"));}
-        return;
-      }
-      // ── 启动器网格键盘导航（Start 菜单风）──
-      // 未选中(idx<0)：焦点在搜索框，仅 ↓ 进入网格；←→↑ 留给输入框做文本编辑。
-      // 已选中(idx>=0)：←→↑↓ 二维移动（列数按 DOM offsetTop 动态算），行首←/首行↑ 退回搜索框；Enter 打开。
-      const nL=filteredLauncher.length;
-      if(nL){
-        const grid=launcherDropRef.current;
-        const cols=(()=>{ if(!grid)return 1; const tiles=grid.querySelectorAll<HTMLElement>(".app-tile"); if(tiles.length<2)return tiles.length||1; const top0=tiles[0].offsetTop; let c=0; for(const el of Array.from(tiles)){ if(el.offsetTop===top0)c++; else break;} return c||1; })();
-        if(launcherSelIdx<0){
-          if(e.key==="ArrowDown"){e.preventDefault();setLauncherSelIdx(0);return;}
-        }else{
-          if(e.key==="ArrowRight"){e.preventDefault();setLauncherSelIdx(i=>Math.min(i+1,nL-1));return;}
-          if(e.key==="ArrowLeft"){e.preventDefault();if(launcherSelIdx===0){setLauncherSelIdx(-1);searchRef.current?.focus();}else setLauncherSelIdx(i=>Math.max(i-1,0));return;}
-          if(e.key==="ArrowDown"){e.preventDefault();setLauncherSelIdx(i=>Math.min(i+cols,nL-1));return;}
-          if(e.key==="ArrowUp"){e.preventDefault();if(launcherSelIdx<cols){setLauncherSelIdx(-1);searchRef.current?.focus();}else setLauncherSelIdx(i=>Math.max(i-cols,0));return;}
-          if(e.key==="Enter"){e.preventDefault();const it=filteredLauncher[launcherSelIdx];if(it)openLauncherItem(it, document.querySelector<HTMLElement>(".app-tile.selected .app-tile-icon"));return;}
-        }
-      }
-      // Enter：未进入网格且顶栏搜索非空时，启动扫描链排名第一的应用（保留旧兜底行为）
-      if(e.key==="Enter"&&search.trim()&&filteredApps.length){e.preventDefault();const a=filteredApps[0];if(a)launchApp(a.app, null);}
-    };
-    window.addEventListener("keydown",onKey);
-    return ()=>window.removeEventListener("keydown",onKey);
-  }, [visible, search, filteredApps, launchApp, settingsOpen, pickerOpen, enhOpen, enhResults, enhSelIdx, activateEnh, enhHotkey, filteredLauncher, launcherSelIdx, openLauncherItem]);
+
+  useGlobalKeyboardRouter({
+    visible,
+    search,
+    settingsOpen,
+    pickerOpen,
+    enhancedOpen: enhOpen,
+    enhancedResults: enhResults,
+    enhancedSectionStarts: enhSectionStarts,
+    enhancedSelectedIndex: enhSelIdx,
+    enhancedHotkey: enhHotkey,
+    launcherItems: filteredLauncher,
+    launcherSelectedIndex: launcherSelIdx,
+    filteredApps,
+    searchRef,
+    launcherGridRef: launcherDropRef,
+    contextMenuRef: ctxMenuRef,
+    clipDragActive: () => !!clipDragRef.current?.active,
+    lassoActive: () => lassoStateRef.current.active,
+    enhancedOpenRef: enhOpenRef,
+    stageRecoveryOpenRef,
+    launcherManagerOpenRef: launcherManageOpenRef,
+    pickerOpenRef,
+    stageSelectedRef: stageSelRef,
+    stageMultiselectRef,
+    searchDefaultModeRef,
+    pageSearchForcedRef,
+    setContextMenu: setCtxMenu,
+    setEnhancedOpen: setEnhOpen,
+    setEnhancedPinned: setEnhPinned,
+    setEnhancedQuery: setEnhQuery,
+    setEnhancedSelectedIndex: setEnhSelIdx,
+    selectEnhancedByKeyboard: selectByKeyboard,
+    activateEnhanced: activateEnh,
+    setStageRecoveryOpen,
+    closeLauncherManager,
+    closePicker: closeLauncherPicker,
+    setStageSelected: setStageSel,
+    setStageMultiselect,
+    stageAnchorRef,
+    setLauncherSelectedIndex: setLauncherSelIdx,
+    setSettingsOpen,
+    setVisible,
+    endClipDrag,
+    cancelLasso,
+    hideWorkbench,
+    openLauncherItem,
+    launchApp,
+  });
+
+  const headerSearchTarget = resolveHeaderSearchTarget({
+    defaultMode: searchDefaultMode,
+    pageSearchForced: pageSearchForcedRef.current,
+    enhancedPinned: enhPinned,
+  });
 
   return (
    <>
     <div id="overlay" className={`overlay-simple${visible ? " overlay-visible" : " overlay-hidden"}${dismissing ? " dismissing" : ""}${fileDragOver ? " file-drag-active" : ""}`} onContextMenu={e=>e.preventDefault()}>
       {/* ── 顶栏 ── */}
       <header className="top-bar">
-        <div className="top-left"><div className="logo">W</div><span className="app-title">Workbench</span></div>
-        <div className="top-center">
-          <div className="global-search">
-            <IconSearch size={16}/>
-            <input ref={searchRef} className="search-field" placeholder={t("搜索应用、中转、剪贴板…")} value={search}
-              onChange={e=>{
-                const v=e.target.value;
-                if((searchDefaultModeRef.current==="enhanced"&&!pageSearchForcedRef.current)||enhPinnedRef.current){
-                  // enhanced 模式自动打开 / 或 enh 已以 pinned 方式打开（page 模式手动呼出时）：顶栏输入同步到 enhQuery
-                  setSearch(v);setEnhQuery(v);setEnhSelIdx(0);
-                  if(v&&!enhOpenRef.current){setEnhOpen(true);setEnhPinned(true);}
-                }else{setSearch(v);}
-              }} spellCheck={false} />
-          </div>
-        </div>
+        <WorkbenchSearchHeader search={headerSearchTarget === "enhanced" ? enhQuery : search} enhanced={headerSearchTarget === "enhanced"} searchRef={searchRef} t={t} onSearchChange={changePageSearch}/>
         <div className="top-right">
-          <span className="clock">{time}</span>
+          <Clock lang={lang}/>
           <button className="settings-btn" onClick={()=>setSettingsOpen(true)} title={t("设置")} aria-label={t("设置")}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
         </div>
       </header>
       <main className="main-area">
-        <section className="app-panel">
-          <div className="stage-section-header">
-            <span className="section-label">{t("启动器")}</span>
-            <button className="stage-batch-btn" onClick={()=>{setPickerQuery("");setPickerOpen(true);}} title={t("添加应用")}>{t("添加")}</button>
-          </div>
-          <div className="app-grid" ref={launcherDropRef}>
-            {/* 启动器=手动策展的收藏托盘。条目左键打开/启动，右键移除；拖拽排序由 window-level pointer 监听驱动 */}
-            {filteredLauncher.map((it,i)=>(
-              <div key={it.id}
-                className={`app-tile${i===launcherSelIdx?" selected":""}`}
-                draggable={false}
-                onClick={e=>openLauncherItem(it, e.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
-                onContextMenu={e=>openLauncherCtxMenu(e,it)}
-                onPointerDown={e=>handleLauncherPointerDown(e, it.id)}
-                title={it.kind==="app"?t("单击启动"):t("单击打开")}>
-                <div className="app-tile-icon">
-                  {it.kind==="app" && it.icon ? <img src={it.icon} alt="" draggable={false}/>
-                   : it.kind==="folder" ? <span>📁</span>
-                   : it.kind==="file" ? <span>{fi(it.ext??"")}</span>
-                   : <span>{it.name[0]}</span>}
-                </div>
-                <div className="app-tile-label-wrap"><span className="app-tile-label">{it.name}</span></div>
-              </div>
-            ))}
-            {/* 末尾插入指示线：insertIdx === launcher.length 时显示在最后一个元素之后 */}
-            {!filteredLauncher.length && (
-              <p className="empty-hint" style={{gridColumn:"1/-1"}}>
-                {launcher.length ? t("无匹配") : t("拖入或点「添加」收藏应用")}
-              </p>
-            )}
-          </div>
-        </section>
+        <LauncherPanel
+          ref={launcherDropRef}
+          items={filteredLauncher}
+          totalCount={launcher.length}
+          search={deferredSearch}
+          selectedIndex={launcherSelIdx}
+          missingIds={missingLauncherIds}
+          thumbnails={stageThumbs}
+          t={t}
+          onOpenManager={openLauncherManager}
+          onOpenPicker={openLauncherPicker}
+          onOpenItem={openLauncherItem}
+          onOpenContextMenu={openLauncherCtxMenu}
+          onPointerDown={handleLauncherPointerDown}
+          highlights={launcherPageSearch.highlights}
+        />
         <section className="center-panel">
           <div className="stage-section-header">
             <span className="section-label">{t("文件中转区")}</span>
             {stageMultiselect ? (
               <div className="stage-multi-toolbar">
                 {stageSel.size > 0 && <span className="stage-sel-count">{t("已选 {n}", {n: stageSel.size})}</span>}
-                <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
-                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
+                <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
                   onClick={()=>{const sel=stage.filter(x=>stageSel.has(x.id));copyAndPaste({type:"file",items:sel.flatMap(x=>x.items??[])});setStageSel(new Set());setStageMultiselect(false);}}>{t("取走")}</button>
-                <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")}
-                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file")?t("复制到剪贴板"):t("仅文件可批量复制")}
+                <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
+                  title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("复制到剪贴板"):t("仅文件可批量复制")}
                   onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>{t("复制")}</button>
                 <button className="stage-batch-btn" disabled={stageSel.size===0}
                   onClick={()=>{saveStage(stage.filter(x=>!stageSel.has(x.id)));setStageSel(new Set());}}>{t("删除")}</button>
@@ -1685,8 +2367,11 @@ export default function App() {
                   onClick={()=>{setStageSel(new Set());setStageMultiselect(false);stageAnchorRef.current=null;}}>{t("完成")}</button>
               </div>
             ) : (
-              <button className="stage-batch-btn" disabled={!stage.length}
-                onClick={()=>setStageMultiselect(true)} title={t("进入多选模式")}>{t("多选")}</button>
+              <div className="stage-multi-toolbar">
+                {missingStageItems.length > 0 && <button className="stage-batch-btn stage-missing-action" onClick={openStageRecovery} title={t("处理失效条目")}>{t("失效 {n} 项", { n: missingStageItems.length })}</button>}
+                <button className="stage-batch-btn" disabled={!stage.length}
+                  onClick={()=>setStageMultiselect(true)} title={t("进入多选模式")}>{t("多选")}</button>
+              </div>
             )}
           </div>
           <div className="drop-area" ref={dropAreaRef}
@@ -1703,477 +2388,239 @@ export default function App() {
               }}/>;
             })()}
             {filteredStage.length ? (stageLayout==="grid"
-              ? <div className={`stage-grid${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
-                  const rawExt = (s.ext||s.items?.[0]?.ext||"").replace(/^\./,"");
-                  const isAnyDir = !!s.isDir;
-                  const isMissing = missingIds.has(s.id); // 续100：原文件失踪，灰化 + ⚠️
-                  const cardName = s.type==="image" ? t("图片")
-                    : s.type==="text" ? (s.content?.slice(0,12)||t("文本"))
-                    : (s.count!==1 ? t("{n} 个文件", {n: s.count ?? 0}) : (s.name||s.items?.[0]?.name||t("文件")));
-                  const cardMeta = s.type==="image" ? t("图片")
-                    : s.type==="text" ? t("文本")
-                    : (isAnyDir ? t("文件夹") : (rawExt ? `.${rawExt}` : t("文件")));
-                  // 右上点点（续99）：全局持久化开启时整体隐藏（冗余）；否则点击切换「固定」——已固定显 📌 常驻，未固定显类型色点。
-                  // stopPropagation 双拦：pointerdown 不触发拖动、click 不触发取走。
-                  const dotEl = stagePersist ? null : (
-                    <button type="button" className={`stage-card-dot${s.pinned?" pinned":` type-${s.type}`}`}
-                      onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();toggleStagePin(s.id);}}
-                      title={s.pinned?t("已固定：取走 / 拖出后保留（点击取消）"):t("点击固定：取走 / 拖出后仍保留在中转区")}>
-                      {s.pinned ? <span className="dot-pin"><IconPin/></span> : <span className="dot-type"/>}
-                    </button>
-                  );
-                  return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-card${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴），拖出可拖到其他应用"):t("单击取走（粘贴到上个窗口），拖出可拖到其他应用")))}>
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}>⚠️</span>}
-                    {/* ── 缩略图区（thumb 固定 110×90，内容直接置于其中）── */}
-                    {s.type==="image" && (
-                      <div className="stage-card-thumb">
-                        {dotEl}
-                        {s.content
-                          ? <img className="cover" draggable={false} src={s.content.startsWith("data:")?s.content:`data:image/png;base64,${s.content}`} alt=""/>
-                          : <span style={{fontSize:32}}>🖼️</span>}
-                      </div>
-                    )}
-                    {s.type==="text" && (
-                      <div className="stage-card-thumb">
-                        {dotEl}
-                        <div className="stage-card-text-preview">{s.content||""}</div>
-                      </div>
-                    )}
-                    {s.type==="file" && (
-                      <div className="stage-card-thumb">
-                        {dotEl}
-                        <div className="stage-card-icon-wrap">
-                          {s.items?.[0]?.icon
-                            ? <img src={s.items[0].icon} alt="" draggable={false} style={{width:34,height:34,objectFit:"contain"}}/>
-                            : isAnyDir
-                              ? <svg width="32" height="32" viewBox="0 0 24 24" fill="#EF9F27" xmlns="http://www.w3.org/2000/svg"><path d="M2 7.5C2 6.395 2.895 5.5 4 5.5h4.172l1.414 1.414.586.586H20c1.105 0 2 .895 2 2V17c0 1.105-.895 2-2 2H4c-1.105 0-2-.895-2-2V7.5z"/></svg>
-                              : <span style={{fontSize:28}}>{s.items?.[0]?.isImage?"🖼️":fi(s.ext??s.items?.[0]?.ext??"")}</span>}
-                        </div>
-                        {/* 续99b：图片文件显示 Rust 生成的小缩略图（避免原图全分辨率常驻内存）；未就绪/失败则无此层，露出下方 emoji 兜底 */}
-                        {s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path] && (
-                          <img className="cover" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/>
-                        )}
-                      </div>
-                    )}
-                    {/* ── 标签区 ── */}
-                    <div className="stage-card-label">
-                      <span className="stage-card-name">{cardName}</span>
-                      <span className="stage-card-meta">{cardMeta}</span>
-                    </div>
-                    {/* ── 悬浮操作栏：左键本体已=取走粘贴，故悬浮栏统一留「复制到剪贴板 + 删除」两键（所有类型一致）── */}
-                    <div className="stage-card-actions">
-                      {!isMissing && <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?t("已复制"):t("复制到剪贴板")}>
-                        {copiedStageId===s.id ? <IconCheck/> : <IconCopy/>}
-                      </button>}{/* 续100：失踪项复制死文件无意义，仅留删除 */}
-                      <button className="stage-card-act-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("删除")}><IconTrash/></button>
-                    </div>
-                  </div>
-                );})}</div>
-              : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>{
-                  const label = s.type==="text"?(s.content?.slice(0,60)||t("文本")):s.type==="image"?t("图片"):(s.count!==1?t("{n} 个文件", {n: s.count ?? 0}):(s.name||s.items?.[0]?.name||t("文件")));
-                  const isMissing = missingIds.has(s.id); // 续100
-                  return (
-                  <div key={s.id} data-stage-id={s.id} className={`stage-item${stageSel.has(s.id)?" selected":""}${isMissing?" stage-missing":""}`} draggable={false} onDragStart={e=>e.preventDefault()} onClick={e=>handleStageClick(e,s,idx)} onContextMenu={e=>openStageCtxMenu(e,s)} onPointerDown={handleStagePointerDown} onPointerMove={handleStagePointerMove} onPointerUp={handleStagePointerUp} onPointerCancel={handleStagePointerUp} onLostPointerCapture={handleStageLostPointerCapture} title={isMissing?t("原文件已失踪（可能被删除或移动）"):(stageMultiselect?t("单击选中 / 取消"):(s.type==="file"?t("单击取走（写回剪贴板并粘贴）"):t("单击取走（粘贴到上个窗口）")))}>
-                    {s.type==="image"
-                      ?<img className="stage-thumb" draggable={false} src={s.content} alt=""/>
-                      :s.type==="file" && s.items?.[0]?.isImage && s.items?.[0]?.path && stageThumbs[s.items[0].path]
-                        ?<img className="stage-thumb" draggable={false} src={stageThumbs[s.items[0].path]} alt=""/> /* 续99e：列表视图图片文件缩略图，与方格视图一致（复用同一 stageThumbs 缓存）*/
-                        :s.type==="file" && s.items?.[0]?.icon
-                          ?<img className="stage-thumb" draggable={false} src={s.items[0].icon} alt=""/>
-                          :<span className="stage-emoji">{s.type==="text"?"📝":(s.items?.[0]?.isImage?"🖼️":(s.isDir?"📁":fi(s.ext??s.items?.[0]?.ext??"")))}</span>}
-                    {isMissing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}>⚠️</span>}
-                    <span className="stage-title">{label}</span>
-                    {s.type==="file"&&s.count===1&&s.size?<span className="stage-meta">{fmtSize(s.size)}</span>:null}
-                    {/* 续99e：列表视图「固定」开关，与方格视图 dot 同语义——未固定 hover 才现、已固定常驻 accent；全局持久化开启时隐藏 */}
-                    {!stagePersist && (
-                      <button className={`stage-pin-btn${s.pinned?" pinned":""}`} onPointerDown={e=>e.stopPropagation()} onClick={e=>{e.stopPropagation();toggleStagePin(s.id);}} title={s.pinned?t("已固定：取走 / 拖出后保留（点击取消）"):t("点击固定：取走 / 拖出后仍保留在中转区")}><IconPin/></button>
-                    )}
-                    <div className="stage-actions">
-                      {!isMissing && <button className={`clip-copy-btn${copiedStageId===s.id?" copied":""}`} onClick={e=>{e.stopPropagation();copyStageToClipboard(s);}} title={copiedStageId===s.id?t("已复制"):t("复制到剪贴板")}>
-                        {copiedStageId===s.id ? <IconCheck/> : <IconCopy/>}
-                      </button>}{/* 续100：失踪项复制/打开死文件无意义，仅留删除 */}
-                      {!isMissing && s.type==="file"&&<button className="stage-open-btn" onClick={e=>{e.stopPropagation();openStageFile(s);}} title={t("打开")}><IconOpen/></button>}
-                      <button className="clip-del-btn" onClick={e=>{e.stopPropagation();removeStage(s.id);}} title={t("移除")}><IconTrash/></button>
-                    </div>
-                  </div>);
-                })}</div>
-            ) : <p className="empty-hint">{search.trim()?t("无匹配"):t("拖入文件 / 文件夹，或在剪贴板卡片点 📌 钉入")}</p>}
+              ? <div className={`stage-grid${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>(
+                  <StageGridCard
+                    key={s.id}
+                    item={s}
+                    index={idx}
+                    selected={stageSel.has(s.id)}
+                    missing={missingIds.has(s.id)}
+                    multiselect={stageMultiselect}
+                    persistAll={stagePersist}
+                    copied={copiedStageId===s.id}
+                    imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
+                    fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
+                    t={t}
+                    actions={stageItemActions}
+                    pointer={stageItemPointer}
+                    highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
+                    pageSearchActive={!!deferredSearch.trim()}
+                  />
+                ))}</div>
+              : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>(
+                  <StageListRow
+                    key={s.id}
+                    item={s}
+                    index={idx}
+                    selected={stageSel.has(s.id)}
+                    missing={missingIds.has(s.id)}
+                    multiselect={stageMultiselect}
+                    persistAll={stagePersist}
+                    copied={copiedStageId===s.id}
+                    imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
+                    fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
+                    t={t}
+                    actions={stageItemActions}
+                    pointer={stageItemPointer}
+                    highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
+                    pageSearchActive={!!deferredSearch.trim()}
+                  />
+                ))}</div>
+            ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
+              <div className="stage-empty-guide" aria-label={t("将文件拖到这里")}>
+                <span className="stage-empty-guide-icon"><IconDrop size={26}/></span>
+                <span className="stage-empty-guide-title">{t("将文件拖到这里")}</span>
+                <span className="stage-empty-guide-subtitle">{t("也可从剪贴板固定到中转区")}</span>
+              </div>
+            )}
           </div>
           {/* 快捷入口：可在设置→中转站关闭；关闭后本行不渲染，上方 .drop-area(flex:1) 自动铺满归还的空间 */}
           {showShortcuts && (<>
           <div className="section-label" style={{marginTop:16}}>{t("快捷入口")}</div>
           <div className="shortcut-row">
-            <button className="shortcut-chip" onClick={handleScreenshot}><span>📸</span><span>{t("截屏")}</span></button>
+            <button className="shortcut-chip" onClick={handleScreenshot}><span><IconCamera/></span><span>{t("截屏")}</span></button>
             {SHORTCUTS.map(s=>(
-              <button key={s.l} className="shortcut-chip" onClick={()=>openShortcut(s.a)}><span>{s.e}</span><span>{t(s.l)}</span></button>
+              <button key={s.l} className="shortcut-chip" onClick={()=>openShortcut(s.a)}><span><s.Icon/></span><span>{t(s.l)}</span></button>
             ))}
           </div>
           </>)}
         </section>
-        <section className="clip-panel">
-          <div className="section-label">{t("剪贴板历史")}</div>
-          <div className="clip-list">
-            {filteredClip.length? filteredClip.map((c)=>(
-              <div key={c.time} className="clip-block"
-                onClick={()=>{ if(suppressClickRef.current){suppressClickRef.current=false;return;} copyAndPaste(c); }}
-                onPointerDown={e=>handleClipPointerDown(e,c)} onPointerMove={handleClipPointerMove} onPointerUp={handleClipPointerUp} onPointerCancel={handleClipPointerUp}
-                onContextMenu={e=>openClipCtxMenu(e,c)} title={c.type==="text"?t("单击左键粘贴"):c.type==="file"?t("单击左键粘贴文件"):t("单击左键复制")}>
-                <div className="clip-actions">
-                  <button className="clip-pin-btn" onClick={e=>{e.stopPropagation();addToStage(c);}} title={t("钉到中转区")}><IconPin/></button>
-                  <button className={`clip-copy-btn${copiedTime===c.time?" copied":""}`} onClick={e=>{e.stopPropagation();copyToClipboard(c);}} title={copiedTime===c.time?t("已复制"):t("复制到剪贴板")}>
-                    {copiedTime===c.time ? <IconCheck/> : <IconCopy/>}
-                  </button>
-                  <button className="clip-del-btn" onClick={e=>{e.stopPropagation();deleteClipItem(c.time);}} title={t("删除")}><IconTrash/></button>
-                </div>
-                {c.type==="image"? <img className="clip-image" src={c.content} alt="" draggable={false}/>
-                : c.type==="file"? <div className="file-clip-preview">
-                    <span className="clip-file-icon">{getFileIcon(c)}</span>
-                    <span className="file-clip-info">{c.count===1? c.items?.[0]?.name : t("{n}个文件", {n: c.count ?? 0})}</span>
-                  </div>
-                : <span className="clip-preview">{c.content?.slice(0,100)}{(c.content?.length??0)>100?"…":""}</span>}
-                <span className="clip-time">{c.type==="image"?"📷 ":c.type==="file"?"📎 ":""}{ago(c.time, t)}</span>
-              </div>
-            )): <p className="empty-hint">{search.trim()?t("无匹配"):t("显示时自动读取")}</p>}
-          </div>
-        </section>
+        <ClipboardPanel
+          items={filteredClip}
+          search={deferredSearch}
+          category={clipboardCategory}
+          thumbnails={clipThumbs}
+          copiedTime={copiedTime}
+          t={t}
+          actions={clipboardPanelActions}
+          drag={clipboardPanelDrag}
+          highlights={clipboardPageSearch.highlights}
+          onCategoryChange={setClipboardCategory}
+        />
       </main>
-      {/* ── 增强搜索层（始终挂载，靠 class 切换显隐，沿用 overlay-visible/hidden 模式避免卸载闪烁）── */}
-      <div className={`enh-layer${enhOpen?" enh-open":""}${enhPinned?" enh-pinned":""}`}>
-        <div className="enh-search-box">
-          <IconSearch size={18}/>
-          <input ref={enhInputRef} className="enh-search-input" placeholder={t("搜索应用、中转、剪贴板…")}
-            value={enhQuery} onChange={e=>{setEnhQuery(e.target.value);setEnhSelIdx(0);}} spellCheck={false}/>
-          <span className="enh-hint">{searchDefaultMode==="enhanced"&&<><kbd>{comboLabel(enhHotkey)}</kbd> {t("界面搜索")} · </>}<kbd>Esc</kbd> {t("关闭")}</span>
-        </div>
-        {/* 索引未就绪提示：不阻塞 Tier 1（应用/中转）结果显示 */}
-        {enhQuery.trim() && searchEngine==="everything" && !everythingAvailable ? <div className="enh-index-hint">{t("Everything 未运行，已回退内置搜索")}</div> : (!indexReady && enhQuery.trim() ? <div className="enh-index-hint">{t("文件索引建立中…")}</div> : null)}
-        <div className="enh-results">
-          {enhResults.length ? enhResults.map((r,i)=>{
-            const key = r.kind==="app" ? "app:"+r.app.path : r.kind==="stage" ? "stage:"+r.item.id : r.kind==="clip" ? "clip:"+r.item.time : "fs:"+r.path;
-            const icon = r.kind==="app" ? (r.app.icon? <img src={r.app.icon} alt=""/> : <span>{r.app.name[0]}</span>)
-                       : r.kind==="stage" ? <span>{fi(r.item.ext??r.item.items?.[0]?.ext??"")}</span>
-                       : r.kind==="clip" ? <span>{r.item.type==="text"?"📝":r.item.type==="image"?"🖼️":fi(r.item.items?.[0]?.ext??"")}</span>
-                       : r.kind==="fs" && r.icon ? <img src={r.icon} alt=""/>
-                                                 : <span>{r.kind==="fs" && r.isDir?"📁":fi(r.kind==="fs"?r.ext:"")}</span>;
-            const label = r.kind==="app" ? r.app.name : r.name;
-            const ranges = r.kind==="fs" ? [] : r.ranges; // 文件结果无高亮区间（Rust 侧子串匹配，未回传位置）
-            const badge = r.kind==="app" ? (lang==="en"?"App":"应用") : r.kind==="stage" ? t("中转") : r.kind==="clip" ? t("剪贴板") : (r.isDir?t("文件夹"):t("文件"));
-            const rPath = r.kind==="app" ? r.app.path : r.kind==="fs" ? r.path : ""; // 操作按钮反馈用统一路径键
-            // Tier1/Tier2 之间插分隔线（i 到达 enhTier1.length 且 Tier1 非空时，此项为首个文件结果）
-            const divider = (i===enhTier1.length && enhTier1.length>0) ? <div key="enh-div" className="enh-divider">{t("文件 / 文件夹")}</div> : null;
-            return (
-              <Fragment key={key}>
-                {divider}
-                <div className={`enh-result${i===enhSelIdx?" selected":""}`}
-                  onMouseEnter={()=>setEnhSelIdx(i)}
-                  onContextMenu={e=>openEnhCtxMenu(e,r)}
-                  onClick={e=>activateEnh(r, e.currentTarget.querySelector<HTMLElement>(".enh-result-icon"))}>
-                  <div className="enh-result-icon">{icon}</div>
-                  <div className="enh-result-meta">
-                    <span className="enh-result-label"><HighlightText text={label} ranges={ranges}/></span>
-                    {r.kind==="fs" && <span className="enh-result-dir">{dirOf(r.path)}</span>}
-                  </div>
-                  <span className="enh-result-badge">{badge}</span>
-                  {(r.kind==="fs" || r.kind==="app") && (
-                    <div className="enh-result-actions">
-                      {r.kind==="fs" && <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="stage"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();addFsToStage(r);setEnhAdded({path:rPath,target:"stage"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入中转区")}>{enhAdded?.path===rPath&&enhAdded?.target==="stage"?"✓":t("中转")}</button>}
-                      <button className={`enh-action-btn${enhAdded?.path===rPath&&enhAdded?.target==="launcher"?" enh-action-added":""}`} onClick={e=>{e.stopPropagation();r.kind==="app"?addAppToLauncher(r.app):addFsToLauncher(r);setEnhAdded({path:rPath,target:"launcher"});setTimeout(()=>setEnhAdded(null),1000);}} title={t("加入启动台")}>{enhAdded?.path===rPath&&enhAdded?.target==="launcher"?"✓":t("启动台")}</button>
-                    </div>
-                  )}
-                </div>
-              </Fragment>
-            );
-          }) : <p className="empty-hint">{enhQuery.trim()?t("无匹配"):t("输入以搜索")}</p>}
-        </div>
-      </div>
+      {/* ── 增强搜索层：轻量 shell 常驻以保留呼出动画；结果 DOM / preview 仅在打开时挂载 ── */}
+      <EnhancedSearchLayer
+        open={enhOpen}
+        pinned={enhPinned}
+        query={enhQuery}
+        inputRef={enhInputRef}
+        resultsRef={enhResultsRef}
+        rows={enhOpen && enhContentReady ? enhRows : null}
+        resultCount={enhOpen && enhContentReady ? enhResults.length : 0}
+        sectionCount={enhOpen && enhContentReady ? enhSections.length : 0}
+        searchDefaultMode={searchDefaultMode}
+        enhancedHotkeyLabel={comboLabel(enhHotkey)}
+        searchEngine={searchEngine}
+        everythingAvailable={everythingAvailable}
+        indexReady={indexReady}
+        preview={enhOpen && enhContentReady ? enhPreview : null}
+        t={t}
+        actions={enhancedSearchActions}
+        onQueryChange={changeEnhQuery}
+        onResultsMouseMove={trackEnhResultsPointer}
+      />
       {/* ── 启动器「添加应用」picker（复用 settings-modal 样式 + enh-result 列表项）── */}
       {pickerOpen && (
-        <div className="settings-mask" onClick={()=>{setPickerOpen(false);setPickerQuery("");}}>
-          <div className="settings-modal picker-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("添加应用")}</span>
-              <button className="settings-close" onClick={()=>{setPickerOpen(false);setPickerQuery("");}} title={t("关闭")} aria-label={t("关闭")}>×</button>
-            </div>
-            <div className="picker-search">
-              <IconSearch size={16}/>
-              <input ref={pickerInputRef} className="picker-search-input" autoFocus placeholder={t("搜索要添加的应用…")} value={pickerQuery} onChange={e=>setPickerQuery(e.target.value)} spellCheck={false}/>
-            </div>
-            <div className="picker-list">
-              {pickerResults.length ? pickerResults.map(({app,ranges})=>(
-                <div key={app.path} className="enh-result" onClick={()=>addAppToLauncher(app)} title={t("点击添加到启动器")}>
-                  <div className="enh-result-icon">{app.icon? <img src={app.icon} alt=""/> : <span>{app.name[0]}</span>}</div>
-                  <span className="enh-result-label"><HighlightText text={app.name} ranges={ranges}/></span>
-                </div>
-              )) : <p className="empty-hint">{pickerQuery.trim()?t("无匹配应用"):t("暂无可添加应用")}</p>}
-            </div>
-            <div className="picker-foot">{t("点击添加，可连续添加；")}<kbd>Esc</kbd> {t("关闭")}</div>
-          </div>
-        </div>
+        <LauncherPickerDialog
+          query={pickerQuery}
+          inputRef={pickerInputRef}
+          results={pickerResults}
+          launcherPicking={launcherPicking}
+          t={t}
+          onClose={closeLauncherPicker}
+          onQueryChange={setPickerQuery}
+          onPickPath={pickLauncherPath}
+          onAddApp={addAppToLauncher}
+        />
+      )}
+      {/* 失效项不再随扫描静默消失：集中列出并让用户决定重新定位或删除整个条目。 */}
+      {stageRecoveryOpen && (
+        <StageRecoveryDialog
+          items={missingStageItems}
+          missingPaths={missingPaths}
+          t={t}
+          onClose={() => setStageRecoveryOpen(false)}
+          onRelink={relinkStageItem}
+          onCopyPath={copyMissingStagePath}
+          onRemove={removeStage}
+        />
+      )}
+      {/* 启动台批量管理：选择态只存在于此，不干扰主启动台的打开和拖拽排序。 */}
+      {launcherManageOpen && (
+        <LauncherManagerDialog
+          items={launcher}
+          selected={launcherManageSelected}
+          preview={launcherImportPreview}
+          busy={launcherLayoutBusy}
+          t={t}
+          onClose={closeLauncherManager}
+          onBackFromPreview={clearLauncherImportPreview}
+          onConfirmImport={confirmLauncherLayoutImport}
+          onToggleAll={toggleLauncherManageAll}
+          onToggleItem={toggleLauncherManageItem}
+          onDeleteSelected={deleteSelectedLauncherItems}
+          onChooseImport={chooseLauncherLayoutImport}
+          onExport={exportLauncherLayout}
+        />
       )}
       {settingsOpen && (
-        <div className="settings-mask" onClick={()=>setSettingsOpen(false)}>
-          <div className="settings-modal" onClick={e=>e.stopPropagation()}>
-            <div className="settings-head">
-              <span className="settings-title">{t("设置")}</span>
-              <button className="settings-close" onClick={()=>setSettingsOpen(false)} title={t("关闭")} aria-label={t("关闭")}>×</button>
-            </div>
-            <div className="settings-layout">
-              <nav className="settings-nav">
-                {SETTINGS_TABS.map(tab=>(
-                  <button key={tab.id} className={`settings-nav-item${settingsTab===tab.id?" settings-nav-active":""}`} onClick={()=>setSettingsTab(tab.id)}>
-                    <span className="settings-nav-icon">{tab.icon}</span>{t(tab.label)}
-                  </button>
-                ))}
-              </nav>
-              <div className="settings-panel">
-                {settingsTab==="general" && (<>
-                  <div className="settings-panel-title">{t("常规")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("背景主题")}</span>
-                    <div className="seg">
-                      {([["dark","深色"],["light","浅色"],["system","系统"]] as const).map(([v,l])=>(
-                        <button key={v} className={`seg-btn${theme===v?" seg-active":""}`} onClick={()=>changeTheme(v)}>{t(l)}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("语言")}</span>
-                    <div className="seg">
-                      {([["zh","中文"],["en","English"]] as const).map(([v,l])=>(
-                        <button key={v} className={`seg-btn${lang===v?" seg-active":""}`} onClick={()=>changeLang(v)}>{t(l)}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("开机自启")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!autostartEnabled?" seg-active":""}`} onClick={()=>changeAutostart(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("这里仅保留全局外观与启动行为；启动台、中转站、剪贴板和搜索分别在独立条目中设置。")}</p>
-                </>)}
-                {settingsTab==="launcher" && (<>
-                  <div className="settings-panel-title">{t("启动台")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("收藏条目")}<span className="settings-row-sub">{launcher.length} / {LAUNCHER_MAX}</span></span>
-                    <div className="settings-inline-actions">
-                      <button className="settings-action" onClick={()=>{setPickerQuery("");setPickerOpen(true);}}>{t("添加应用")}</button>
-                      <button className="settings-action danger" onClick={clearLauncher} disabled={!launcher.length}>{t("清空")}</button>
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("排序方式")}<span className="settings-row-sub">{t("拖拽调整")}</span></span>
-                    <span className="settings-row-value">{t("手动排序")}</span>
-                  </div>
-                  <p className="settings-hint">{t("启动台只负责打开应用、文件或文件夹；与中转站的取走粘贴动作保持分离。")}</p>
-                </>)}
-                {settingsTab==="stage" && (<>
-                  <div className="settings-panel-title">{t("中转站")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("显示布局")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${stageLayout==="list"?" seg-active":""}`} onClick={()=>changeStageLayout("list")}>{t("列表")}</button>
-                      <button className={`seg-btn${stageLayout==="grid"?" seg-active":""}`} onClick={()=>changeStageLayout("grid")}>{t("方格")}</button>
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("中转条目")}<span className="settings-row-sub">{stage.length} / {stageMax}</span></span>
-                    <button className="settings-action danger" onClick={clearStage} disabled={!stage.length}>{t("清空")}</button>
-                  </div>
-                  {missingIds.size>0 && (
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("失踪条目")}<span className="settings-row-sub">{t("{n} 条", {n: missingIds.size})}</span></span>
-                      <button className="settings-action danger" onClick={cleanupMissingStage}>{t("清理失踪")}</button>
-                    </div>
-                  )}
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("上限条数")}</span>
-                    <div className="seg">
-                      {STAGE_MAX_OPTIONS.map(n=>(
-                        <button key={n} className={`seg-btn${stageMax===n?" seg-active":""}`} onClick={()=>changeStageMax(n)}>{n}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("拖出后自动关闭")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${dragoutAutoClose?" seg-active":""}`} onClick={()=>changeDragoutAutoClose(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!dragoutAutoClose?" seg-active":""}`} onClick={()=>changeDragoutAutoClose(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("持久化")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${stagePersist?" seg-active":""}`} onClick={()=>changeStagePersist(true)}>{lang==="en"?"On":"开启"}</button>
-                      <button className={`seg-btn${!stagePersist?" seg-active":""}`} onClick={()=>changeStagePersist(false)}>{lang==="en"?"Off":"关闭"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("「关闭」（默认）：条目确认成功移出/拖出后自动从中转区移除。「开启」：条目移出/拖出后仍保留在中转区，除非手动删除。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("底部快捷入口")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${showShortcuts?" seg-active":""}`} onClick={()=>changeShowShortcuts(true)}>{lang==="en"?"Show":"显示"}</button>
-                      <button className={`seg-btn${!showShortcuts?" seg-active":""}`} onClick={()=>changeShowShortcuts(false)}>{lang==="en"?"Hide":"隐藏"}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转区下方的截屏 / 文件管理器 / 下载等快捷按钮。隐藏后这块空间归还给中转区，可容纳更多条目。")}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("缩略图缓存")}</span>
-                    <div style={{display:"flex",gap:4}}>
-                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_stage_thumb_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${thumbCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_stage_thumb_cache");setThumbCacheCleared(true);setTimeout(()=>setThumbCacheCleared(false),1500);}catch{}}}>{thumbCacheCleared?t("✓ 已清空"):t("清空缓存")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("中转区图片文件的缩略图缓存，命中后重启秒开。清空后下次显示会按需重新生成，不影响原文件。")}</p>
-                </>)}
-                {settingsTab==="clipboard" && (<>
-                  <div className="settings-panel-title">{t("剪贴板")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("历史保存条数")}</span>
-                    <div className="seg">
-                      {([10, 20, 50, 100] as const).map(n=>(
-                        <button key={n} className={`seg-btn${clipCacheMax===n?" seg-active":""}`} onClick={()=>changeClipCacheMax(n)}>{n}</button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("剪贴板历史")}<span className="settings-row-sub">{t("{n} 条", {n: clipboard.length})}</span></span>
-                    <button className="settings-action danger" onClick={clearClipboard} disabled={!clipboard.length}>{t("清空")}</button>
-                  </div>
-                  <p className="settings-hint">{t("复制的文本、图片、文件会自动记录，最多保留 {n} 条。", {n: clipCacheMax})}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("图片原图缓存")}</span>
-                    <div style={{display:"flex",gap:4}}>
-                      <button className="settings-action" onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("open_clip_image_dir");}catch{}}}>{t("打开文件夹")}</button>
-                      <button className={`settings-action danger${imgCacheCleared?" copied":""}`} onClick={async()=>{try{const{invoke}=await import("@tauri-apps/api/core");await invoke("clear_clip_image_cache");setImgCacheCleared(true);setTimeout(()=>setImgCacheCleared(false),1500);}catch{}}}>{ imgCacheCleared?t("✓ 已清空"):t("清空缓存")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{t("历史图片原图存放于此，清空后历史图粘贴退回缩略图质量。")}</p>
-                </>)}
-                {settingsTab==="search" && (<>
-                  <div className="settings-panel-title">{t("搜索")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("呼出默认搜索")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${searchDefaultMode==="page"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("page")}>{t("界面搜索")}</button>
-                      <button className={`seg-btn${searchDefaultMode==="enhanced"?" seg-active":""}`} onClick={()=>changeSearchDefaultMode("enhanced")}>{t("增强搜索")}</button>
-                    </div>
-                  </div>
-                  <p className="settings-hint">{searchDefaultMode==="enhanced"?t("呼出后顶栏输入直接进入增强搜索；{combo}切换为界面搜索。",{combo:comboLabel(enhHotkey)}):t("呼出后顶栏搜索过滤界面内容；{combo}进入增强搜索（共用顶栏）。",{combo:comboLabel(enhHotkey)})}</p>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("搜索引擎")}</span>
-                    <div className="seg">
-                      <button className={`seg-btn${searchEngine==="builtin"?" seg-active":""}`} onClick={()=>changeSearchEngine("builtin")}>{t("内置")}</button>
-                      <button className={`seg-btn${searchEngine==="everything"?" seg-active":""}`} onClick={()=>changeSearchEngine("everything")}>Everything</button>
-                    </div>
-                  </div>
-                  {searchEngine==="everything" && (
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("连接状态")}<span className="settings-row-sub">{everythingAvailable?t("已连接"):t("未连接")}</span></span>
-                      <button className={`settings-action${evtRedetected?" copied":""}`} onClick={redetectEverything}>{evtRedetected?t("✓ 已检测"):t("重新检测")}</button>
-                    </div>
-                  )}
-                  {searchEngine==="everything" && !everythingAvailable && <p className="settings-hint settings-hint-error">{t("未检测到 Everything（需安装 Everything 并保持其后台运行，DLL 已随应用内置）。查询将自动回退到内置引擎。换 DLL / 启动 Everything 后点「重新检测」即可热更新，无需重启。")}</p>}
-                  {searchEngine==="everything" && everythingAvailable && <p className="settings-hint">{t("已连接 Everything，查询覆盖全盘、即时。")}</p>}
-                  <p className="settings-hint">{t("内置引擎扫描整个用户目录（含下方额外目录），无需任何外部依赖；Everything 覆盖全盘但需另装。")}</p>
-                  {searchEngine==="builtin" && (<>
-                    <div className="settings-row">
-                      <span className="settings-row-label">{t("额外扫描目录")}</span>
-                      <div style={{display:"flex",gap:6}}>
-                        <input
-                          className="hotkey-input"
-                          value={searchDirInput}
-                          onChange={e=>setSearchDirInput(e.target.value)}
-                          onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addSearchDir();}}}
-                          placeholder={t("如 D:\\Work")}
-                          spellCheck={false}
-                        />
-                        <button className="settings-action" onClick={addSearchDir}>{t("添加")}</button>
-                      </div>
-                    </div>
-                    {searchDirs.length>0 ? <div className="search-dir-list">{searchDirs.map(d=>(
-                      <div key={d} className="search-dir-item"><span className="search-dir-path" title={d}>{d}</span><button className="search-dir-remove" onClick={()=>removeSearchDir(d)} title={t("移除")}>✕</button></div>
-                    ))}</div> : <p className="settings-hint">{t("默认仅扫描用户目录（桌面/下载/文档…）。如需搜其他盘符，在此添加根目录。")}</p>}
-                    <p className="settings-hint">{t("添加目录后约几秒完成后台重建即可搜到；node_modules / .git 等噪音目录自动跳过。")}</p>
-                  </>)}
-                </>)}
-                {settingsTab==="hotkeys" && (<>
-                  <div className="settings-panel-title">{t("快捷键")}</div>
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("呼出 / 隐藏")}</span>
-                    <div style={{display:"flex",gap:6}}>
-                      <input
-                        className="hotkey-input"
-                        value={hotkeyInput}
-                        onChange={e=>setHotkeyInput(e.target.value)}
-                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeHotkey(hotkeyInput);}}}
-                        placeholder={t("如 ctrl+shift+f")}
-                        spellCheck={false}
-                        readOnly={recording==="main"}
-                      />
-                      <button className={"settings-action"+(recording==="main"?" recording":"")} onClick={()=>{setHotkeyError("");setRecording(r=>r==="main"?null:"main");}}>{recording==="main"?t("按下快捷键…"):t("录制")}</button>
-                      <button className="settings-action" onClick={()=>changeHotkey(hotkeyInput)}>{t("应用")}</button>
-                    </div>
-                  </div>
-                  {hotkeyError && <p className="settings-hint settings-hint-error">{t(hotkeyError)}</p>}
-                  {hotkeyCombo!=="ctrl+space" && <button className="settings-action" onClick={()=>changeHotkey("ctrl+space")}>{t("恢复默认")}</button>}
-                  <div className="settings-row">
-                    <span className="settings-row-label">{t("增强搜索")}</span>
-                    <div style={{display:"flex",gap:6}}>
-                      <input
-                        className="hotkey-input"
-                        value={enhHotkeyInput}
-                        onChange={e=>setEnhHotkeyInput(e.target.value)}
-                        onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();changeEnhHotkey(enhHotkeyInput);}}}
-                        placeholder={t("如 ctrl+k")}
-                        spellCheck={false}
-                        readOnly={recording==="enh"}
-                      />
-                      <button className={"settings-action"+(recording==="enh"?" recording":"")} onClick={()=>{setEnhHotkeyError("");setRecording(r=>r==="enh"?null:"enh");}}>{recording==="enh"?t("按下快捷键…"):t("录制")}</button>
-                      <button className="settings-action" onClick={()=>changeEnhHotkey(enhHotkeyInput)}>{t("应用")}</button>
-                    </div>
-                  </div>
-                  {enhHotkeyError && <p className="settings-hint settings-hint-error">{t(enhHotkeyError)}</p>}
-                  {enhHotkey!=="ctrl+k" && <button className="settings-action" onClick={()=>changeEnhHotkey("ctrl+k")}>{t("恢复默认")}</button>}
-                  <p className="settings-hint">{t("点「录制」后直接按下组合键自动填入；也可手动输入。")}</p>
-                  <p className="settings-hint" style={{marginTop: '4px'}}>{t("格式：ctrl+x · alt+q · ctrl+shift+x · f9")}</p>
-                  <p className="settings-hint" style={{marginTop: '4px'}}>{t("· 不支持 Win 键及 Alt+Space / Alt+F4（系统保留）")}<br/>{t("· 修饰键 Ctrl / Shift / Alt 可选；纯主键会全局抢占该键，慎设")}<br/>{t("· 中文输入法下录制前请先切换到英文输入法")}</p>
-                  <div className="settings-row"><span className="settings-row-label">{t("关闭面板")}</span><kbd>Esc</kbd></div>
-                  <div className="settings-row"><span className="settings-row-label">{t("应用导航")}</span><kbd>↑↓</kbd></div>
-                  <div className="settings-row"><span className="settings-row-label">{t("启动选中应用")}</span><kbd>Enter</kbd></div>
-                  <p className="settings-hint">{t("长按 = 按住显示松开关闭；短按 = 切换显隐。")}</p>
-                </>)}
-                {settingsTab==="about" && (<>
-                  <div className="settings-panel-title">{t("关于")}</div>
-                  <div className="settings-about">
-                    <div>Workbench <b>v{__APP_VERSION__}</b></div>
-                    <div>{t("Windows 全屏「第二桌面」工具")}</div>
-                    <div>{t("应用启动器 · 文件中转 · 剪贴板历史")}</div>
-                  </div>
-                </>)}
-              </div>
-            </div>
-          </div>
-        </div>
+        <SettingsDialog
+          tab={settingsTab}
+          version={__APP_VERSION__}
+          t={t}
+          general={{
+            theme,
+            lang,
+            autostartEnabled,
+            onChangeTheme: changeTheme,
+            onChangeLang: changeLang,
+            onChangeAutostart: changeAutostart,
+          }}
+          launcher={{
+            count: launcher.length,
+            onOpenPicker: openLauncherPicker,
+            onOpenManager: openLauncherManager,
+            onClear: clearLauncher,
+          }}
+          stage={{
+            layout: stageLayout,
+            count: stage.length,
+            max: stageMax,
+            missingCount: missingStageItems.length,
+            dragoutAutoClose,
+            persist: stagePersist,
+            showShortcuts,
+            thumbnailCacheCleared: thumbCacheCleared,
+            onChangeLayout: changeStageLayout,
+            onClear: clearStage,
+            onOpenRecovery: openStageRecovery,
+            onCleanupMissing: cleanupMissingStage,
+            onChangeMax: changeStageMax,
+            onChangeDragoutAutoClose: changeDragoutAutoClose,
+            onChangePersist: changeStagePersist,
+            onChangeShowShortcuts: changeShowShortcuts,
+            onOpenThumbnailDirectory: openStageThumbnailDirectory,
+            onClearThumbnailCache: clearStageThumbnailCache,
+          }}
+          clipboard={{
+            count: clipboard.length,
+            max: clipCacheMax,
+            imageCacheCleared: imgCacheCleared,
+            onChangeMax: changeClipCacheMax,
+            onClear: clearClipboard,
+            onOpenImageDirectory: openClipboardImageDirectory,
+            onClearImageCache: clearClipboardImageCache,
+          }}
+          search={{
+            defaultMode: searchDefaultMode,
+            engine: searchEngine,
+            everythingAvailable,
+            redetected: evtRedetected,
+            dirs: searchDirs,
+            dirPicking,
+            enhancedHotkeyLabel: comboLabel(enhHotkey),
+            onChangeDefaultMode: changeSearchDefaultMode,
+            onChangeEngine: changeSearchEngine,
+            onRedetectEverything: redetectEverything,
+            onPickDir: pickSearchDir,
+            onRemoveDir: removeSearchDir,
+          }}
+          hotkeys={{
+            combo: hotkeyCombo,
+            input: hotkeyInput,
+            error: hotkeyError,
+            enhancedCombo: enhHotkey,
+            enhancedInput: enhHotkeyInput,
+            enhancedError: enhHotkeyError,
+            recording,
+            onInputChange: setHotkeyInput,
+            onEnhancedInputChange: setEnhHotkeyInput,
+            onApply: changeHotkey,
+            onApplyEnhanced: changeEnhHotkey,
+            onToggleRecording: target => {
+              if (target === "main") setHotkeyError("");
+              else setEnhHotkeyError("");
+              setRecording(current => current === target ? null : target);
+            },
+          }}
+          onTabChange={setSettingsTab}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
-      <footer className="bottom-bar">
-        <div className="bot-left"><span className="sys-dot"/><span>CPU {navigator.hardwareConcurrency??"?"} {t("核")}</span></div>
-        <div className="bot-center"><kbd>{comboLabel(hotkeyCombo)}</kbd> {t("切换")} · <kbd>{comboLabel(enhHotkey)}</kbd> {enhOpen?t("界面搜索"):t("增强搜索")} · <kbd>Esc</kbd> {t("关闭")} · <kbd>↑↓</kbd> {t("导航")} · <kbd>Enter</kbd> {t("启动")}</div>
-        <div className="bot-right"><span>Workbench v{__APP_VERSION__}</span></div>
-      </footer>
+      <WorkbenchFooter
+        hotkeyCombo={hotkeyCombo}
+        enhancedHotkey={enhHotkey}
+        enhancedOpen={enhOpen}
+        version={__APP_VERSION__}
+        t={t}
+      />
     </div>
-    {/* 启动放大暂留：顶层克隆，#overlay 的兄弟节点（避开 backdrop-filter 的定位上下文与宫格 overflow 裁剪），按点击瞬间坐标定位、自播 scale+淡出 */}
-    {launchAnim && (
-      <div className="launch-clone" style={{top:launchAnim.rect.top,left:launchAnim.rect.left,width:launchAnim.rect.width,height:launchAnim.rect.height}}>
-        {launchAnim.icon ? <img src={launchAnim.icon} alt=""/>
-          : launchAnim.iconText ? <span>{launchAnim.iconText}</span>
-          : <span>{launchAnim.name[0]}</span>}
-      </div>
-    )}
-    {/* 顶层拖拽预览层：承载 DOM clone ghost，集中管理层级，避免散挂 body 后再靠单个节点抢 z-index */}
+    {/* 全局轻提示：同样是 #overlay 的兄弟节点——#overlay 的 backdrop-filter 会成为 fixed 的包含块，
+        放进去会相对它定位而非视口。key={toast.id} 让同一句提示连发也能重挂节点、重启 CSS 动画。
+        pointer-events:none（见 CSS）：提示绝不能挡住下面的卡片点击。 */}
+    {toast && <div key={toast.id} className="toast" style={{animationDuration:`${TOAST_MS}ms`}} role="status" aria-live="polite">{toast.msg}</div>}
+    {/* 启动放大暂留克隆改为命令式 cloneNode（见 spawnLaunchClone），挂进下方 dragLayer，不再走 React 渲染 */}
+    {/* 顶层拖拽预览层：承载 DOM clone ghost + 启动克隆，集中管理层级，避免散挂 body 后再靠单个节点抢 z-index */}
     <div className="drag-layer" ref={dragLayerRef}/>
     {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
     {ctxMenu && (
@@ -2186,14 +2633,18 @@ export default function App() {
         ))}
       </div>
     )}
-    {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测 */}
-    {dragState?.active && (
-      <div className="clip-drag-ghost" style={{position:"fixed",left:dragState.currentX+12,top:dragState.currentY+12,pointerEvents:"none",zIndex:100002}}>
-        {dragState.item.type==="image"
-          ? <img src={dragState.item.content} className="clip-ghost-img" alt=""/>
-          : dragState.item.type==="file"
-          ? <span>📄 {dragState.item.items?.[0]?.name ?? t("文件")}</span>
-          : <span>{String(dragState.item.content ?? "").slice(0,40)}</span>}
+    {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测。
+        位移不进 React style（避免每次 move 重渲，续109）——由 ref 回调按 clipDragRef 当前坐标就位、move 时直写 transform。
+        ref 回调在 commit 阶段跑（paint 前），且 App 因他因重渲时会重跑并按最新坐标复位 → 天然自愈、无 (0,0) 闪帧。 */}
+    {clipDragItem && (
+      <div className="clip-drag-ghost"
+        ref={el=>{ clipGhostRef.current=el; const d=clipDragRef.current; if(el&&d) el.style.transform=`translate3d(${d.x+12}px,${d.y+12}px,0)`; }}
+        style={{position:"fixed",pointerEvents:"none",zIndex:100002}}>
+        {clipDragItem.type==="image"
+          ? <img src={clipThumbs[clipDragItem.time]} className="clip-ghost-img" alt="" draggable={false}/> /* 步骤2：拖拽 ghost 用缩略图（content 已剥离）*/
+          : clipDragItem.type==="file"
+          ? <span className="clip-ghost-file"><FileGlyph size={14} {...fileGlyphFor(clipDragItem)}/><span className="clip-ghost-name">{clipDragItem.items?.[0]?.name ?? t("文件")}</span></span>
+          : <span>{String(clipDragItem.content ?? "").slice(0,40)}</span>}
       </div>
     )}
    </>

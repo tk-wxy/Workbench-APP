@@ -19,6 +19,17 @@ use std::sync::{Mutex, OnceLock};
 
 // Everything SDK 请求标志：要完整路径 + 文件名。
 const EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME: u32 = 0x0000_0004;
+/// 一并请求修改时间（续117），用于排序的新鲜度加分。
+/// **它来自 Everything 自己的索引**，我们不需要去 stat 磁盘
+/// ——这是能守住「查询命令只读内存、不碰磁盘」这条铁律的唯一取值途径。
+const EVERYTHING_REQUEST_DATE_MODIFIED: u32 = 0x0000_0040;
+
+/// FILETIME(自 1601-01-01 起、100ns 为单位) → Unix 秒。越界／未设置一律落到 0（= 不加分）。
+const FILETIME_UNIX_EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+fn filetime_to_unix(ft: u64) -> u64 {
+    let secs = ft / 10_000_000;
+    secs.saturating_sub(FILETIME_UNIX_EPOCH_DIFF_SECS)
+}
 
 type FnSetSearch = unsafe extern "system" fn(*const u16);
 type FnVoidU32 = unsafe extern "system" fn(u32);
@@ -26,6 +37,8 @@ type FnQuery = unsafe extern "system" fn(i32) -> i32;
 type FnU32 = unsafe extern "system" fn() -> u32;
 type FnGetFullPath = unsafe extern "system" fn(u32, *mut u16, u32) -> u32;
 type FnIsFolder = unsafe extern "system" fn(u32) -> i32;
+/// `BOOL Everything_GetResultDateModified(DWORD index, FILETIME *out)`
+type FnGetDateModified = unsafe extern "system" fn(u32, *mut u64) -> i32;
 
 // 已解析的 Everything API。持有 Library 保证加载期内函数指针有效。
 struct EverythingApi {
@@ -39,6 +52,10 @@ struct EverythingApi {
     is_folder: FnIsFolder,
     get_major_version: FnU32,
     get_last_error: FnU32,
+    /// 续117。**不设为必需**（Option）——旧版 SDK DLL 里若没有这个函数，
+    /// 让 try_load 整体失败会把 Everything 集成本身搞死。
+    /// 解析不到就退化成 mtime=0 → 没有新鲜度加分而已，其余照常工作。
+    get_date_modified: Option<FnGetDateModified>,
 }
 
 // 函数指针 + Library 均为 Send+Sync；并发调用另由 API 锁串行化（持锁期间调 IPC）。
@@ -73,8 +90,14 @@ unsafe fn try_load(path: &std::ffi::OsStr) -> Option<EverythingApi> {
     let is_folder = *lib.get::<FnIsFolder>(b"Everything_IsFolderResult\0").ok()?;
     let get_major_version = *lib.get::<FnU32>(b"Everything_GetMajorVersion\0").ok()?;
     let get_last_error = *lib.get::<FnU32>(b"Everything_GetLastError\0").ok()?;
+    // ↓ 只有这里不加 ?（可选符号，见上面 struct 定义处的注释）
+    let get_date_modified = lib
+        .get::<FnGetDateModified>(b"Everything_GetResultDateModified\0")
+        .ok()
+        .map(|s| *s);
     Some(EverythingApi {
         _lib: lib,
+        get_date_modified,
         set_search,
         set_request_flags,
         set_max,
@@ -156,7 +179,14 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
         }
         let wide: Vec<u16> = q.encode_utf16().chain(std::iter::once(0)).collect();
         (api.set_search)(wide.as_ptr());
-        (api.set_request_flags)(EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME);
+        // 只在符号可用时才请求修改时间（白立标志只会给 Everything 增加无谓的工作，
+        // 用不了时就维持原来的标志）
+        let want_mtime = api.get_date_modified.is_some();
+        (api.set_request_flags)(if want_mtime {
+            EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME | EVERYTHING_REQUEST_DATE_MODIFIED
+        } else {
+            EVERYTHING_REQUEST_FULL_PATH_AND_FILE_NAME
+        });
         (api.set_max)(limit as u32);
         if (api.query)(1) == 0 {
             return Err(format!(
@@ -185,15 +215,81 @@ pub fn query(q: &str, limit: usize) -> Result<Vec<FileSearchResult>, String> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_lowercase();
+            // 修改时间（续117）。取不到就退化为 0 = 不加新鲜度分。
+            let mtime = match api.get_date_modified {
+                Some(f) => {
+                    let mut ft: u64 = 0;
+                    if f(i, &mut ft) != 0 {
+                        filetime_to_unix(ft)
+                    } else {
+                        0 // 只有这一条取不到（文件夹等情况）
+                    }
+                }
+                None => 0, // 旧版 SDK DLL
+            };
             out.push(FileSearchResult {
                 path,
                 name,
                 ext,
                 is_dir,
-                icon: None, // 由 filesearch::fill_icons_from_cache 从预热缓存回填
+                icon_key: String::new(), // 由 filesearch::attach_icons 统一标注并收集
+                mtime,
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// FILETIME → Unix 秒（续117）。边界与异常值下不得出错。
+    #[test]
+    fn filetime_conversion() {
+        // 恰好 Unix epoch = 自 1601 起 11644473600 秒
+        assert_eq!(filetime_to_unix(FILETIME_UNIX_EPOCH_DIFF_SECS * 10_000_000), 0);
+        // 再往后 1 天
+        assert_eq!(
+            filetime_to_unix((FILETIME_UNIX_EPOCH_DIFF_SECS + 86_400) * 10_000_000),
+            86_400
+        );
+        // 0（未设置 / 取值失败）落到 0。用的是 saturating_sub，不会回绕成负数
+        assert_eq!(filetime_to_unix(0), 0, "未设置的 FILETIME 应落到 0 = 不加分");
+        // 1601~1970 之间的值也饱和到 0（在 recency_bonus 侧与「未知」同等对待）
+        assert_eq!(filetime_to_unix(1_000 * 10_000_000), 0);
+    }
+
+    /// 诊断用（默认 #[ignore]，手动执行：
+    ///   cargo test --lib everything::tests::probe_sdk_symbols -- --ignored --nocapture）
+    ///
+    /// 看实机的 Everything64.dll 是否真的导出了续117 用到的可选符号
+    /// `Everything_GetResultDateModified`。
+    /// 即使 Everything 本体（服务）没运行，DLL 加载与符号解析仍可确认
+    /// ——查询路径本身在无头环境下驱动不了，所以这里就是机械验证能到达的边界。
+    #[test]
+    #[ignore]
+    fn probe_sdk_symbols() {
+        let api = load_api();
+        match api {
+            None => println!("加载不到 Everything64.dll（候选路径里没有）。无法判定。"),
+            Some(a) => {
+                println!("DLL 加载成功");
+                println!(
+                    "  Everything_GetResultDateModified: {}",
+                    if a.get_date_modified.is_some() {
+                        "存在 → 新鲜度加分可生效"
+                    } else {
+                        "不存在 → 退化为 mtime=0（只按相关度排序，其余功能不受影响）"
+                    }
+                );
+                let ver = unsafe { (a.get_major_version)() };
+                println!(
+                    "  Everything_GetMajorVersion: {ver}{}",
+                    if ver == 0 { "（= 服务未启动，查询路径无法验证）" } else { "" }
+                );
+            }
+        }
     }
 }
 
