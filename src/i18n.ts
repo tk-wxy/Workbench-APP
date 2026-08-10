@@ -132,6 +132,7 @@ export const EN_DICT: Record<string, string> = {
   "仅文件可批量复制": "Only files can be batch-copied",
   "完成": "Done",
   "进入多选模式": "Enter multi-select mode",
+  "退出多选模式": "Exit multi-select mode",
   "多选": "Multi-select",
   "{n} 个文件": "{n} files",
   "{n}个文件": "{n} files",
