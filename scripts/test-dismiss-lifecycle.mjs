@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -39,6 +39,35 @@ function fakeTimers() {
 }
 
 console.log("\n关闭淡出生命周期 —— transitionend 与 watchdog");
+
+{
+  const css = readFileSync("src/App.css", "utf8");
+  const rust = readFileSync("src-tauri/src/lib.rs", "utf8");
+  const nativeFirstHelper = rust.match(
+    /fn hide_light_dismiss_native_first[\s\S]*?\n}\n\nfn start_focus_watch/,
+  )?.[0] ?? "";
+  const showPos = nativeFirstHelper.indexOf("ShowWindow(hwnd, SW_HIDE)");
+  const visibleCheckPos = nativeFirstHelper.indexOf("IsWindowVisible(hwnd)");
+  const flushPos = nativeFirstHelper.indexOf("DwmFlush()");
+  const cacheSyncPos = nativeFirstHelper.lastIndexOf("if let Err(e) = window.hide()");
+  check(
+    "light-dismiss 不再依赖未证实的 1/255 alpha 值",
+    !css.includes("--dismiss-opacity-floor")
+      && /\.overlay-hidden\s*\{[^}]*opacity:\s*0[;}]/s.test(css)
+      && /\.overlay-simple\.dismissing\s*\{[^}]*opacity:\s*0[;}]/s.test(css),
+  );
+  check(
+    "light-dismiss 先同步隐藏 HWND 并跨过 DWM barrier，再同步 tao 缓存",
+    showPos >= 0
+      && visibleCheckPos > showPos
+      && flushPos > visibleCheckPos
+      && cacheSyncPos > flushPos,
+  );
+  check(
+    "light-dismiss 仅在原生隐藏确认后 emit 前端清场",
+    /let native_hidden = hide_light_dismiss_native_first\(&window, my_hwnd\);[\s\S]*?if native_hidden \{[\s\S]*?emit\("hotkey-hide"/.test(rust),
+  );
+}
 
 {
   const clock = fakeTimers();

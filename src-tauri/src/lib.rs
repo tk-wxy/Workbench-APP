@@ -806,6 +806,61 @@ fn start_hotkey_monitor(app: AppHandle) {
 //  彻底失败则永不 arm、永不乱关（优雅降级，用户仍可 Esc/快捷键关）。
 //  隐藏复用纯 hide()+emit("hotkey-hide") 路径，不碰焦点交还/粘贴流程。
 // ════════════════════════════════════════════════════════════════════
+
+/// light-dismiss 发生在目标应用已经成为前台之后。这里不能只从后台线程调用 Tauri `hide()`：
+/// runtime-wry 只会把 Hide 投递到 tao 主事件循环，排队期间全屏 topmost HWND 仍参与 DWM 合成；
+/// 若紧接着 emit 让 React 提交隐藏态，就可能在 HWND 真正消失前暴露 WebView2 宿主末帧。
+///
+/// 顺序必须是：原生 HWND 同步隐藏并跨过一次 DWM present → Tauri hide 同步 tao 可见性缓存 →
+/// emit 前端清场。裸 ShowWindow 后的 Tauri hide 不能删除：R37 已由 GUI 实测证明，否则 tao
+/// 仍缓存 visible=true，下一次 `window.show()` 会被 diff 成 no-op、整窗再也呼不出。
+fn hide_light_dismiss_native_first(window: &tauri::WebviewWindow, raw_hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::DwmFlush;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, ShowWindow, SW_HIDE};
+
+    // start_focus_watch 启动时已经取得并验证过这一句柄；复用同一值，避免关闭时再次取句柄的
+    // 错误分支退化回“只排队 Tauri hide 后立即 emit”的原始竞态。
+    let hwnd = HWND(raw_hwnd as *mut _);
+
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        if IsWindowVisible(hwnd).as_bool() {
+            // ShowWindow is synchronous here. 若极端错误下仍可见，只排队 Tauri hide、绝不 emit
+            // 透明前端态；宁可保留本轮 UI 状态，也不能重开已知的黑帧窗口。
+            eprintln!("[focus] native SW_HIDE returned but HWND is still visible; suppressing frontend hide event");
+            let _ = window.hide();
+            return false;
+        }
+        if let Err(e) = DwmFlush() {
+            // Windows 11 normally always has DWM enabled. A barrier failure must not skip the cache-sync
+            // hide; the HWND has already received SW_HIDE, so this is diagnostic rather than a retry loop.
+            eprintln!("[focus] DwmFlush after SW_HIDE failed: {e:?}");
+        }
+    }
+
+    // Debug-only pressure hook: widen the exact queue gap that caused the old bug. The real HWND has
+    // already been hidden and flushed, while tao still believes it is visible. A large value therefore
+    // verifies that visual correctness no longer depends on how quickly Tauri consumes WindowMessage::Hide.
+    #[cfg(debug_assertions)]
+    if let Ok(raw) = std::env::var("WORKBENCH_TEST_LIGHT_DISMISS_TAURI_SYNC_DELAY_MS") {
+        if let Ok(ms) = raw.parse::<u64>() {
+            let bounded_ms = ms.min(5_000);
+            if bounded_ms > 0 {
+                println!("[focus] test-only Tauri hide sync delay={bounded_ms}ms");
+                std::thread::sleep(std::time::Duration::from_millis(bounded_ms));
+            }
+        }
+    }
+
+    // Cache synchronization for tao (R37). This may still queue, but the real HWND is already hidden and
+    // DWM has crossed a present boundary, so its latency can no longer expose a transparent WebView frame.
+    if let Err(e) = window.hide() {
+        eprintln!("[focus] Tauri hide cache sync failed: {e:?}");
+    }
+    true
+}
+
 fn start_focus_watch(app: AppHandle) {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
@@ -845,9 +900,11 @@ fn start_focus_watch(app: AppHandle) {
                     armed = true;
                 } else if armed && fg != 0 {
                     // 前台切到另一个真实窗口（fg==0 是切换瞬间的空窗，不误关）→ light dismiss
-                    let _ = window.hide();
+                    let native_hidden = hide_light_dismiss_native_first(&window, my_hwnd);
                     set_webview_memory_low(&window, true);
-                    let _ = app.emit("hotkey-hide", ());
+                    if native_hidden {
+                        let _ = app.emit("hotkey-hide", ());
+                    }
                     armed = false;
                     println!("[focus] foreground lost → auto hide");
                 }
