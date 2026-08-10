@@ -1,6 +1,6 @@
 [package]
 name = "workbench-app"
-version = "0.27.5"
+version = "0.27.7"
 description = "Windows Desktop Workbench Utility"
 authors = ["you"]
 edition = "2021"
@@ -37,6 +37,7 @@ windows = { version = "0.58", features = [
   "Win32_System_SystemServices",
   "Win32_System_Com_StructuredStorage",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
   # IShellLinkW::GetPath（.lnk 解析，续119）签名里带 WIN32_FIND_DATAW，需要此 feature 才可见
   "Win32_Storage_FileSystem",
   "implement",
