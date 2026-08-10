@@ -2374,8 +2374,8 @@ export default function App() {
         <section className="center-panel">
           <div className="stage-section-header">
             <span className="section-label">{t("文件中转区")}</span>
-            {stageMultiselect ? (
-              <div className="stage-multi-toolbar">
+            <div className="stage-multi-toolbar">
+              {stageMultiselect ? <>
                 {stageSel.size > 0 && <span className="stage-sel-count">{t("已选 {n}", {n: stageSel.size})}</span>}
                 <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
                   title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
@@ -2385,16 +2385,15 @@ export default function App() {
                   onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>{t("复制")}</button>
                 <button className="stage-batch-btn" disabled={stageSel.size===0}
                   onClick={()=>{saveStage(stage.filter(x=>!stageSel.has(x.id)));setStageSel(new Set());}}>{t("删除")}</button>
-                <button className="stage-batch-btn stage-batch-cancel"
-                  onClick={()=>{setStageSel(new Set());setStageMultiselect(false);stageAnchorRef.current=null;}}>{t("完成")}</button>
-              </div>
-            ) : (
-              <div className="stage-multi-toolbar">
-                {missingStageItems.length > 0 && <button className="stage-batch-btn stage-missing-action" onClick={openStageRecovery} title={t("处理失效条目")}>{t("失效 {n} 项", { n: missingStageItems.length })}</button>}
-                <button className="stage-batch-btn" disabled={!stage.length}
-                  onClick={()=>setStageMultiselect(true)} title={t("进入多选模式")}>{t("多选")}</button>
-              </div>
-            )}
+              </> : (
+                missingStageItems.length > 0 && <button className="stage-batch-btn stage-missing-action" onClick={openStageRecovery} title={t("处理失效条目")}>{t("失效 {n} 项", { n: missingStageItems.length })}</button>
+              )}
+              {/* 保持此节点与右侧锚点不变：切换模式时批量操作只向左展开，避免点击目标被卸载后闪跳。 */}
+              <button key="stage-mode-toggle" className={`stage-batch-btn stage-mode-toggle${stageMultiselect ? " stage-batch-cancel" : ""}`}
+                disabled={!stageMultiselect && !stage.length}
+                onClick={()=>{setStageSel(new Set());setStageMultiselect(!stageMultiselect);stageAnchorRef.current=null;}}
+                title={stageMultiselect ? t("退出多选模式") : t("进入多选模式")}>{stageMultiselect ? t("完成") : t("多选")}</button>
+            </div>
           </div>
           <div className="drop-area" ref={dropAreaRef}
             onPointerDown={handleLassoPointerDown} onPointerMove={handleLassoPointerMove}

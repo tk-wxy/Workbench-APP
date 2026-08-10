@@ -418,7 +418,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-multi-toolbar{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
 .stage-sel-count{font-size:11px;color:var(--text2);white-space:nowrap;padding:0 4px;}
 /* line-height 固定 1.2：不设时按钮继承不确定行高，实际高度可能略超标题行 min-height:34 → 把中转区标题行撑得比剪贴板高零点几~几 px（200%DPI 下可见），三栏标题就不齐。定死后按钮 ≈21px，标题行稳定由 min-height:34 决定。 */
-.stage-batch-btn{padding:3px 10px;line-height:1.2;border:1px solid var(--border);background:var(--fill-1);color:var(--text2);font-size:11px;font-family:var(--font);cursor:pointer;border-radius:5px;transition:all 80ms;white-space:nowrap;}
+/* 禁用态在进入多选时就是初始状态；opacity 不可过渡，否则会先以正常亮度绘制再淡到 .4，造成闪跳。 */
+.stage-batch-btn{padding:3px 10px;line-height:1.2;border:1px solid var(--border);background:var(--fill-1);color:var(--text2);font-size:11px;font-family:var(--font);cursor:pointer;border-radius:5px;transition:background 80ms,color 80ms,border-color 80ms;white-space:nowrap;}
 .stage-batch-btn:hover:not(:disabled){background:var(--hover);color:var(--text);}
 .stage-batch-btn:disabled{opacity:.4;cursor:default;}
 .stage-batch-btn.copied{color:#4ade80;border-color:rgba(74,222,128,0.35);}
