@@ -295,6 +295,10 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card{position:relative;width:72px;min-width:72px;flex-shrink:0;background:var(--card-bg);border:0.5px solid var(--card-border-c);border-radius:9px;overflow:hidden;display:flex;flex-direction:column;cursor:pointer;outline:2px solid transparent;outline-offset:1px;transition:outline-color 110ms ease-out;}
 .stage-card:hover{z-index:1;outline-color:var(--accent);}
 .stage-card.selected{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent);}
+/* 新增提示只闪烁轮廓与光晕，不改变卡片尺寸或 transform，避免污染插入落点与 FLIP 重排 rect。 */
+.stage-card.stage-new,.stage-item.stage-new{animation:stage-item-added-flash 620ms ease-out;}
+@keyframes stage-item-added-flash{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 0%,transparent);}32%{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 72%,transparent),0 0 20px color-mix(in srgb,var(--accent) 46%,transparent);}100%{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 0%,transparent);}}
+@media (prefers-reduced-motion:reduce){.stage-card.stage-new,.stage-item.stage-new{animation:none;}}
 /* 缩略图区：固定 72×62（续98：封面加高 4px，来自下方标签区/悬浮菜单等量收窄，卡片总高 94px 不变）*/
 .stage-card-thumb{width:72px;height:62px;background:var(--card-thumb-bg);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;flex-shrink:0;}
 /* 图片 cover：绝对铺满 thumb（叠在 icon-wrap 兜底之上；图片文件加载失败时 onError 隐藏、露出兜底 emoji），object-fit:cover 从顶部裁 */

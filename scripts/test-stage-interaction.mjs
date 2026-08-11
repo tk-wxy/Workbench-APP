@@ -15,6 +15,12 @@ try {
   assert.deepEqual(domain.resolveCardDragIntent({ multiselect: false, selectedIds: new Set(), itemId: 1, origin: { x: 3, y: 50 }, itemRect: rect }), { lasso: true, threshold: 6 });
   assert.deepEqual(domain.resolveCardDragIntent({ multiselect: true, selectedIds: new Set([1]), itemId: 1, origin: { x: 50, y: 50 }, itemRect: rect }), { lasso: false, threshold: 12 });
   assert.equal(domain.hasReachedStageThreshold({ x: 0, y: 0 }, { x: 12, y: 0 }, 12), true);
+  const completionRef = { current: domain.beginStageInteraction(1, { x: 0, y: 0 }) };
+  completionRef.current.mode = "reorder";
+  const claimedCompletion = domain.claimStageInteractionCompletion(completionRef);
+  assert.equal(claimedCompletion.mode, "reorder");
+  assert.equal(completionRef.current.mode, "idle");
+  assert.equal(domain.claimStageInteractionCompletion(completionRef).mode, "idle");
   assert.deepEqual(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1]), missingIds: new Set(), autoClose: false, searchActive: false }), { kind: "reorder", ids: [1] });
   assert.equal(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1]), missingIds: new Set(), autoClose: true, searchActive: false }).kind, "native");
   assert.equal(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1, 2]), missingIds: new Set(), autoClose: false, searchActive: false }).kind, "native");
@@ -38,7 +44,7 @@ try {
   assert.equal(domain.resolveStageRelease({ mode: "reorder", overLauncher: true, itemType: "image" }), "drop-launcher");
   assert.equal(domain.resolveStageRelease({ mode: "reorder", overLauncher: true, itemType: "text" }), "reject-launcher");
   assert.equal(domain.resolveStageRelease({ mode: "reorder", overLauncher: false, itemType: "file", hasFilePath: true }), "commit-reorder");
-  console.log("舞台交互状态机 —— 意图、路由、框选与松手\n  ✓ 边缘/多选意图保持\n  ✓ 自动关闭/多选/失效路由保持\n  ✓ 框选相交与启动台落点保持\n全部通过\n");
+  console.log("舞台交互状态机 —— 意图、路由、框选与松手\n  ✓ 边缘/多选意图保持\n  ✓ 终止事件先占有状态，重复终止幂等\n  ✓ 自动关闭/多选/失效路由保持\n  ✓ 框选相交与启动台落点保持\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

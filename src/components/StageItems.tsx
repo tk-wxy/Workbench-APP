@@ -38,6 +38,8 @@ interface StageItemViewProps {
   pointer: StageItemPointerHandlers;
   highlightRanges: TextRange[];
   pageSearchActive: boolean;
+  newlyAdded: boolean;
+  onNewlyAddedAnimationEnd: (id: number) => void;
 }
 
 const rootTitle = (item: StageItem, missing: boolean, multiselect: boolean, t: Translate, grid: boolean) => {
@@ -64,6 +66,8 @@ export const StageGridCard = memo(function StageGridCard({
   pointer,
   highlightRanges,
   pageSearchActive,
+  newlyAdded,
+  onNewlyAddedAnimationEnd,
 }: StageItemViewProps) {
   const rawExt = (item.ext || item.items?.[0]?.ext || "").replace(/^\./, "");
   const isAnyDir = !!item.isDir;
@@ -91,7 +95,7 @@ export const StageGridCard = memo(function StageGridCard({
   return (
     <div
       data-stage-id={item.id}
-      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}`}
+      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${newlyAdded ? " stage-new" : ""}`}
       draggable={false}
       onDragStart={event => event.preventDefault()}
       onClick={event => actions.activate(event, item, index)}
@@ -101,6 +105,7 @@ export const StageGridCard = memo(function StageGridCard({
       onPointerUp={pointer.pointerUp}
       onPointerCancel={pointer.pointerUp}
       onLostPointerCapture={pointer.lostPointerCapture}
+      onAnimationEnd={newlyAdded ? () => onNewlyAddedAnimationEnd(item.id) : undefined}
       title={rootTitle(item, missing, multiselect, t, true)}
     >
       {missing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
@@ -162,6 +167,8 @@ export const StageListRow = memo(function StageListRow({
   pointer,
   highlightRanges,
   pageSearchActive,
+  newlyAdded,
+  onNewlyAddedAnimationEnd,
 }: StageItemViewProps) {
   const rawText = item.content || "";
   const textPreview = pageSearchActive && highlightRanges.length
@@ -175,7 +182,7 @@ export const StageListRow = memo(function StageListRow({
   return (
     <div
       data-stage-id={item.id}
-      className={`stage-item${selected ? " selected" : ""}${missing ? " stage-missing" : ""}`}
+      className={`stage-item${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${newlyAdded ? " stage-new" : ""}`}
       draggable={false}
       onDragStart={event => event.preventDefault()}
       onClick={event => actions.activate(event, item, index)}
@@ -185,6 +192,7 @@ export const StageListRow = memo(function StageListRow({
       onPointerUp={pointer.pointerUp}
       onPointerCancel={pointer.pointerUp}
       onLostPointerCapture={pointer.lostPointerCapture}
+      onAnimationEnd={newlyAdded ? () => onNewlyAddedAnimationEnd(item.id) : undefined}
       title={rootTitle(item, missing, multiselect, t, false)}
     >
       {item.type === "image" && imageSource
