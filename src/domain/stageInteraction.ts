@@ -124,6 +124,15 @@ export function finishStageInteraction(state: StageInteractionState): StageInter
   return { ...state, pressing: false, mode: "idle" };
 }
 
+// 终止事件可能因 releasePointerCapture → lostpointercapture 同步重入。
+// 先把共享 ref 置为 idle，再让调用方执行提交/取消；重入者因此只能拿到 idle 快照，
+// 不会与第一个终止路径重复清理同一轮拖动。
+export function claimStageInteractionCompletion(ref: { current: StageInteractionState }): StageInteractionState {
+  const interaction = ref.current;
+  ref.current = finishStageInteraction(interaction);
+  return interaction;
+}
+
 export function resolveCardDragIntent(input: {
   multiselect: boolean;
   selectedIds: ReadonlySet<number>;

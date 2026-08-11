@@ -3,6 +3,7 @@ import type { makeT } from "../i18n";
 import {
   LASSO_THRESHOLD_PX,
   beginStageInteraction,
+  claimStageInteractionCompletion,
   clampPointToRect,
   finishStageInteraction,
   hasReachedStageThreshold,
@@ -249,7 +250,6 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   }, [autoClose, beginNativeDragOut, computeLassoSelection, dropAreaRef, interactionRef, missingIdsRef, multiselectRef, paintLasso, searchActive, selectedRef, setMultiselect, snapshotLassoRects, startReorder, updateReorder]);
 
   const itemPointerUp = useCallback((event: ReactPointerEvent) => {
-    try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch {}
     const interaction = interactionRef.current;
     let overLauncher = false;
     let item: StageItem | undefined;
@@ -267,6 +267,20 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       itemType: item?.type,
       hasFilePath: !!item?.items?.[0]?.path,
     });
+    // 必须在 releasePointerCapture 之前占有终止权；该调用可同步触发 lostpointercapture。
+    // 后者看到 idle 后不会再取消/清理本轮排序。
+    claimStageInteractionCompletion(interactionRef);
+    try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch {}
+    if (event.type === "pointercancel") {
+      if (interaction.mode === "reorder") {
+        cancelReorder();
+        setNativeReorderActive(false);
+      } else if (interaction.mode === "lasso") {
+        cancelLasso();
+        if (!selectedRef.current.size) setMultiselect(false);
+      }
+      return;
+    }
     if (release === "drop-launcher" && item) {
       cancelReorder();
       setNativeReorderActive(false);
@@ -281,14 +295,16 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       cancelLasso();
       if (!selectedRef.current.size) setMultiselect(false);
     }
-    interactionRef.current = finishStageInteraction(interactionRef.current);
   }, [cancelLasso, cancelReorder, commitReorder, dropToLauncher, interactionRef, launcherDropRef, selectedRef, setMultiselect, setNativeReorderActive, showToast, stageRef, t]);
 
   const itemLostPointerCapture = useCallback(() => {
-    if (reorderActive()) cancelReorder();
-    if (interactionRef.current.mode === "lasso") cancelLasso();
-    interactionRef.current = finishStageInteraction(interactionRef.current);
-    setNativeReorderActive(false);
+    const interaction = claimStageInteractionCompletion(interactionRef);
+    if (interaction.mode === "reorder") {
+      if (reorderActive()) cancelReorder();
+      setNativeReorderActive(false);
+    } else if (interaction.mode === "lasso") {
+      cancelLasso();
+    }
   }, [cancelLasso, cancelReorder, interactionRef, reorderActive, setNativeReorderActive]);
 
   return {

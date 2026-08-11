@@ -111,11 +111,16 @@ const stageCommon = {
   pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
   highlightRanges: [],
   pageSearchActive: false,
+  newlyAdded: false,
+  onNewlyAddedAnimationEnd: noop,
 };
 const stageGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageCommon));
 const stageListHtml = renderToStaticMarkup(createElement(StageListRow, stageCommon));
 check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
 check("失效中转项不渲染复制/打开操作", !stageGridHtml.includes("复制到剪贴板") && !stageListHtml.includes('title="打开"'), stageGridHtml + stageListHtml);
+const stageNewGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, newlyAdded: true }));
+const stageNewListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, newlyAdded: true }));
+check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);
 
 const stageText = "开头文字保留识别，经过较长的描述之后才出现关键词供搜索定位。";
 const stageTextStart = stageText.indexOf("关键词");

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef, useDeferredValue, Fragment } from "react";
+import { flushSync } from "react-dom";
 import "./App.css";
 import { makeT, type Lang } from "./i18n";
 import { IMG_EXTS, dirOf, fileGlyphFor } from "./lib/format";
@@ -178,6 +179,8 @@ export default function App() {
   const clipboardCategoryRef = useRef<ClipboardCategory>("all"); clipboardCategoryRef.current = clipboardCategory;
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
+  // 新落入中转站的条目只在本轮渲染中带动画标记；绝不落盘，避免启动恢复或图片补水时误闪。
+  const [newlyAddedStageIds, setNewlyAddedStageIds] = useState<Set<number>>(new Set());
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
   // 启动台不预扫：只记录用户点击过的条目的最近一次存在性结果，且不落盘，避免下次显示陈旧状态。
   const [missingLauncherIds, setMissingLauncherIds] = useState<Set<number>>(new Set());
@@ -616,6 +619,22 @@ export default function App() {
     setStage(list);                                 // 先上屏；落盘成功后 persistStage 自动脱去 image content
     await persistStage(list);
   }, [persistStage]);
+  const markStageItemsNew = useCallback((items: readonly StageItem[]) => {
+    if (!items.length) return;
+    setNewlyAddedStageIds(current => {
+      const next = new Set(current);
+      for (const item of items) next.add(item.id);
+      return next;
+    });
+  }, []);
+  const finishStageItemNewAnimation = useCallback((id: number) => {
+    setNewlyAddedStageIds(current => {
+      if (!current.has(id)) return current;
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  }, []);
   // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
   const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => {
@@ -921,8 +940,8 @@ export default function App() {
             const anchor = stageInsertAnchorForSlot(slot, rects);
             const next = insertStageItemsAtAnchor(stageRef.current, built, anchor, stageMaxRef.current);
             setStage(next);
+            markStageItemsNew(built.filter(item => next.some(candidate => candidate.id === item.id)));
             await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
-            // 续99d：中转区不再播落地闪烁（drop-flash）——卡片冒出即确认，且与缩略图生成窗口重合像闪 bug（染色确认根因）。启动台仍保留（走 .app-grid.drop-flash）。
           }
           setFileDragOver(false);
           // 拖入后回焦点，让 Esc 可用
@@ -1523,9 +1542,11 @@ export default function App() {
       icon = info.icon ?? null;
     } catch {}
     const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
-    saveStage([item, ...stage].slice(0, stageMax));
+    const next = [item, ...stage].slice(0, stageMax);
+    saveStage(next);
+    markStageItemsNew(next.some(candidate => candidate.id === item.id) ? [item] : []);
     return "added"; // 中转区是「置顶 + 截尾」，新项恒在，不会像启动台那样被上限挡在门外
-  }, [stage, saveStage, stageMax]);
+  }, [stage, saveStage, stageMax, markStageItemsNew]);
   const removeStage = useCallback((id:number) => { saveStage(stage.filter(s=>s.id!==id)); }, [stage,saveStage]);
   // ── 中转站失效条目的恢复操作 ──
   const openStageRecovery = useCallback(() => {
@@ -1582,8 +1603,10 @@ export default function App() {
         if (info.icon) item = { ...item, items: [{ ...item.items![0], icon: info.icon }] };
       } catch {}
     }
-    saveStage(insertStageItemAtAnchor(stageRef.current, item, anchor, stageMaxRef.current));
-  }, [saveStage,rememberStageContentFile]);
+    const next = insertStageItemAtAnchor(stageRef.current, item, anchor, stageMaxRef.current);
+    saveStage(next);
+    markStageItemsNew(next.some(candidate => candidate.id === item.id) ? [item] : []);
+  }, [saveStage, rememberStageContentFile, markStageItemsNew]);
   // 清拖拽现场（**不投放**）：卸载 ghost + 复位光标/高亮。
   // 凡非「正常松手」的收尾都必须走这里——热键关页 / Esc / pointercancel / 丢 capture。
   // 续109 bug 根因：hotkey-hide 复位了重排/框选/多选等全部现场，唯独漏了剪贴板拖拽 →
@@ -1715,6 +1738,7 @@ export default function App() {
   }, [removeNativeHandoffGhost]);
   // FLIP 快照 + ghost 建立：与启动台 handleLauncherPointerDown 的 onMove 激活段同构，选择器按当前 stageLayout 决定。
   const startStageReorder = useCallback((id: number, srcEl: HTMLElement, clientX: number, clientY: number) => {
+    if (stageReorderRef.current.active) return;
     const container = dropAreaRef.current;
     const srcIdx = stageRef.current.findIndex(s => s.id === id);
     if (!container || srcIdx === -1) return;
@@ -1762,7 +1786,19 @@ export default function App() {
     ghostHost.appendChild(ghostEl);
     srcEl.classList.add("stage-dragging-src");
     document.getElementById("overlay")?.classList.add("stage-reordering");
-    stageReorderRef.current = { active: true, tiles, rects, ghostEl, srcEl, srcIdx, insertIdx: srcIdx, grabOffsetX, grabOffsetY, lastClientX: clientX, lastClientY: clientY };
+    stageReorderRef.current = {
+      active: true,
+      tiles,
+      rects,
+      ghostEl,
+      srcEl,
+      srcIdx,
+      insertIdx: srcIdx,
+      grabOffsetX,
+      grabOffsetY,
+      lastClientX: clientX,
+      lastClientY: clientY,
+    };
     setStageReorderActiveNative(true); // 告知 Rust：light-dismiss 本阶段让路（热键 monitor 续88 起不再让路）
   }, [stageLayout, setStageReorderActiveNative]);
   const updateStageReorder = useCallback((clientX: number, clientY: number) => {
@@ -1801,37 +1837,36 @@ export default function App() {
   const cancelStageReorder = useCallback(() => {
     const st = stageReorderRef.current;
     if (!st.active) return;
-    st.tiles.forEach(t => { t.style.transform = ""; t.classList.remove("stage-shift"); });
+    // 先占有终止权，防 lostpointercapture / hide 等重入路径重复清理同一批 DOM。
+    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
+    st.tiles.forEach(t => { t.classList.remove("stage-shift"); t.style.transform = ""; });
     st.srcEl?.classList.remove("stage-dragging-src");
     document.getElementById("overlay")?.classList.remove("stage-reordering");
     st.ghostEl?.remove();
-    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
   }, []);
-  // 松手提交：ghost 飞回落点空槽，180ms 落定后统一 commit（同启动台 onUp 收尾节奏）。
+  // 松手提交：真实槽位换序、撤 FLIP transform 和移除 ghost 必须在同一同步任务内完成。
+  // 让视觉动画决定交互可用性会让 transitionend/回调异常永久锁住下一轮拖动；这里不保留异步 settle 阶段。
   const commitStageReorder = useCallback(() => {
     const st = stageReorderRef.current;
     if (!st.active) return;
     const { srcIdx, tiles, ghostEl, srcEl } = st;
     const target = st.insertIdx > srcIdx ? st.insertIdx - 1 : st.insertIdx;
-    const landing = st.rects[target] ?? st.rects[srcIdx];
-    if (ghostEl && landing) {
-      ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
-      ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.04)`;
+    const list = [...stageRef.current];
+    const [moved] = list.splice(srcIdx, 1);
+    if (moved) list.splice(Math.max(0, Math.min(target, list.length)), 0, moved);
+    const unchanged = list.every((item, index) => item.id === stageRef.current[index]?.id);
+    // 先占有终止权并清掉旧 DOM 上的临时状态，再同步提交物理槽位。两步在同一 JS 任务内，浏览器
+    // 不会绘制中间帧；React 也不会在换序后继续携带 opacity:0 / FLIP transform 的旧节点状态。
+    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
+    tiles.forEach(tile => { tile.classList.remove("stage-shift"); tile.style.transform = ""; });
+    srcEl?.classList.remove("stage-dragging-src");
+    document.getElementById("overlay")?.classList.remove("stage-reordering");
+    ghostEl?.remove();
+    try {
+      flushSync(() => { if (!unchanged) void saveStage(list); });
+    } finally {
+      setStageReorderActiveNative(false); // 即使同步提交异常，也不能让 Rust 让路标志永久残留
     }
-    stageReorderRef.current = { ...st, active: false };
-    setStageReorderActiveNative(false); // 重排结束（落定动画只是视觉收尾，与 Rust 让路无关，可立即清）
-    window.setTimeout(() => {
-      tiles.forEach(t => { t.style.transform = ""; t.classList.remove("stage-shift"); });
-      srcEl?.classList.remove("stage-dragging-src");
-      document.getElementById("overlay")?.classList.remove("stage-reordering");
-      ghostEl?.remove();
-      const list = [...stageRef.current];
-      const [moved] = list.splice(srcIdx, 1);
-      const tgt = Math.max(0, Math.min(target, list.length));
-      list.splice(tgt, 0, moved);
-      const unchanged = list.every((x, i) => x.id === stageRef.current[i]?.id);
-      if (!unchanged) saveStage(list); // 位置不变则跳过 I/O
-    }, 180);
   }, [saveStage, setStageReorderActiveNative]);
   // 续143：单项重排松手落点在启动台 → 加入启动台（恢复旧「拖中转项目到启动台」功能——旧靠越界升级为原生 OLE
   // 落到启动台再由 files-dropped 处理，续143 删了越界升级故改在此 JS 落点侧处理）。仅文件/文件夹项（有 path）可入；
@@ -2603,6 +2638,8 @@ export default function App() {
                     pointer={stageItemPointer}
                     highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
                     pageSearchActive={!!deferredSearch.trim()}
+                    newlyAdded={newlyAddedStageIds.has(s.id)}
+                    onNewlyAddedAnimationEnd={finishStageItemNewAnimation}
                   />
                 ))}</div>
               : <div className={`stage-list${stageMultiselect?" stage-multiselect":""}`}>{filteredStage.map((s,idx)=>(
@@ -2622,6 +2659,8 @@ export default function App() {
                     pointer={stageItemPointer}
                     highlightRanges={stagePageSearch.highlights.get(s.id) ?? []}
                     pageSearchActive={!!deferredSearch.trim()}
+                    newlyAdded={newlyAddedStageIds.has(s.id)}
+                    onNewlyAddedAnimationEnd={finishStageItemNewAnimation}
                   />
                 ))}</div>
             ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
