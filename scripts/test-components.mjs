@@ -188,6 +188,27 @@ const settingsHtml = renderToStaticMarkup(createElement(SettingsDialog, {
 }));
 check("设置弹层保留导航、面板和版本信息", settingsHtml.includes('class="settings-nav"') && settingsHtml.includes('class="settings-panel"') && settingsHtml.includes("Workbench <b>v0.23.0</b>"), settingsHtml);
 
+const stageSettingsHtml = renderToStaticMarkup(createElement(SettingsDialog, {
+  tab: "stage",
+  version: "0.23.0",
+  t,
+  general: { lang: "zh" },
+  launcher: {},
+  stage: {
+    layout: "grid", count: 1, max: 20, missingCount: 0,
+    dragoutAutoClose: true, persist: false, showShortcuts: true,
+    thumbnailCacheCleared: false,
+    onChangeLayout: noop, onClear: noop, onOpenRecovery: noop, onCleanupMissing: noop,
+    onChangeMax: noop, onChangeDragoutAutoClose: noop,
+    onChangePersist: noop, onChangeShowShortcuts: noop,
+    onOpenThumbnailDirectory: noop, onClearThumbnailCache: noop,
+  },
+  clipboard: {}, search: {}, hotkeys: {},
+  onTabChange: noop,
+  onClose: noop,
+}));
+check("中转设置移除已无分支意义的拖出样式开关", !stageSettingsHtml.includes("卡片式拖动悬浮") && stageSettingsHtml.includes("拖出后自动关闭"), stageSettingsHtml);
+
 const pickerHtml = renderToStaticMarkup(createElement(LauncherPickerDialog, {
   query: "cal",
   inputRef: { current: null },
