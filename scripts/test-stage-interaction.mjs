@@ -19,6 +19,21 @@ try {
   assert.equal(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1]), missingIds: new Set(), autoClose: true, searchActive: false }).kind, "native");
   assert.equal(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1, 2]), missingIds: new Set(), autoClose: false, searchActive: false }).kind, "native");
   assert.equal(domain.resolveStageDragRoute({ itemId: 1, selectedIds: new Set([1]), missingIds: new Set([1]), autoClose: false, searchActive: false }).kind, "cancel");
+  assert.deepEqual(domain.clampPointToRect({ x: -20, y: 140 }, rect), { x: 0, y: 100 });
+  assert.deepEqual(domain.clampPointToRect({ x: 50, y: 60 }, rect), { x: 50, y: 60 });
+  const gridRects = [
+    { id: 1, left: 0, top: 0, right: 40, bottom: 50 },
+    { id: 2, left: 50, top: 0, right: 90, bottom: 50 },
+    { id: 3, left: 0, top: 60, right: 40, bottom: 110 },
+  ];
+  assert.equal(domain.resolveStageInsertSlot({ x: 5, y: 25 }, gridRects, "grid"), 0);
+  assert.equal(domain.resolveStageInsertSlot({ x: 48, y: 25 }, gridRects, "grid"), 1);
+  assert.equal(domain.resolveStageInsertSlot({ x: 80, y: 90 }, gridRects, "grid"), 3);
+  assert.deepEqual(domain.stageInsertAnchorForSlot(1, gridRects), { beforeId: 2 });
+  assert.deepEqual(domain.stageInsertAnchorForSlot(3, gridRects), { afterId: 3 });
+  assert.deepEqual(domain.insertStageItemAtAnchor([{ id: 1 }, { id: 2 }, { id: 3 }], { id: 9 }, { beforeId: 2 }, 3), [{ id: 1 }, { id: 9 }, { id: 2 }]);
+  assert.deepEqual(domain.insertStageItemAtAnchor([{ id: 1 }, { id: 2 }, { id: 3 }], { id: 9 }, { afterId: 3 }, 3), [{ id: 1 }, { id: 2 }, { id: 9 }]);
+  assert.deepEqual(domain.insertStageItemsAtAnchor([{ id: 1 }, { id: 2 }, { id: 3 }], [{ id: 8 }, { id: 9 }], { beforeId: 2 }, 4), [{ id: 1 }, { id: 8 }, { id: 9 }, { id: 2 }]);
   assert.deepEqual([...domain.selectLassoIds({ x: 0, y: 0 }, { x: 20, y: 20 }, [{ id: 1, left: 10, top: 10, right: 30, bottom: 30 }, { id: 2, left: 40, top: 40, right: 50, bottom: 50 }])], [1]);
   assert.equal(domain.resolveStageRelease({ mode: "reorder", overLauncher: true, itemType: "image" }), "drop-launcher");
   assert.equal(domain.resolveStageRelease({ mode: "reorder", overLauncher: true, itemType: "text" }), "reject-launcher");
@@ -27,4 +42,3 @@ try {
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
-

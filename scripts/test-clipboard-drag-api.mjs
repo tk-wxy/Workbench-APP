@@ -14,7 +14,12 @@ try {
   const { createClipboardDragApi } = await import(pathToFileURL(output));
   const calls = [];
   const api = createClipboardDragApi((command, args) => calls.push({ command, args }));
-  const item = { type: "image", content: null, items: null, orig_path: "x.png", time: 42 };
+  const item = {
+    type: "image", content: null, items: null, orig_path: "x.png", time: 42,
+    drag_preview: "data:image/png;base64,thumb",
+    drag_label: "x.png", drag_meta: "图片", drag_preview_kind: "cover",
+    drag_hotspot_x: 18, drag_hotspot_y: 21, drag_theme: "dark", drag_dpr: 2, drag_session_id: 1001,
+  };
   api.setActive(true);
   api.start(item);
   assert.deepEqual(calls, [
@@ -25,4 +30,3 @@ try {
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
-

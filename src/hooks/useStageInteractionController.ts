@@ -1,8 +1,9 @@
-import { useCallback, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { makeT } from "../i18n";
 import {
   LASSO_THRESHOLD_PX,
   beginStageInteraction,
+  clampPointToRect,
   finishStageInteraction,
   hasReachedStageThreshold,
   resolveCardDragIntent,
@@ -42,7 +43,7 @@ type StageInteractionOptions = {
   cancelReorder: () => void;
   reorderActive: () => boolean;
   setNativeReorderActive: (active: boolean) => void;
-  beginNativeDragOut: (ids: number[], forceHide?: boolean) => void;
+  beginNativeDragOut: (ids: number[], forceHide?: boolean, point?: { x: number; y: number }, sourceElement?: HTMLElement) => void;
   dropToLauncher: (item: StageItem) => Promise<void>;
   showToast: (message: string) => void;
   t: ReturnType<typeof makeT>;
@@ -59,10 +60,32 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   } = options;
   const [lasso, setLasso] = useState<StageLassoState>(emptyLasso);
   const lassoRef = useRef(lasso);
-  lassoRef.current = lasso;
   const lassoArmedRef = useRef(false);
   const lassoRectsRef = useRef<LassoRect[]>([]);
+  const lassoVisualRef = useRef<HTMLDivElement | null>(null);
   const suppressClickRef = useRef(false);
+
+  const clampLassoPoint = useCallback((point: { x: number; y: number }) => {
+    const rect = dropAreaRef.current?.getBoundingClientRect();
+    return rect ? clampPointToRect(point, rect) : point;
+  }, [dropAreaRef]);
+
+  const paintLasso = useCallback((origin: { x: number; y: number }, current: { x: number; y: number }) => {
+    const element = lassoVisualRef.current;
+    if (!element) return;
+    const start = clampLassoPoint(origin);
+    const end = clampLassoPoint(current);
+    Object.assign(element.style, {
+      left: `${Math.min(start.x, end.x)}px`,
+      top: `${Math.min(start.y, end.y)}px`,
+      width: `${Math.abs(end.x - start.x)}px`,
+      height: `${Math.abs(end.y - start.y)}px`,
+    });
+  }, [clampLassoPoint]);
+
+  useLayoutEffect(() => {
+    if (lasso.active) paintLasso(lasso.origin, lasso.current);
+  }, [lasso.active, lasso.current, lasso.origin, paintLasso]);
 
   const snapshotLassoRects = useCallback(() => {
     const rects: LassoRect[] = [];
@@ -76,13 +99,14 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   }, [dropAreaRef, stageLayout]);
 
   const computeLassoSelection = useCallback((origin: { x: number; y: number }, current: { x: number; y: number }) => {
-    const selected = selectLassoIds(origin, current, lassoRectsRef.current);
+    const selected = selectLassoIds(clampLassoPoint(origin), clampLassoPoint(current), lassoRectsRef.current);
     setSelected(previous => sameIdSet(previous, selected) ? previous : selected);
-  }, [setSelected]);
+  }, [clampLassoPoint, setSelected]);
 
   const cancelLasso = useCallback(() => {
     lassoArmedRef.current = false;
     dropAreaRef.current?.classList.remove("lasso-active");
+    lassoRef.current = { ...lassoRef.current, active: false };
     setLasso(state => state.active ? { ...state, active: false } : state);
   }, [dropAreaRef]);
 
@@ -92,7 +116,9 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       setNativeReorderActive(false);
     }
     interactionRef.current = finishStageInteraction(interactionRef.current);
-    setLasso(emptyLasso());
+    const next = emptyLasso();
+    lassoRef.current = next;
+    setLasso(next);
     lassoArmedRef.current = false;
     dropAreaRef.current?.classList.remove("lasso-active");
   }, [cancelReorder, dropAreaRef, interactionRef, reorderActive, setNativeReorderActive]);
@@ -112,7 +138,9 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     if (clipDragActive()) return;
     if ((event.target as Element).closest(".stage-item,.stage-card,.stage-multi-toolbar,.stage-batch-bar,button")) return;
     lassoArmedRef.current = true;
-    setLasso({ active: false, origin: { x: event.clientX, y: event.clientY }, current: { x: event.clientX, y: event.clientY } });
+    const next = { active: false, origin: { x: event.clientX, y: event.clientY }, current: { x: event.clientX, y: event.clientY } };
+    lassoRef.current = next;
+    setLasso(next);
     (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
   }, [clipDragActive]);
 
@@ -123,15 +151,18 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     if (!state.active) {
       if (Math.hypot(current.x - state.origin.x, current.y - state.origin.y) <= LASSO_THRESHOLD_PX) return;
       dropAreaRef.current?.classList.add("lasso-active");
-      setLasso({ ...state, active: true, current });
+      const next = { ...state, active: true, current };
+      lassoRef.current = next;
+      setLasso(next);
       setMultiselect(true);
       snapshotLassoRects();
       computeLassoSelection(state.origin, current);
       return;
     }
-    setLasso({ ...state, current });
+    lassoRef.current = { ...state, current };
+    paintLasso(state.origin, current);
     computeLassoSelection(state.origin, current);
-  }, [computeLassoSelection, dropAreaRef, setMultiselect, snapshotLassoRects]);
+  }, [computeLassoSelection, dropAreaRef, paintLasso, setMultiselect, snapshotLassoRects]);
 
   const lassoPointerUp = useCallback((event: ReactPointerEvent) => {
     if (!lassoArmedRef.current) return;
@@ -146,6 +177,7 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       return;
     }
     dropAreaRef.current?.classList.remove("lasso-active");
+    lassoRef.current = { ...lassoRef.current, active: false };
     setLasso(state => ({ ...state, active: false }));
     if (!selectedRef.current.size) setMultiselect(false);
   }, [anchorRef, dropAreaRef, multiselectRef, selectedRef, setMultiselect, setSelected]);
@@ -178,7 +210,9 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       suppressClickRef.current = true;
       if (intent.lasso) {
         interaction.mode = "lasso";
-        setLasso({ active: true, origin: interaction.origin, current });
+        const next = { active: true, origin: interaction.origin, current };
+        lassoRef.current = next;
+        setLasso(next);
         dropAreaRef.current?.classList.add("lasso-active");
         setMultiselect(true);
         snapshotLassoRects();
@@ -197,7 +231,7 @@ export function useStageInteractionController(options: StageInteractionOptions) 
         interactionRef.current.itemId = null;
       } else if (route.kind === "native") {
         interaction.mode = "native";
-        beginNativeDragOut(route.ids);
+        beginNativeDragOut(route.ids, false, current, event.currentTarget as HTMLElement);
       } else {
         interaction.mode = "reorder";
         startReorder(itemId, event.currentTarget as HTMLElement, event.clientX, event.clientY);
@@ -206,12 +240,13 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     }
     if (interaction.mode === "lasso") {
       const current = { x: event.clientX, y: event.clientY };
-      setLasso(state => ({ ...state, current }));
+      lassoRef.current = { ...lassoRef.current, current };
+      paintLasso(interaction.origin, current);
       computeLassoSelection(interaction.origin, current);
     } else if (interaction.mode === "reorder") {
       updateReorder(event.clientX, event.clientY);
     }
-  }, [autoClose, beginNativeDragOut, computeLassoSelection, dropAreaRef, interactionRef, missingIdsRef, multiselectRef, searchActive, selectedRef, setMultiselect, snapshotLassoRects, startReorder, updateReorder]);
+  }, [autoClose, beginNativeDragOut, computeLassoSelection, dropAreaRef, interactionRef, missingIdsRef, multiselectRef, paintLasso, searchActive, selectedRef, setMultiselect, snapshotLassoRects, startReorder, updateReorder]);
 
   const itemPointerUp = useCallback((event: ReactPointerEvent) => {
     try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch {}
@@ -259,6 +294,7 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   return {
     lasso,
     lassoRef,
+    lassoVisualRef,
     suppressClickRef,
     cancelLasso,
     resetForHide,

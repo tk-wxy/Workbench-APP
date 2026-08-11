@@ -6,6 +6,15 @@ export type NativeClipboardDragItem = {
   items: string[] | null;
   orig_path: string | null;
   time: number;
+  drag_preview: string | null;
+  drag_label: string;
+  drag_meta: string;
+  drag_preview_kind: "cover" | "icon";
+  drag_hotspot_x: number;
+  drag_hotspot_y: number;
+  drag_theme: "dark" | "light";
+  drag_dpr: number;
+  drag_session_id: number;
 };
 
 export type ClipboardDragDispatch = (command: string, args: Record<string, unknown>) => void;
@@ -16,7 +25,7 @@ export function createClipboardDragApi(dispatch: ClipboardDragDispatch) {
       dispatch("set_clip_drag_active", { active });
     },
     start(item: NativeClipboardDragItem) {
-      dispatch("start_drag_out", { items: [item], forceHide: true });
+      return dispatch("start_drag_out", { items: [item], forceHide: true });
     },
   };
 }
@@ -28,8 +37,8 @@ export const clipboardDragApi = {
       .catch(() => {});
   },
   start(item: NativeClipboardDragItem) {
-    import("@tauri-apps/api/core")
+    return import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("start_drag_out", { items: [item], forceHide: true }))
-      .catch(() => {});
+      .then(() => undefined);
   },
 };

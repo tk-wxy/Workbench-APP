@@ -10,23 +10,38 @@
 //! target 却收不到回调、破坏正常拖入。本应用 webview 跨 hide/show 不销毁、无导航、release 无 devtools，
 //! render host 整会话稳定，一次注册足够。代价：渲染进程崩溃重建（极罕见）后拖入失效到重启，可接受。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, Manager};
 use windows::core::{implement, Result};
-use windows::Win32::Foundation::{HWND, POINTL, LPARAM, BOOL, TRUE, S_OK};
-use windows::Win32::System::Com::{IDataObject, FORMATETC, STGMEDIUM, TYMED_HGLOBAL, DVASPECT_CONTENT};
+use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINTL, S_OK, TRUE};
+use windows::Win32::System::Com::{
+    IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
+};
 use windows::Win32::System::Ole::{
-    OleInitialize, RegisterDragDrop, RevokeDragDrop, ReleaseStgMedium,
-    IDropTarget, IDropTarget_Impl, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
+    IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
+    RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
 };
 use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
 use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW};
-use tauri::{AppHandle, Emitter, Manager};
 
 const CF_HDROP_FMT: u16 = 15;
+// DragOver 由 OLE 高频回调；插入标记只需接近一帧的响应。限制为约 31Hz，避免把主线程拖拽泵
+// 变成 WebView 事件洪泛。Drop 自带最终坐标，故节流只影响预览，不影响落点正确性。
+const DRAG_OVER_EMIT_INTERVAL: Duration = Duration::from_millis(32);
 
 #[derive(serde::Serialize, Clone)]
 struct FilesDroppedPayload {
     paths: Vec<String>,
+    x: i32,
+    y: i32,
+}
+
+#[derive(serde::Serialize, Clone, Copy)]
+struct FileDragPointPayload {
     x: i32,
     y: i32,
 }
@@ -42,19 +57,61 @@ extern "system" {
 struct FileDropTarget {
     app: AppHandle,
     accept: AtomicBool, // DragEnter 判定结果，供无 IDataObject 的 DragOver 复用以保持正确光标
+    last_over_emit: Mutex<Option<Instant>>,
+}
+
+impl FileDropTarget {
+    fn emit_drag_over(&self, pt: &POINTL, force: bool) {
+        let now = Instant::now();
+        let should_emit = self
+            .last_over_emit
+            .lock()
+            .map(|mut last| {
+                let ready = force
+                    || last.is_none_or(|at| now.duration_since(at) >= DRAG_OVER_EMIT_INTERVAL);
+                if ready {
+                    *last = Some(now);
+                }
+                ready
+            })
+            .unwrap_or(false);
+        if should_emit {
+            let _ = self
+                .app
+                .emit("file-drag-over", FileDragPointPayload { x: pt.x, y: pt.y });
+        }
+    }
 }
 
 impl IDropTarget_Impl for FileDropTarget_Impl {
-    fn DragEnter(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, _pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
+    fn DragEnter(
+        &self,
+        p_data_obj: Option<&IDataObject>,
+        _grf: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
         let has = has_cf_hdrop(p_data_obj);
         self.accept.store(has, Ordering::Relaxed);
         // 每次进入（含 HWND 切换）都 emit；前端用防抖过滤 HWND 间快速 leave-enter
-        if has { let _ = self.app.emit("file-drag-enter", ()); }
+        if has {
+            let _ = self.app.emit("file-drag-enter", ());
+            self.emit_drag_over(pt, true);
+        }
         set_effect(pdweffect, has);
         Ok(())
     }
-    fn DragOver(&self, _grf: MODIFIERKEYS_FLAGS, _pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
-        set_effect(pdweffect, self.accept.load(Ordering::Relaxed));
+    fn DragOver(
+        &self,
+        _grf: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        let accept = self.accept.load(Ordering::Relaxed);
+        if accept {
+            self.emit_drag_over(pt, false);
+        }
+        set_effect(pdweffect, accept);
         Ok(())
     }
     fn DragLeave(&self) -> Result<()> {
@@ -62,15 +119,35 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         let _ = self.app.emit("file-drag-leave", ());
         Ok(())
     }
-    fn Drop(&self, p_data_obj: Option<&IDataObject>, _grf: MODIFIERKEYS_FLAGS, pt: &POINTL, pdweffect: *mut DROPEFFECT) -> Result<()> {
+    fn Drop(
+        &self,
+        p_data_obj: Option<&IDataObject>,
+        _grf: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        pdweffect: *mut DROPEFFECT,
+    ) -> Result<()> {
         // handler 极简：取路径 + emit + 返回。不碰剪贴板 / 不 hide / 不阻塞。
         // pt 是屏幕物理像素坐标（Windows POINTL），前端需 ÷ devicePixelRatio 换算 CSS px。
         let paths = p_data_obj.map(extract_paths).unwrap_or_default();
-        println!("[dragdrop] Drop {} path(s) at ({}, {})", paths.len(), pt.x, pt.y);
+        println!(
+            "[dragdrop] Drop {} path(s) at ({}, {})",
+            paths.len(),
+            pt.x,
+            pt.y
+        );
         let accept = !paths.is_empty();
         // Drop 是终态，OLE 不再调 DragLeave，主动通知前端清除高亮
         let _ = self.app.emit("file-drag-leave", ());
-        if accept { let _ = self.app.emit("files-dropped", FilesDroppedPayload { paths, x: pt.x, y: pt.y }); }
+        if accept {
+            let _ = self.app.emit(
+                "files-dropped",
+                FilesDroppedPayload {
+                    paths,
+                    x: pt.x,
+                    y: pt.y,
+                },
+            );
+        }
         self.accept.store(false, Ordering::Relaxed);
         set_effect(pdweffect, accept);
         Ok(())
@@ -79,7 +156,15 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
 
 /// 设置 pdwEffect 出参（光标反馈）：可接收→COPY，否则→NONE
 fn set_effect(pdweffect: *mut DROPEFFECT, accept: bool) {
-    unsafe { if !pdweffect.is_null() { *pdweffect = if accept { DROPEFFECT_COPY } else { DROPEFFECT_NONE }; } }
+    unsafe {
+        if !pdweffect.is_null() {
+            *pdweffect = if accept {
+                DROPEFFECT_COPY
+            } else {
+                DROPEFFECT_NONE
+            };
+        }
+    }
 }
 
 fn hdrop_format() -> FORMATETC {
@@ -93,7 +178,9 @@ fn hdrop_format() -> FORMATETC {
 }
 
 fn has_cf_hdrop(obj: Option<&IDataObject>) -> bool {
-    let Some(obj) = obj else { return false; };
+    let Some(obj) = obj else {
+        return false;
+    };
     unsafe { obj.QueryGetData(&hdrop_format()) == S_OK }
 }
 
@@ -117,7 +204,9 @@ unsafe fn paths_from_stgmedium(medium: &STGMEDIUM) -> Vec<String> {
     for i in 0..count {
         let mut buf = [0u16; 520];
         let n = DragQueryFileW(h_drop, i, buf.as_mut_ptr(), buf.len() as u32);
-        if n > 0 { out.push(String::from_utf16_lossy(&buf[..n as usize])); }
+        if n > 0 {
+            out.push(String::from_utf16_lossy(&buf[..n as usize]));
+        }
     }
     out
 }
@@ -136,22 +225,45 @@ unsafe extern "system" fn enum_child(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
 /// 在「顶层 + 全部子孙窗」上幂等注册（先 Revoke 再 Register）。必须在已 OleInitialize 的主线程调用。
 fn do_register(app: &AppHandle) {
-    let window = match app.get_webview_window("main") { Some(w) => w, None => return };
-    let top: HWND = match window.hwnd() { Ok(h) => HWND(h.0 as *mut _), Err(_) => return };
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => return,
+    };
+    let top: HWND = match window.hwnd() {
+        Ok(h) => HWND(h.0 as *mut _),
+        Err(_) => return,
+    };
 
     let mut targets: Vec<HWND> = vec![top];
-    unsafe { let _ = EnumChildWindows(top, Some(enum_child), LPARAM(&mut targets as *mut _ as isize)); }
+    unsafe {
+        let _ = EnumChildWindows(
+            top,
+            Some(enum_child),
+            LPARAM(&mut targets as *mut _ as isize),
+        );
+    }
 
     // 单个共享 target 注册到所有 HWND（各 AddRef）；本地 ref 在函数末尾 drop，OLE 持有至下次 Revoke。
-    let target: IDropTarget = FileDropTarget { app: app.clone(), accept: AtomicBool::new(false) }.into();
+    let target: IDropTarget = FileDropTarget {
+        app: app.clone(),
+        accept: AtomicBool::new(false),
+        last_over_emit: Mutex::new(None),
+    }
+    .into();
     let mut ok = 0;
     for h in &targets {
         unsafe {
             let _ = RevokeDragDrop(*h); // 清旧注册（未注册会报错，忽略）→ 幂等
-            if RegisterDragDrop(*h, &target).is_ok() { ok += 1; }
+            if RegisterDragDrop(*h, &target).is_ok() {
+                ok += 1;
+            }
         }
     }
-    println!("[dragdrop] registered on {ok}/{} window(s) (top class=[{}])", targets.len(), class_of(top));
+    println!(
+        "[dragdrop] registered on {ok}/{} window(s) (top class=[{}])",
+        targets.len(),
+        class_of(top)
+    );
 }
 
 /// setup 阶段调用（主线程）：OleInitialize（RegisterDragDrop 要求之，仅 CoInitializeEx 会
