@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IMG_EXTS } from "../lib/format";
+import { isThumbnailImageFile } from "../lib/format";
 import type { ClipItem, LauncherItem, StageItem } from "../types";
 
 const STAGE_IMAGE_THUMB_PREFIX = "simg:";
@@ -11,7 +11,7 @@ export function collectStageThumbnailKeys(stage: StageItem[], launcher: Launcher
     .filter(item => item.type === "file" && item.items?.[0]?.isImage && item.items?.[0]?.path)
     .map(item => item.items![0].path);
   const launcherPaths = launcher
-    .filter(item => item.kind === "file" && !!item.ext && IMG_EXTS.includes(item.ext.toLowerCase()))
+    .filter(item => item.kind === "file" && isThumbnailImageFile(item.ext, item.path))
     .map(item => item.path);
   const stageImageKeys = stage
     .filter(item => item.type === "image" && item.contentFile)
