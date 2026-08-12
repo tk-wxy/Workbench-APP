@@ -7,6 +7,27 @@ type TFunc = ReturnType<typeof makeT>;
 // 视为图片的扩展名（中转条目 / 搜索结果的 isImage 判定共用）
 export const IMG_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"];
 
+// Formats the native thumbnail worker can decode with the deliberately trimmed `image` crate
+// feature set. Keep this separate from IMG_EXTS: SVG is an image for glyph/search purposes, but
+// it cannot be sent to the raster thumbnail worker.
+export const THUMBNAIL_IMAGE_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "ico", "tif", "tiff"];
+
+export function isThumbnailImageExtension(value: string | null | undefined) {
+  const ext = (value ?? "").trim().toLowerCase().replace(/^\.+/, "");
+  return THUMBNAIL_IMAGE_EXTS.includes(ext);
+}
+
+// `ext` is optional in persisted launcher layouts and was absent from older saved launcher
+// entries. Resolve it from the path as a compatibility fallback so old PNG/JPEG items enter the
+// same thumbnail pipeline as newly added files. A leading dot is accepted for imported layouts.
+export function isThumbnailImageFile(ext: string | null | undefined, path: string) {
+  if (isThumbnailImageExtension(ext)) return true;
+  const cleanPath = path.split(/[?#]/, 1)[0];
+  const basename = cleanPath.slice(Math.max(cleanPath.lastIndexOf("/"), cleanPath.lastIndexOf("\\")) + 1);
+  const dot = basename.lastIndexOf(".");
+  return dot > 0 && isThumbnailImageExtension(basename.slice(dot + 1));
+}
+
 export type FileGlyphArgs = { cat?: FileCat; ext?: string; isDir?: boolean; isImage?: boolean };
 
 // Clipboard item → the minimal FileGlyph input shared by list, search and drag ghost views.

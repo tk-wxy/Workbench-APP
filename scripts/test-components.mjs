@@ -63,6 +63,22 @@ const launcherHtml = renderToStaticMarkup(createElement(LauncherPanel, {
 check("启动台保留 app-grid / app-tile 选择器", launcherHtml.includes('class="app-grid"') && launcherHtml.includes("app-tile selected launcher-missing"), launcherHtml);
 check("启动台图片文件只渲染传入缩略图", launcherHtml.includes('class="app-tile-thumb"') && launcherHtml.includes("base64,thumb"), launcherHtml);
 check("启动台名称保留关键词高亮", launcherHtml.includes("search-highlight") && launcherHtml.includes(">photo</span>.png"), launcherHtml);
+const legacyLauncherHtml = renderToStaticMarkup(createElement(LauncherPanel, {
+  items: [{ id: 2, kind: "file", name: "legacy.png", path: "C:/legacy.png" }],
+  totalCount: 1,
+  search: "",
+  selectedIndex: -1,
+  missingIds: new Set(),
+  thumbnails: { "C:/legacy.png": "data:image/png;base64,legacy-thumb" },
+  t,
+  onOpenManager: noop,
+  onOpenPicker: noop,
+  onOpenItem: noop,
+  onOpenContextMenu: noop,
+  onPointerDown: noop,
+  highlights: new Map(),
+}));
+check("旧启动台 PNG 缺少 ext 时仍显示已生成缩略图", legacyLauncherHtml.includes('class="app-tile-thumb"') && legacyLauncherHtml.includes("base64,legacy-thumb"), legacyLauncherHtml);
 
 const clipItem = { type: "image", time: 7, orig_degraded: true };
 const clipboardHtml = renderToStaticMarkup(createElement(ClipboardPanel, {

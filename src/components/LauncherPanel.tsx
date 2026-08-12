@@ -1,5 +1,5 @@
 import { forwardRef, memo, type MouseEvent, type PointerEvent } from "react";
-import { IMG_EXTS } from "../lib/format";
+import { isThumbnailImageFile } from "../lib/format";
 import type { TextRange } from "../domain/pageSearchPresentation";
 import HighlightText from "./HighlightText";
 import { FileGlyph, IconRocket, IconWarn } from "../icons";
@@ -31,8 +31,7 @@ const LauncherTile = memo(function LauncherTile({
   highlightRanges,
 }: LauncherTileProps) {
   const imageThumbnail = item.kind === "file"
-    && !!item.ext
-    && IMG_EXTS.includes(item.ext.toLowerCase())
+    && isThumbnailImageFile(item.ext, item.path)
     && thumbnail;
 
   return (
