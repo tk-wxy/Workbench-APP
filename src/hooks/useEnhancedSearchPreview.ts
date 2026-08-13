@@ -253,7 +253,11 @@ export function useEnhancedSearchPreview({
         photo = isPhoto(item.ext, item.isDir);
         if (path) addFileFacts(path, item.isDir, item.ext);
       }
-      if (item.pinned) pushRow(t("状态"), t("已固定"));
+      if (item.colorTag) {
+        const color = item.colorTag === "red" ? t("红色")
+          : item.colorTag === "yellow" ? t("黄色") : t("蓝色");
+        pushRow(t("颜色标记"), color);
+      }
     } else {
       const item = result.item;
       const path = item.items?.[0]?.path;

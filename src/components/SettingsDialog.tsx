@@ -234,7 +234,7 @@ export default function SettingsDialog({
                   <button className={`seg-btn${!stage.dragoutAutoClose ? " seg-active" : ""}`} onClick={() => stage.onChangeDragoutAutoClose(false)}>{general.lang === "en" ? "Off" : "关闭"}</button>
                 </div>
               </div>
-              <p className="settings-hint">{t("中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。")}</p>
+              <p className="settings-hint">{t("中转站存放手动加入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。")}</p>
               <div className="settings-row">
                 <span className="settings-row-label">{t("持久化")}</span>
                 <div className="seg">

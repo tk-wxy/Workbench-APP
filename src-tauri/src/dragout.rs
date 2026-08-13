@@ -288,6 +288,8 @@ pub struct DragOutItem {
     pub drag_label: Option<String>,
     pub drag_meta: Option<String>,
     pub drag_preview_kind: Option<String>,
+    /// 用户在中转站手动设置的颜色标记。只影响卡片预览，不参与 OLE 数据或保留语义。
+    pub drag_color_tag: Option<String>,
     pub drag_hotspot_x: Option<f64>,
     pub drag_hotspot_y: Option<f64>,
     pub drag_theme: Option<String>,
@@ -1835,6 +1837,48 @@ fn fill_drag_card_rect(
     }
 }
 
+fn drag_color_tag_rgba(tag: Option<&str>, light: bool) -> Option<[u8; 4]> {
+    let rgb = match (tag?, light) {
+        ("red", false) => [255, 107, 107],
+        ("yellow", false) => [255, 212, 59],
+        ("blue", false) => [77, 171, 247],
+        ("red", true) => [201, 42, 42],
+        ("yellow", true) => [166, 111, 0],
+        ("blue", true) => [24, 100, 171],
+        _ => return None,
+    };
+    Some([rgb[0], rgb[1], rgb[2], 255])
+}
+
+fn draw_drag_color_marker(
+    canvas: &mut image::RgbaImage,
+    left: i32,
+    top: i32,
+    size: i32,
+    fill: Option<[u8; 4]>,
+    outline: [u8; 4],
+) {
+    let radius = size as f32 / 2.0;
+    let inner_radius = (radius - (size as f32 * 0.18).max(1.0)).max(0.0);
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x as f32 + 0.5 - radius;
+            let dy = y as f32 + 0.5 - radius;
+            let distance_squared = dx * dx + dy * dy;
+            if distance_squared > radius * radius
+                || (fill.is_none() && distance_squared < inner_radius * inner_radius)
+            {
+                continue;
+            }
+            let px = left + x;
+            let py = top + y;
+            if px >= 0 && py >= 0 && px < canvas.width() as i32 && py < canvas.height() as i32 {
+                canvas.put_pixel(px as u32, py as u32, image::Rgba(fill.unwrap_or(outline)));
+            }
+        }
+    }
+}
+
 /// 前端页内 ghost 直接复用中转方格卡片；这里按同一 72×94 CSS px 结构栅格化，
 /// 交给独立分层窗跨过 source HWND 隐藏边界。缺图只在卡片缩略图区画类型色占位。
 fn build_drag_preview(items: &[DragOutItem]) -> Option<DragPreview> {
@@ -2006,20 +2050,17 @@ fn build_drag_preview(items: &[DragOutItem]) -> Option<DragPreview> {
     for x in card_left as u32..card_left as u32 + card_width {
         canvas.put_pixel(x, separator_y, image::Rgba(border_color));
     }
-    let dot_size = (6.0 * scale).round().max(2.0) as i32;
-    let dot_color = match first.r#type.as_str() {
-        "image" => [212, 83, 126, 255],
-        "text" => [99, 153, 34, 255],
-        _ => [55, 138, 221, 255],
-    };
-    fill_drag_card_rect(
+    let dot_size = (8.0 * scale).round().max(3.0) as i32;
+    let dot_left = card_left + card_width as i32 - (10.0 * scale).round() as i32;
+    let dot_top = card_top + (7.0 * scale).round() as i32;
+    let dot_color = drag_color_tag_rgba(first.drag_color_tag.as_deref(), light);
+    draw_drag_color_marker(
         &mut canvas,
-        card_left + card_width as i32 - (7.0 * scale).round() as i32,
-        card_top + (5.0 * scale).round() as i32,
+        dot_left,
+        dot_top,
         dot_size,
-        dot_size,
-        dot_size / 2,
-        image::Rgba(dot_color),
+        dot_color,
+        if light { [0, 0, 0, 92] } else { [255, 255, 255, 92] },
     );
 
     let mut bgra = Vec::with_capacity((width * height * 4) as usize);
@@ -2608,12 +2649,21 @@ mod tests {
             drag_label: None,
             drag_meta: None,
             drag_preview_kind: None,
+            drag_color_tag: None,
             drag_hotspot_x: None,
             drag_hotspot_y: None,
             drag_theme: None,
             drag_dpr: None,
             drag_session_id: None,
         }
+    }
+
+    #[test]
+    fn manual_drag_color_tags_match_both_theme_palettes_and_reject_unknown_values() {
+        assert_eq!(drag_color_tag_rgba(Some("red"), false), Some([255, 107, 107, 255]));
+        assert_eq!(drag_color_tag_rgba(Some("blue"), true), Some([24, 100, 171, 255]));
+        assert_eq!(drag_color_tag_rgba(None, false), None);
+        assert_eq!(drag_color_tag_rgba(Some("cyan"), false), None);
     }
 
     fn tracked_drag_image_options(

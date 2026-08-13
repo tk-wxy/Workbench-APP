@@ -60,7 +60,7 @@ export interface StageItem {
   isDir?: boolean;
   size?: number;
   orig_path?: string;
-  pinned?: boolean;
+  colorTag?: import("./domain/stageColorTag").StageColorTag;
 }
 
 // ClipItem and StageItem deliberately share this action-facing shape.

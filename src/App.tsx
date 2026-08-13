@@ -20,6 +20,7 @@ import { appUsageScore } from "./domain/appUsage";
 import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
+import { normalizeStageItemAppearance, setStageItemsColorTag, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
 import {
   buildNativeDragLabel,
   buildNativeDragMeta,
@@ -168,7 +169,17 @@ async function writeItemToClipboard(item: Pasteable) {
 
 // 自定义右键菜单（浮层）
 type CtxMenuItem = { label: string; action: () => void; disabled?: boolean };
-type CtxMenu = { x: number; y: number; items: CtxMenuItem[] } | null;
+type ActionCtxMenu = { kind: "actions"; x: number; y: number; items: CtxMenuItem[] };
+type ColorCtxMenu = { kind: "colors"; x: number; y: number; ids: number[]; selected: StageColorTag | null; mixed: boolean };
+type CtxMenu = ActionCtxMenu | ColorCtxMenu | null;
+
+function stageColorLabel(tag: StageColorTag, t: ReturnType<typeof makeT>) {
+  switch (tag) {
+    case "red": return t("红色");
+    case "yellow": return t("黄色");
+    case "blue": return t("蓝色");
+  }
+}
 
 const SHORTCUTS = [
   { l: "文件管理器", Icon: IconExplorer,   a: "explorer.exe"    },
@@ -529,7 +540,7 @@ export default function App() {
         await runStartupStep("加载中转站", async () => {
           const savedStage = await s.get<StageItem[]>("stage-items");
           if (savedStage && savedStage.length) {
-            let loaded = savedStage.slice(0, stageMaxLoaded);
+            let loaded = savedStage.slice(0, stageMaxLoaded).map(normalizeStageItemAppearance);
             // image content 不再启动补水：只校验 contentFile 仍存在，动作时按需读取。
             if (loaded.some(it => it.contentFile)) {
               await runStartupStep("校验中转图片引用", async () => {
@@ -653,8 +664,10 @@ export default function App() {
       return next;
     });
   }, []);
-  // 中转条目「固定/保留」开关（续99）：点亮后拖出成功也不自动移除（豁免非持久化模式的移除）。落盘进 stage-items，重启保留。
-  const toggleStagePin = useCallback((id:number) => { saveStage(stageRef.current.map(x=>x.id===id?{...x,pinned:!x.pinned}:x)); }, [saveStage]);
+  const setStageColorTag = useCallback((ids: readonly number[], colorTag: StageColorTag | null) => {
+    const next = setStageItemsColorTag(stageRef.current, ids, colorTag);
+    if (next.some((item, index) => item !== stageRef.current[index])) void saveStage(next);
+  }, [saveStage]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => {
     setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
     await persistLauncher(list);
@@ -1081,7 +1094,7 @@ export default function App() {
           if (!keepOpen && dropped && event.payload !== "move" && draggedItems.length === 1 && draggedItems[0].type === "text") {
             const item = draggedItems[0];
             copyAndPaste(item); // 复用现有粘贴出口（含焦点交还 + Ctrl+V）
-            if (!stagePersistRef.current && !item.pinned) { // 续99：固定条目豁免自动移除
+            if (!stagePersistRef.current) {
               const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
               setStage(next);
               await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
@@ -1093,8 +1106,7 @@ export default function App() {
           }
           if (dropped && dr.draggedIds.length) {
             if (!stagePersistRef.current) {
-              // 续99：全局非持久化时，仍豁免被固定（pinned）的条目——只移除拖出成功且未固定的
-              const ids = new Set(dr.draggedIds.filter(id => !stageRef.current.find(s => s.id === id)?.pinned));
+              const ids = new Set(dr.draggedIds);
               if (ids.size) {
                 const next = stageRef.current.filter(s => !ids.has(s.id));
                 setStage(next);
@@ -1408,7 +1420,7 @@ export default function App() {
     else if (r.kind === "clip") { copyAndPasteRef.current?.(r.item); } // 剪贴板结果：取走粘贴（copyAndPaste 定义在后，走 ref 避免 TDZ）
     else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
   }, [launchApp]);
-  // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板 📌 钉入。详见 DECISIONS §14。
+  // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板加入。详见 DECISIONS §14。
 
   // ── 启动器（收藏托盘）操作 ──
   // 左键打开/启动条目：app→launchApp（含放大动画+hide）；file/folder→open_file。由区决定动作，不走粘贴/焦点交还/CLIPBOARD_LOCK。
@@ -1634,6 +1646,7 @@ export default function App() {
         previewMode: selectedItems[0].type === "image" || !!selectedItems[0].items?.[0]?.isImage ? "cover" : "icon",
         textPreview: selectedItems[0].content ?? null,
         itemCount: selectedItems.length,
+        colorTag: selectedItems[0].colorTag,
       });
       element.classList.add("native-handoff-ghost");
       const host = dragLayerRef.current ?? document.body;
@@ -1658,6 +1671,7 @@ export default function App() {
       drag_theme: document.documentElement.dataset.theme === "light" ? "light" : "dark",
       drag_dpr: window.devicePixelRatio,
       drag_session_id: sessionId,
+      drag_color_tag: s.colorTag ?? null,
     }));
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("start_drag_out", { items: dragItems, forceHide }))
@@ -1692,6 +1706,7 @@ export default function App() {
       previewMode: item.type === "image" || !!item.items?.[0]?.isImage ? "cover" : "icon",
       textPreview: item.content ?? null,
       itemCount: 1,
+      colorTag: item.colorTag,
     });
     ghostEl.classList.add("stage-drag-ghost");
     const ghostHost = dragLayerRef.current ?? document.body;
@@ -1827,7 +1842,7 @@ export default function App() {
   }, [saveStage, setStageReorderActiveNative, stageAutoScroll]);
   // 续143：单项重排松手落点在启动台 → 加入启动台（恢复旧「拖中转项目到启动台」功能——旧靠越界升级为原生 OLE
   // 落到启动台再由 files-dropped 处理，续143 删了越界升级故改在此 JS 落点侧处理）。仅文件/文件夹项（有 path）可入；
-  // 忠实旧 OLE 行为的 move 语义：加入成功（added/duplicate）后，非持久 + 非固定则从中转移除。清 reorder 现场不回弹。
+  // 忠实旧 OLE 行为的 move 语义：加入成功（added/duplicate）后，非持久模式从中转移除。清 reorder 现场不回弹。
   const dropStageItemToLauncher = useCallback(async (item: StageItem) => {
     let path: string | undefined, name: string, ext: string | undefined, isDir = false, icon: string | null = null;
     if (item.type === "file" && item.items?.[0]?.path) {
@@ -1845,7 +1860,7 @@ export default function App() {
     toastAddResult(res, "launcher", name);
     launcherDropRef.current?.classList.add("drop-flash");
     setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
-    if ((res === "added" || res === "duplicate") && !stagePersistRef.current && !item.pinned) { // move 语义：非持久/非固定则从中转移除
+    if ((res === "added" || res === "duplicate") && !stagePersistRef.current) {
       const next = stageRef.current.filter(s => s.id !== item.id);
       setStage(next);
       await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
@@ -2176,8 +2191,24 @@ export default function App() {
     const MENU_W = 176, MENU_H = items.length * 36 + 8;
     const x = Math.min(e.clientX, window.innerWidth - MENU_W - 8);
     const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8);
-    setCtxMenu({ x, y, items });
+    setCtxMenu({ kind: "actions", x, y, items });
   }, []);
+
+  const openStageColorMenu = useCallback((e: React.MouseEvent, item: StageItem) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const ids = stageMultiselect && stageSel.has(item.id) ? [...stageSel] : [item.id];
+    const tagged = stageRef.current.filter(candidate => ids.includes(candidate.id)).map(candidate => candidate.colorTag ?? null);
+    const selected = tagged[0] ?? null;
+    const mixed = tagged.some(tag => tag !== selected);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const menuWidth = 130;
+    const menuHeight = 72;
+    const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
+    const below = rect.bottom + 6;
+    const y = below + menuHeight <= window.innerHeight - 8 ? below : Math.max(8, rect.top - menuHeight - 6);
+    setCtxMenu({ kind: "colors", x, y, ids, selected: mixed ? null : selected, mixed });
+  }, [stageMultiselect, stageSel]);
 
   // 中转区条目右键菜单：多选模式且有选中项→批量操作；否则→单项操作
   const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
@@ -2220,11 +2251,11 @@ export default function App() {
   const stageItemActions = useMemo<StageItemActions>(() => ({
     activate: handleStageClick,
     openContextMenu: openStageCtxMenu,
-    togglePin: toggleStagePin,
+    openColorMenu: openStageColorMenu,
     copy: copyStageToClipboard,
     remove: removeStage,
     open: openStageFile,
-  }), [handleStageClick, openStageCtxMenu, toggleStagePin, copyStageToClipboard, removeStage, openStageFile]);
+  }), [handleStageClick, openStageCtxMenu, openStageColorMenu, copyStageToClipboard, removeStage, openStageFile]);
   const stageItemPointer = useMemo<StageItemPointerHandlers>(() => ({
     pointerDown: handleStagePointerDown,
     pointerMove: handleStagePointerMove,
@@ -2232,7 +2263,7 @@ export default function App() {
     lostPointerCapture: handleStageLostPointerCapture,
   }), [handleStagePointerDown, handleStagePointerMove, handleStagePointerUp, handleStageLostPointerCapture]);
 
-  // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/钉入中转/删除）
+  // 剪贴板历史卡片右键菜单（file 额外加「打开所在目录」；通用：复制/加入中转/删除）
   const openClipCtxMenu = useCallback((e: React.MouseEvent, c: ClipItem) => {
     // 拖拽中不弹菜单：右键的 pointerdown 因 button!==0 提前返回、不打断拖拽，但 contextmenu 照样触发 →
     // 菜单浮出而 ghost 仍在跟手、松手照旧投放，纯属添乱。拖拽期间右键一律吞掉。
@@ -2590,7 +2621,6 @@ export default function App() {
                     selected={stageSel.has(s.id)}
                     missing={missingIds.has(s.id)}
                     multiselect={stageMultiselect}
-                    persistAll={stagePersist}
                     copied={copiedStageId===s.id}
                     imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
                     fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
@@ -2611,7 +2641,6 @@ export default function App() {
                     selected={stageSel.has(s.id)}
                     missing={missingIds.has(s.id)}
                     multiselect={stageMultiselect}
-                    persistAll={stagePersist}
                     copied={copiedStageId===s.id}
                     imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
                     fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
@@ -2628,7 +2657,7 @@ export default function App() {
               <div className="stage-empty-guide" aria-label={t("将文件拖到这里")}>
                 <span className="stage-empty-guide-icon"><IconDrop size={26}/></span>
                 <span className="stage-empty-guide-title">{t("将文件拖到这里")}</span>
-                <span className="stage-empty-guide-subtitle">{t("也可从剪贴板固定到中转区")}</span>
+                <span className="stage-empty-guide-subtitle">{t("也可从剪贴板加入中转区")}</span>
               </div>
             )}
           </div>
@@ -2823,7 +2852,7 @@ export default function App() {
     <div className="stage-insert-marker" ref={stageInsertMarkerRef}/>
     <div className="drag-layer" ref={dragLayerRef}/>
     {/* 自定义右键菜单浮层：fixed 定位，渲染在最顶层；mousedown stopPropagation 防被全局 close 监听立即关掉 */}
-    {ctxMenu && (
+    {ctxMenu?.kind === "actions" && (
       <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
         {ctxMenu.items.map((item,i)=>(
           <button key={i} className="ctx-menu-item" disabled={item.disabled}
@@ -2831,6 +2860,34 @@ export default function App() {
             {item.label}
           </button>
         ))}
+      </div>
+    )}
+    {ctxMenu?.kind === "colors" && (
+      <div className="ctx-menu stage-color-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
+        <div className="stage-color-menu-title">
+          {ctxMenu.ids.length > 1 ? t("为所选 {n} 项设置颜色", { n: ctxMenu.ids.length }) : t("设置颜色标记")}
+        </div>
+        <div className="stage-color-swatches">
+          <button
+            type="button"
+            className={`stage-color-swatch stage-color-swatch-clear${!ctxMenu.mixed && ctxMenu.selected === null ? " selected" : ""}`}
+            title={t("无标记")}
+            aria-label={t("无标记")}
+            aria-pressed={!ctxMenu.mixed && ctxMenu.selected === null}
+            onClick={() => { setStageColorTag(ctxMenu.ids, null); setCtxMenu(null); }}
+          >×</button>
+          {STAGE_COLOR_TAGS.map(tag => (
+            <button
+              type="button"
+              key={tag}
+              className={`stage-color-swatch color-${tag}${!ctxMenu.mixed && ctxMenu.selected === tag ? " selected" : ""}`}
+              title={stageColorLabel(tag, t)}
+              aria-label={stageColorLabel(tag, t)}
+              aria-pressed={!ctxMenu.mixed && ctxMenu.selected === tag}
+              onClick={() => { setStageColorTag(ctxMenu.ids, tag); setCtxMenu(null); }}
+            ><span className="stage-color-marker"/></button>
+          ))}
+        </div>
       </div>
     )}
     {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测。
@@ -2841,7 +2898,7 @@ export default function App() {
         ref={el=>{ clipGhostRef.current=el; const d=clipDragRef.current; if(el&&d) el.style.transform=`translate3d(${d.x-d.hotspotX}px,${d.y-d.hotspotY}px,0) scale(1.04)`; }}
         style={{position:"fixed",pointerEvents:"none",zIndex:100002}}>
         <div className="stage-card-thumb">
-          <span className={`stage-card-dot type-${clipDragItem.type}`}><span className="dot-type"/></span>
+          <span className="stage-card-color color-static color-none"><span className="stage-color-marker"/></span>
           {clipDragItem.type === "text"
             ? <div className="stage-card-text-preview">{clipDragItem.content || t("文本")}</div>
             : (clipDragItem.type === "image" || !!clipDragItem.items?.[0]?.isImage) && clipThumbs[clipDragItem.time]

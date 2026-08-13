@@ -2,6 +2,7 @@ import {
   formatNativeDragPreviewLabel,
   type NativeDragPreviewStyle,
 } from "../domain/dragPreview";
+import type { StageColorTag } from "../domain/stageColorTag";
 
 type NativeDragGhostOptions = {
   style: NativeDragPreviewStyle;
@@ -12,6 +13,7 @@ type NativeDragGhostOptions = {
   previewMode?: "cover" | "icon";
   textPreview?: string | null;
   itemCount: number;
+  colorTag?: StageColorTag;
 };
 
 export function createNativeDragGhost(options: NativeDragGhostOptions): HTMLDivElement {
@@ -21,12 +23,12 @@ export function createNativeDragGhost(options: NativeDragGhostOptions): HTMLDivE
 
   const thumb = document.createElement("div");
   thumb.className = "stage-card-thumb";
-  const dot = document.createElement("span");
-  dot.className = `stage-card-dot type-${options.type}`;
-  const dotType = document.createElement("span");
-  dotType.className = "dot-type";
-  dot.appendChild(dotType);
-  thumb.appendChild(dot);
+  const color = document.createElement("span");
+  color.className = `stage-card-color color-static color-${options.colorTag ?? "none"}`;
+  const marker = document.createElement("span");
+  marker.className = "stage-color-marker";
+  color.appendChild(marker);
+  thumb.appendChild(color);
 
   if (options.type === "text") {
     const text = document.createElement("div");

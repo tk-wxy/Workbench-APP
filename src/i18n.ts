@@ -31,6 +31,12 @@ export const EN_DICT: Record<string, string> = {
   "文件夹": "Folder",
   "图片": "Image",
   "文本": "Text",
+  "设置颜色标记": "Set color label",
+  "为所选 {n} 项设置颜色": "Set color for {n} selected items",
+  "无标记": "No label",
+  "红色": "Red",
+  "黄色": "Yellow",
+  "蓝色": "Blue",
   "应用": "Apply",
   "中转": "Stage",
   "导航": "Navigate",
@@ -60,8 +66,7 @@ export const EN_DICT: Record<string, string> = {
   "复制时间": "Copied",
   "字数": "Characters",
   "数量": "Count",
-  "状态": "Status",
-  "已固定": "Pinned",
+  "颜色标记": "Color label",
   // 增强搜索结果分段标题（续114b）。「应用程序」不能复用既有的「应用」——那个 key 是设置里
   // 「应用」按钮的**动词**（译作 Apply），拿来当段标题会显示成 "Apply"。
   "应用程序": "Apps",
@@ -142,7 +147,7 @@ export const EN_DICT: Record<string, string> = {
   "单击取走（写回剪贴板并粘贴）": "Click to take (writes to clipboard & pastes)",
   "单击取走（粘贴到上个窗口）": "Click to take (pastes to previous window)",
   "将文件拖到这里": "Drop files or folders here",
-  "也可从剪贴板固定到中转区": "Or pin an item here from Clipboard",
+  "也可从剪贴板加入中转区": "Or add an item here from Clipboard",
   "复制内容会自动出现在这里": "Copied content appears here automatically",
   "支持文本、文件和图片": "Text, files, and images are supported",
   "快捷入口": "Quick Access",
@@ -171,8 +176,6 @@ export const EN_DICT: Record<string, string> = {
   "复制失败": "Copy failed",
   "暂无失效条目": "No unavailable items",
   "失效条目会保留在中转站，直到你主动处理。": "Unavailable items stay in Stage until you take action.",
-  "点击固定：取走 / 拖出后仍保留在中转区": "Click to pin: stays in Stage after take / drag-out",
-  "已固定：取走 / 拖出后保留（点击取消）": "Pinned: kept after take / drag-out (click to unpin)",
 
   // ── 剪贴板历史 ──
   "剪贴板历史": "Clipboard History",
@@ -216,8 +219,8 @@ export const EN_DICT: Record<string, string> = {
   "原文件已失踪（可能被删除或移动）": "Original file is missing (deleted or moved)",
   "上限条数": "Capacity",
   "拖出后自动关闭": "Auto-close on drag out",
-  "中转站存放手动钉入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。":
-    "Stage holds files, text, and images you've pinned or dragged in; left-click takes and pastes. \"On\" (default): dragging an item hides the window immediately, making it easy to drag into external apps (Explorer, etc). \"Off\": the window stays visible while dragging — you can drop onto Launcher or cancel mid-drag (release over empty space / press Esc); to drag into an external app, tap the hotkey mid-drag to hide the window, then release.",
+  "中转站存放手动加入或拖入的文件、文本、图片条目；左键动作为取走粘贴。「开启」（默认）：拖动条目会立即隐藏界面，便于拖到外部应用（资源管理器等）。「关闭」：拖动时界面保持显示，可拖到启动台或中途取消（松手到空白处 / 按 Esc）；要拖到外部应用时，拖动中按一下呼出热键即可隐藏界面、再松手落地。":
+    "Stage holds files, text, and images you've added or dragged in; left-click takes and pastes. \"On\" (default): dragging an item hides the window immediately, making it easy to drag into external apps (Explorer, etc). \"Off\": the window stays visible while dragging — you can drop onto Launcher or cancel mid-drag (release over empty space / press Esc); to drag into an external app, tap the hotkey mid-drag to hide the window, then release.",
   "持久化": "Persist Items",
   "「关闭」（默认）：条目确认成功移出/拖出后自动从中转区移除。「开启」：条目移出/拖出后仍保留在中转区，除非手动删除。":
     "\"Off\" (default): items are removed from Stage automatically once a move-out/drag-out is confirmed successful. \"On\": items stay in Stage after being moved/dragged out, until you delete them manually.",

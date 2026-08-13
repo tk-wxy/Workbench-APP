@@ -120,10 +120,9 @@ const stageCommon = {
   selected: true,
   missing: true,
   multiselect: false,
-  persistAll: false,
   copied: false,
   t,
-  actions: { activate: noop, openContextMenu: noop, togglePin: noop, copy: noop, remove: noop, open: noop },
+  actions: { activate: noop, openContextMenu: noop, openColorMenu: noop, copy: noop, remove: noop, open: noop },
   pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
   highlightRanges: [],
   pageSearchActive: false,
@@ -134,6 +133,11 @@ const stageGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageCom
 const stageListHtml = renderToStaticMarkup(createElement(StageListRow, stageCommon));
 check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
 check("失效中转项不渲染复制/打开操作", !stageGridHtml.includes("复制到剪贴板") && !stageListHtml.includes('title="打开"'), stageGridHtml + stageListHtml);
+const taggedStageCommon = { ...stageCommon, item: { ...stageItem, colorTag: "blue" }, missing: false };
+const taggedStageGridHtml = renderToStaticMarkup(createElement(StageGridCard, taggedStageCommon));
+const taggedStageListHtml = renderToStaticMarkup(createElement(StageListRow, taggedStageCommon));
+check("中转手动颜色在方格与列表均使用同一标记", taggedStageGridHtml.includes("stage-card-color color-blue") && taggedStageListHtml.includes("stage-list-color color-blue"), taggedStageGridHtml + taggedStageListHtml);
+check("颜色入口不再暴露旧固定语义", !taggedStageGridHtml.includes("固定") && !taggedStageListHtml.includes("固定"), taggedStageGridHtml + taggedStageListHtml);
 const stageNewGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, newlyAdded: true }));
 const stageNewListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, newlyAdded: true }));
 check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);

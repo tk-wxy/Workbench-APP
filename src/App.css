@@ -31,6 +31,10 @@
   --card-bg: rgba(255,255,255,0.07);
   --card-thumb-bg: rgba(255,255,255,0.035);
   --card-border-c: rgba(255,255,255,0.10);
+  /* 中转站用户颜色标记：独立于文件类型色和全局 accent，红黄蓝在深浅主题中保持同一语义。 */
+  --stage-tag-red:#FF6B6B;
+  --stage-tag-yellow:#FFD43B;
+  --stage-tag-blue:#4DABF7;
   /* 分类色（续116）：预览面板徽标用。色相与「增强搜索结果分段」同一套写像（format.ts catToGroup），
      故徽标颜色 == 该项所属段落 —— 色是分类的再确认，不是装饰。8 组封顶，再细就成彩虹、
      反而丢掉「同类=同色」的节奏感。暗色主题下取中高明度以便在 --card-bg 上浮起来。 */
@@ -63,6 +67,9 @@
   --card-bg: #ffffff;
   --card-thumb-bg: #f3f3f4;
   --card-border-c: rgba(0,0,0,0.09);
+  --stage-tag-red:#C92A2A;
+  --stage-tag-yellow:#A66F00;
+  --stage-tag-blue:#1864AB;
   /* 分类色·浅色主题：同色相往暗处压（保证在白色 --card-bg 上的可读性——直接沿用暗色版会太淡、字看不清）。
      色相排列顺序与暗色版保持一致，切换主题时分类感不会错乱。 */
   --c-folder: #9A6B00;
@@ -259,11 +266,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-actions{display:flex;gap:2px;flex-shrink:0;}
 .stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
-/* 续99e：列表视图「固定」开关——未固定 hover 才淡显、已固定常驻 accent（与方格视图 dot 同语义）*/
-.stage-pin-btn{flex-shrink:0;width:24px;height:24px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;color:var(--text3);cursor:pointer;padding:0;border-radius:6px;opacity:0;transition:opacity 80ms,color 80ms,background 80ms;}
-.stage-item:hover .stage-pin-btn{opacity:0.5;}
-.stage-item .stage-pin-btn:hover{background:var(--hover);color:var(--text);opacity:1;}
-.stage-pin-btn.pinned{opacity:1;color:var(--accent);}
+.stage-list-color{flex:0 0 18px;width:18px;height:24px;border:0;background:transparent;padding:0;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:5px;}
+.stage-list-color:hover{background:var(--hover);}
 /* 多选模式下卡片悬浮不露出单条操作按钮（避免与批量操作栏语义打架，见 MEMORY §0A）*/
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
@@ -307,18 +311,16 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card-text-preview{width:72px;height:62px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
 /* 文件图标容器：40×40 居中方块（续99 放大：30→40，图标更醒目）*/
 .stage-card-icon-wrap{width:40px;height:40px;border-radius:9px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-/* 右上「固定」开关（续99）：16×16 可点热区（透明），内含 6px 类型色点 或 📌；z-index:2 压过 cover 图片 */
-.stage-card-dot{position:absolute;top:2px;right:2px;width:16px;height:16px;display:flex;align-items:center;justify-content:center;padding:0;border:none;background:transparent;cursor:pointer;z-index:2;flex-shrink:0;}
-.stage-card-dot .dot-type{width:6px;height:6px;border-radius:50%;transition:box-shadow 80ms;}
-.stage-card-dot.type-file .dot-type{background:#378ADD;}
-.stage-card-dot.type-text .dot-type{background:#639922;}
-.stage-card-dot.type-image .dot-type{background:#D4537E;}
-/* hover 卡片时给未固定点一圈提示环，暗示可点 */
-.stage-card:hover .stage-card-dot .dot-type{box-shadow:0 0 0 3px rgba(255,255,255,0.18);}
-[data-theme="light"] .stage-card:hover .stage-card-dot .dot-type{box-shadow:0 0 0 3px rgba(0,0,0,0.10);}
-/* 已固定：📌 常驻显示（accent 色），比色点更醒目 */
-.stage-card-dot .dot-pin{display:flex;align-items:center;justify-content:center;color:var(--accent);}
-.stage-card-dot .dot-pin svg{width:12px;height:12px;}
+/* 用户颜色标记：按钮热区不改卡片几何；无标记为空心点，有标记为实心点。 */
+.stage-card-color{position:absolute;top:2px;right:2px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0;border:none;background:color-mix(in srgb,var(--card-bg) 76%,transparent);border-radius:6px;cursor:pointer;z-index:2;flex-shrink:0;}
+.stage-card-color:hover{background:color-mix(in srgb,var(--card-bg) 94%,transparent);}
+.stage-card-color.color-static{cursor:default;pointer-events:none;}
+.stage-color-marker{width:8px;height:8px;border-radius:50%;display:block;background:var(--stage-tag-color,transparent);border:1px solid var(--stage-tag-color,var(--text3));box-shadow:0 0 0 1px color-mix(in srgb,var(--card-bg) 72%,transparent);}
+.color-red{--stage-tag-color:var(--stage-tag-red);}
+.color-yellow{--stage-tag-color:var(--stage-tag-yellow);}
+.color-blue{--stage-tag-color:var(--stage-tag-blue);}
+.color-none{--stage-tag-color:var(--text3);}
+.color-none .stage-color-marker{background:transparent;}
 /* 标签区（续98：padding 3/5→2/2 收窄 4px，让给上方封面；两行文本内容不变，卡片总高 94px 不变）*/
 .stage-card-label{padding:2px 6px 2px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:0px;min-width:0;flex-shrink:0;}
 .stage-card-name{font-size:10px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
@@ -351,10 +353,22 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .ctx-menu-item{display:block;width:100%;text-align:left;padding:7px 14px;border:none;background:none;color:rgba(255,255,255,0.82);font-size:13px;font-family:var(--font,system-ui);border-radius:5px;cursor:pointer;transition:background 80ms,color 80ms;white-space:nowrap;}
 .ctx-menu-item:hover:not(:disabled){background:rgba(255,255,255,0.10);color:#fff;}
 .ctx-menu-item:disabled{opacity:0.35;cursor:default;}
+.stage-color-menu{width:130px;padding:10px;}
+.stage-color-menu-title{font-size:11px;color:rgba(255,255,255,0.55);margin:0 2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.stage-color-swatches{display:flex;align-items:center;gap:6px;}
+.stage-color-swatch{width:26px;height:26px;border:1px solid transparent;border-radius:7px;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;}
+.stage-color-swatch:hover,.stage-color-swatch.selected{background:rgba(255,255,255,0.10);border-color:rgba(255,255,255,0.18);}
+.stage-color-swatch .stage-color-marker{width:12px;height:12px;box-shadow:none;}
+.stage-color-swatch-clear{font-size:17px;line-height:1;color:rgba(255,255,255,0.55);}
+.stage-color-swatch-clear.selected{color:#fff;}
 /* 浅色主题覆盖 */
 [data-theme="light"] .ctx-menu{background:#ffffff;border-color:rgba(0,0,0,0.12);box-shadow:0 4px 20px rgba(0,0,0,0.18);}
 [data-theme="light"] .ctx-menu-item{color:rgba(0,0,0,0.75);}
 [data-theme="light"] .ctx-menu-item:hover:not(:disabled){background:rgba(0,0,0,0.07);color:#1a1a1c;}
+[data-theme="light"] .stage-color-menu-title{color:rgba(0,0,0,0.55);}
+[data-theme="light"] .stage-color-swatch:hover,[data-theme="light"] .stage-color-swatch.selected{background:rgba(0,0,0,0.07);border-color:rgba(0,0,0,0.16);}
+[data-theme="light"] .stage-color-swatch-clear{color:rgba(0,0,0,0.55);}
+[data-theme="light"] .stage-color-swatch-clear.selected{color:#111;}
 
 /* ── 右：剪贴板面板 ── */
 /* flex:1 + 与启动台同 min-width:320 → 两侧等宽对称（原为固定 320px）。见 .center-panel 注释。 */

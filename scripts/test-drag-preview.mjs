@@ -39,9 +39,11 @@ try {
   const reorderEnd = appSource.indexOf("const updateStageReorder", reorderStart);
   assert.ok(nativeStart >= 0 && reorderStart > nativeStart && reorderEnd > reorderStart);
   assert.match(appSource.slice(nativeStart, reorderStart), /resolveStageDragPreview\(s, stageThumbsRef\.current\)/);
+  assert.match(appSource.slice(nativeStart, reorderStart), /drag_color_tag: s\.colorTag \?\? null/);
   assert.match(appSource.slice(reorderStart, reorderEnd), /resolveStageDragPreview\(item, stageThumbsRef\.current\)/);
+  assert.match(appSource.slice(reorderStart, reorderEnd), /colorTag: item\.colorTag/);
 
-  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n  ✓ 区内 ghost 与原生交接共用同一预览解析器\n全部通过\n");
+  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n  ✓ 区内 ghost、原生交接与颜色标记共用同一预览模型\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

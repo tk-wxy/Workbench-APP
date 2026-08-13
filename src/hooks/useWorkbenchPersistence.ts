@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { LatestWriteQueue } from "../lib/persistQueue";
+import { normalizeStageItemAppearance } from "../domain/stageColorTag";
 import type { LauncherItem, StageItem } from "../types";
 
 interface StoreWriter {
@@ -43,7 +44,8 @@ export function useWorkbenchPersistence({ storeRef, setStage }: PersistenceOptio
         console.warn("[persist] 中转图片外置失败，回退为内嵌内容：", error);
       }
     }
-    return list.map(item => {
+    return list.map(source => {
+      const item = normalizeStageItemAppearance(source);
       if (item.type !== "image") return item;
       const contentFile = item.contentFile ?? known.get(item.id);
       if (!contentFile) return item;
