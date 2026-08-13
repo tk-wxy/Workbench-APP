@@ -43,6 +43,7 @@ import {
   createIdleStageInteraction,
   insertStageItemAtAnchor,
   insertStageItemsAtAnchor,
+  reorderStageItemsAtSlot,
   resolveStageInsertSlot,
   stageInsertAnchorForSlot,
   stageInsertMarkerForSlot,
@@ -864,7 +865,10 @@ export default function App() {
         await register("files-dropped", async (event: any) => {
           const payload = event.payload as { paths: string[]; x: number; y: number };
           const paths = payload.paths ?? [];
-          if (!paths.length) return;
+          const internalStageDrag = dragOutRef.current.draggedIds.length > 0;
+          // 纯 text 不带 CF_HDROP，但中转站原生来源携带私有 marker，接收端会发空 paths 的回落事件。
+          // 任何外部空载荷仍不进入原有文件拖入路径。
+          if (!paths.length && !internalStageDrag) return;
           // 一次 drop 消费一次 DragEnter 时冻结的布局快照。立即清空共享 ref，避免上一轮延迟的
           // DragLeave 计时器尚未执行时，新一轮 DragEnter 误复用旧卡片坐标。
           const dropStageRects = nativeStageInsertRectsRef.current;
@@ -872,10 +876,9 @@ export default function App() {
           if (fileDragLeaveTimer) { clearTimeout(fileDragLeaveTimer); fileDragLeaveTimer = null; }
           nativeFileDragActiveRef.current = false;
           hideStageInsertMarker(stageInsertMarkerRef.current);
-          // 「保持界面」模式下，我们自己的中转拖出落回窗口内也会经 IDropTarget→files-dropped（draggedIds 尚未清）。
-          // 与外部文件拖入区分：区内拖出且落点在启动台 → 走下方启动台添加（等同拖入收藏）；落回中转区 →
-          // 区内重排属后续阶段，暂跳过（避免把自身当外部文件重复添加）。
-          const internalStageDrag = dragOutRef.current.draggedIds.length > 0;
+          // 自己的中转拖出落回窗口内也会经 IDropTarget→files-dropped（draggedIds 尚未清）。
+          // 落启动台仍由下方路径处理；落中转区则按本次 DragEnter 冻结的槽位提交真实排序，不能把自身
+          // 当外部文件重复添加，也不能只保留条目而丢掉用户刚完成的排位。
           const internalWorkbenchDrag = internalStageDrag || dragOutSourceRef.current === "clip";
           const cssX = payload.x / window.devicePixelRatio;
           const cssY = payload.y / window.devicePixelRatio;
@@ -894,7 +897,21 @@ export default function App() {
             setFileDragOver(false);
             return;
           }
-          if (internalStageDrag && dropZone === "stage") { setFileDragOver(false); return; }
+          if (internalStageDrag && dropZone === "stage") {
+            const point = { x: cssX, y: cssY };
+            const rects = dropStageRects.length
+              ? dropStageRects
+              : snapshotStageInsertRects(dropAreaRef.current, stageLayoutRef.current);
+            const slot = resolveStageInsertSlot(point, rects, stageLayoutRef.current);
+            const next = reorderStageItemsAtSlot(stageRef.current, dragOutRef.current.draggedIds, slot);
+            const changed = next.some((item, index) => item.id !== stageRef.current[index]?.id);
+            if (changed) {
+              setStage(next);
+              await persistStage(next);
+            }
+            setFileDragOver(false);
+            return;
+          }
           const { invoke } = await import("@tauri-apps/api/core");
           if (dropZone === "launcher") {
             // 落点在启动器：.lnk → resolve_lnk → kind:"app"；其余 → get_file_info → file/folder
@@ -1716,6 +1733,7 @@ export default function App() {
       content_file: s.contentFile ?? null,
       items: s.items?.map(f => f.path) ?? null,
       orig_path: s.orig_path ?? null,
+      internal_stage_reorder: true,
       drag_preview: previewFor(s),
       drag_label: buildNativeDragLabel(s, dragT),
       drag_meta: buildNativeDragMeta(s, dragT),

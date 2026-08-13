@@ -12,15 +12,16 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use windows::core::{implement, Result};
+use windows::core::{implement, w, Result};
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, POINTL, S_OK, TRUE};
 use windows::Win32::System::Com::{
     IDataObject, DVASPECT_CONTENT, FORMATETC, STGMEDIUM, TYMED_HGLOBAL,
 };
+use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
 use windows::Win32::System::Ole::{
     IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, ReleaseStgMedium,
     RevokeDragDrop, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE,
@@ -52,7 +53,7 @@ extern "system" {
     fn DragQueryFileW(h_drop: isize, i_file: u32, lpsz_file: *mut u16, cch: u32) -> u32;
 }
 
-// ── IDropTarget：DragEnter/Over 按是否含 CF_HDROP 决定光标，Drop 取路径 emit 给前端 ──
+// ── IDropTarget：外部只接受 CF_HDROP；中转站自身文本回落凭私有格式接受并交前端排序 ──
 #[implement(IDropTarget)]
 struct FileDropTarget {
     app: AppHandle,
@@ -91,7 +92,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
         pt: &POINTL,
         pdweffect: *mut DROPEFFECT,
     ) -> Result<()> {
-        let has = has_cf_hdrop(p_data_obj);
+        let has = has_cf_hdrop(p_data_obj) || has_internal_stage_reorder(p_data_obj);
         self.accept.store(has, Ordering::Relaxed);
         // 每次进入（含 HWND 切换）都 emit；前端用防抖过滤 HWND 间快速 leave-enter
         if has {
@@ -135,7 +136,7 @@ impl IDropTarget_Impl for FileDropTarget_Impl {
             pt.x,
             pt.y
         );
-        let accept = !paths.is_empty();
+        let accept = !paths.is_empty() || has_internal_stage_reorder(p_data_obj);
         // Drop 是终态，OLE 不再调 DragLeave，主动通知前端清除高亮
         let _ = self.app.emit("file-drag-leave", ());
         if accept {
@@ -177,11 +178,36 @@ fn hdrop_format() -> FORMATETC {
     }
 }
 
+fn internal_stage_reorder_format() -> u16 {
+    static FORMAT: OnceLock<u16> = OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe {
+        RegisterClipboardFormatW(w!("Workbench.App.InternalStageReorder")) as u16
+    })
+}
+
+fn internal_stage_reorder_format_etc() -> Option<FORMATETC> {
+    let format = internal_stage_reorder_format();
+    (format != 0).then_some(FORMATETC {
+        cfFormat: format,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    })
+}
+
 fn has_cf_hdrop(obj: Option<&IDataObject>) -> bool {
     let Some(obj) = obj else {
         return false;
     };
     unsafe { obj.QueryGetData(&hdrop_format()) == S_OK }
+}
+
+fn has_internal_stage_reorder(obj: Option<&IDataObject>) -> bool {
+    let (Some(obj), Some(format)) = (obj, internal_stage_reorder_format_etc()) else {
+        return false;
+    };
+    unsafe { obj.QueryGetData(&format) == S_OK }
 }
 
 fn extract_paths(obj: &IDataObject) -> Vec<String> {

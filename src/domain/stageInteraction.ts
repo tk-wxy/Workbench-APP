@@ -112,6 +112,25 @@ export function insertStageItemAtAnchor<T extends { id: number }>(
   return insertStageItemsAtAnchor(current, [item], anchor, maxItems);
 }
 
+// 原生拖出重新落回中转区时，DOM 已随窗口隐藏而卸载，不能复用 FLIP 的临时索引。
+// slot 仍相对于拖动开始时冻结的完整列表；先扣除该槽位之前被取出的条目，再插回当前列表，
+// 因而单项与多项都保持用户看到的相对顺序。
+export function reorderStageItemsAtSlot<T extends { id: number }>(
+  current: readonly T[],
+  draggedIds: readonly number[],
+  slot: number,
+) {
+  const draggedIdSet = new Set(draggedIds);
+  const moved = current.filter(item => draggedIdSet.has(item.id));
+  if (!moved.length) return [...current];
+  const boundedSlot = Math.max(0, Math.min(Math.trunc(slot), current.length));
+  const movedBeforeSlot = current.slice(0, boundedSlot).filter(item => draggedIdSet.has(item.id)).length;
+  const remaining = current.filter(item => !draggedIdSet.has(item.id));
+  const target = Math.max(0, Math.min(boundedSlot - movedBeforeSlot, remaining.length));
+  remaining.splice(target, 0, ...moved);
+  return remaining;
+}
+
 export function createIdleStageInteraction(): StageInteractionState {
   return { pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" };
 }

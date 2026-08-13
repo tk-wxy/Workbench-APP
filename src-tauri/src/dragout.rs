@@ -279,6 +279,9 @@ pub struct DragOutItem {
     /// 拖出路径又必须完全同步（不能 await 现取，否则卡死 R13 交接），故带 time 让 Rust 自查 CLIP_CACHE。
     /// 中转条目用 content_file，此项为 None。serde 对缺失的 Option 字段自动填 None。
     pub time: Option<i64>,
+    /// 中转站来源的私有 OLE 标记。让纯文本卡片在重新显示 overlay 后也能被自身 IDropTarget 接回排序；
+    /// 剪贴板来源与外部文本不携带此格式，仍不被文件拖入目标接受。
+    pub internal_stage_reorder: Option<bool>,
     /// 前端已缓存的小缩略图/文件图标；缺失时 Rust 画类型色占位。
     pub drag_preview: Option<String>,
     pub drag_label: Option<String>,
@@ -1457,8 +1460,30 @@ fn build_formats(app: &AppHandle, items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>
             formats.push((CF_UNICODETEXT, utf16_bytes(&t)));
         }
     }
+    append_internal_stage_reorder_marker(&mut formats, items);
 
     (formats, temp_files)
+}
+
+fn is_internal_stage_reorder(items: &[DragOutItem]) -> bool {
+    items.iter().any(|item| item.internal_stage_reorder.unwrap_or(false))
+}
+
+fn append_internal_stage_reorder_marker(formats: &mut Vec<(u16, Vec<u8>)>, items: &[DragOutItem]) {
+    if !is_internal_stage_reorder(items) {
+        return;
+    }
+    let format = internal_stage_reorder_format();
+    if format != 0 {
+        formats.push((format, vec![1]));
+    }
+}
+
+fn internal_stage_reorder_format() -> u16 {
+    static FORMAT: OnceLock<u16> = OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe {
+        RegisterClipboardFormatW(w!("Workbench.App.InternalStageReorder")) as u16
+    })
 }
 
 /// image 条目 → 磁盘 PNG 路径：优先 orig_path（持久原图、不入 temp 列表），否则 base64 落临时文件。
@@ -2527,6 +2552,7 @@ mod tests {
             items: None,
             orig_path: None,
             time,
+            internal_stage_reorder: None,
             drag_preview: None,
             drag_label: None,
             drag_meta: None,
@@ -2673,6 +2699,26 @@ mod tests {
         .unwrap();
         assert_eq!(item.content_file.as_deref(), Some("deadbeef.png"));
         assert!(item.content.is_none());
+        assert!(item.internal_stage_reorder.is_none());
+    }
+
+    #[test]
+    fn internal_stage_reorder_marker_is_limited_to_marked_drag() {
+        let mut source = item(None);
+        source.r#type = "text".into();
+        source.content = Some("拖回中转站".into());
+        source.internal_stage_reorder = Some(true);
+        assert!(is_internal_stage_reorder(&[source]));
+        assert!(!is_internal_stage_reorder(&[item(None)]));
+    }
+
+    #[test]
+    fn internal_stage_reorder_marker_is_added_to_data_formats() {
+        let mut source = item(None);
+        source.internal_stage_reorder = Some(true);
+        let mut formats = Vec::new();
+        append_internal_stage_reorder_marker(&mut formats, &[source]);
+        assert_eq!(formats, vec![(internal_stage_reorder_format(), vec![1])]);
     }
 
     #[test]
