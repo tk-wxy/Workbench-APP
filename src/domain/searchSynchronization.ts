@@ -80,7 +80,7 @@ export function buildSearchProjection(input: {
       path: item.items?.[0]?.path ?? "",
       ext: item.ext ?? item.items?.[0]?.ext ?? "",
       isDir: !!item.isDir,
-      boost: 0,
+      boost: item.pinned ? 100 : 0,
       keywords: item.isDir
         ? ["文件夹", "folder", "dir"]
         : typeKeywords({ type: "file", ext: item.ext ?? item.items?.[0]?.ext, isImage: item.items?.[0]?.isImage }),

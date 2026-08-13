@@ -61,6 +61,7 @@ export interface StageItem {
   size?: number;
   orig_path?: string;
   colorTag?: import("./domain/stageColorTag").StageColorTag;
+  pinned?: boolean;
 }
 
 // ClipItem and StageItem deliberately share this action-facing shape.

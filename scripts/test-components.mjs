@@ -120,9 +120,10 @@ const stageCommon = {
   selected: true,
   missing: true,
   multiselect: false,
+  persistAll: false,
   copied: false,
   t,
-  actions: { activate: noop, openContextMenu: noop, copy: noop, remove: noop, open: noop },
+  actions: { activate: noop, openContextMenu: noop, togglePin: noop, copy: noop, remove: noop, open: noop },
   pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
   highlightRanges: [],
   pageSearchActive: false,
@@ -131,8 +132,13 @@ const stageCommon = {
 };
 const stageGridHtml = renderToStaticMarkup(createElement(StageGridCard, stageCommon));
 const stageListHtml = renderToStaticMarkup(createElement(StageListRow, stageCommon));
-check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
+check("中转双布局保留 data-stage-id 与根选择器", stageGridHtml.includes('data-stage-id="9"') && stageGridHtml.includes("stage-card selected stage-missing stage-pin-visible") && stageListHtml.includes("stage-item selected stage-missing"), stageGridHtml + stageListHtml);
 check("失效中转项不渲染复制/打开操作", !stageGridHtml.includes("复制到剪贴板") && !stageListHtml.includes('title="打开"'), stageGridHtml + stageListHtml);
+check("全局持久化关闭时双布局显示单项钉住入口", stageGridHtml.includes("stage-card-pin") && stageListHtml.includes("stage-pin-btn"), stageGridHtml + stageListHtml);
+const persistedStageGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, persistAll: true }));
+const persistedStageListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, persistAll: true }));
+check("全局持久化开启时双布局隐藏单项钉住入口", !persistedStageGridHtml.includes("stage-card-pin") && !persistedStageListHtml.includes("stage-pin-btn"), persistedStageGridHtml + persistedStageListHtml);
+check("未填色条目不预留颜色点", !stageGridHtml.includes("stage-card-color") && !stageListHtml.includes("stage-list-color"), stageGridHtml + stageListHtml);
 const taggedStageCommon = { ...stageCommon, item: { ...stageItem, colorTag: "blue" }, missing: false };
 const taggedStageGridHtml = renderToStaticMarkup(createElement(StageGridCard, taggedStageCommon));
 const taggedStageListHtml = renderToStaticMarkup(createElement(StageListRow, taggedStageCommon));
@@ -140,7 +146,7 @@ check("中转手动颜色在方格与列表均使用同一标记", taggedStageGr
 check("颜色标记只展示且不再充当卡片按钮", taggedStageGridHtml.includes('<span class="stage-card-color color-blue"') && taggedStageListHtml.includes('<span class="stage-list-color color-blue"') && !taggedStageGridHtml.includes('<button class="stage-card-color') && !taggedStageListHtml.includes('<button class="stage-list-color'), taggedStageGridHtml + taggedStageListHtml);
 const stageNewGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, newlyAdded: true }));
 const stageNewListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, newlyAdded: true }));
-check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);
+check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-pin-visible stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);
 
 const stageText = "开头文字保留识别，经过较长的描述之后才出现关键词供搜索定位。";
 const stageTextStart = stageText.indexOf("关键词");

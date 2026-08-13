@@ -34,6 +34,8 @@ try {
   assert.equal(domain.shouldFinishNativeDragHandoff(null, secondSession), false);
 
   const appSource = readFileSync(path.join(root, "src/App.tsx"), "utf8");
+  const ghostSource = readFileSync(path.join(root, "src/lib/nativeDragGhost.ts"), "utf8");
+  const rustDragSource = readFileSync(path.join(root, "src-tauri/src/dragout.rs"), "utf8");
   const nativeStart = appSource.indexOf("const beginNativeDragOut");
   const reorderStart = appSource.indexOf("const startStageReorder");
   const reorderEnd = appSource.indexOf("const updateStageReorder", reorderStart);
@@ -42,8 +44,10 @@ try {
   assert.match(appSource.slice(nativeStart, reorderStart), /drag_color_tag: s\.colorTag \?\? null/);
   assert.match(appSource.slice(reorderStart, reorderEnd), /resolveStageDragPreview\(item, stageThumbsRef\.current\)/);
   assert.match(appSource.slice(reorderStart, reorderEnd), /colorTag: item\.colorTag/);
+  assert.match(ghostSource, /if \(options\.colorTag\)/);
+  assert.match(rustDragSource, /if let Some\(color\) = dot_color/);
 
-  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n  ✓ 区内 ghost、原生交接与颜色标记共用同一预览模型\n全部通过\n");
+  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n  ✓ 区内 ghost、原生交接与颜色标记共用同一预览模型\n  ✓ 未填色拖图不渲染预留点\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

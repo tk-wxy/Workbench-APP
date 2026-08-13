@@ -267,6 +267,10 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
 .stage-list-color{flex:0 0 18px;width:18px;height:24px;display:flex;align-items:center;justify-content:center;pointer-events:none;}
+.stage-pin-btn{flex-shrink:0;width:24px;height:24px;display:flex;align-items:center;justify-content:center;border:none;background:transparent;color:var(--text3);cursor:pointer;padding:0;border-radius:6px;opacity:0;transition:opacity 80ms,color 80ms,background 80ms;}
+.stage-item:hover .stage-pin-btn{opacity:.55;}
+.stage-item .stage-pin-btn:hover{background:var(--hover);color:var(--text);opacity:1;}
+.stage-pin-btn.pinned{opacity:1;color:var(--accent);}
 /* 多选模式下卡片悬浮不露出单条操作按钮（避免与批量操作栏语义打架，见 MEMORY §0A）*/
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
@@ -310,15 +314,18 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card-text-preview{width:72px;height:62px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
 /* 文件图标容器：40×40 居中方块（续99 放大：30→40，图标更醒目）*/
 .stage-card-icon-wrap{width:40px;height:40px;border-radius:9px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-/* 用户颜色标记只负责展示；设置入口统一放在条目右键菜单。 */
+/* 单项固定在全局持久化关闭时显示于左上；右上颜色标记仅在实际赋色后渲染。 */
+.stage-card-pin{position:absolute;top:2px;left:2px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0;border:none;background:color-mix(in srgb,var(--card-bg) 76%,transparent);border-radius:6px;color:var(--text3);cursor:pointer;z-index:3;opacity:.58;}
+.stage-card-pin:hover{background:color-mix(in srgb,var(--card-bg) 94%,transparent);color:var(--text);opacity:1;}
+.stage-card-pin.pinned{color:var(--accent);opacity:1;}
+.stage-card-pin svg{width:12px;height:12px;}
+.stage-card.stage-pin-visible > .stage-missing-badge{left:21px;}
 .stage-card-color{position:absolute;top:2px;right:2px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--card-bg) 76%,transparent);border-radius:6px;z-index:2;flex-shrink:0;pointer-events:none;}
 .stage-card-color.color-static{cursor:default;pointer-events:none;}
 .stage-color-marker{width:8px;height:8px;border-radius:50%;display:block;background:var(--stage-tag-color,transparent);border:1px solid var(--stage-tag-color,var(--text3));box-shadow:0 0 0 1px color-mix(in srgb,var(--card-bg) 72%,transparent);}
 .color-red{--stage-tag-color:var(--stage-tag-red);}
 .color-yellow{--stage-tag-color:var(--stage-tag-yellow);}
 .color-blue{--stage-tag-color:var(--stage-tag-blue);}
-.color-none{--stage-tag-color:var(--text3);}
-.color-none .stage-color-marker{background:transparent;}
 /* 标签区（续98：padding 3/5→2/2 收窄 4px，让给上方封面；两行文本内容不变，卡片总高 94px 不变）*/
 .stage-card-label{padding:2px 6px 2px;border-top:0.5px solid var(--card-border-c);display:flex;flex-direction:column;gap:0px;min-width:0;flex-shrink:0;}
 .stage-card-name{font-size:10px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.4;}
@@ -351,9 +358,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .ctx-menu-item{display:block;width:100%;text-align:left;padding:7px 14px;border:none;background:none;color:rgba(255,255,255,0.82);font-size:13px;font-family:var(--font,system-ui);border-radius:5px;cursor:pointer;transition:background 80ms,color 80ms;white-space:nowrap;}
 .ctx-menu-item:hover:not(:disabled){background:rgba(255,255,255,0.10);color:#fff;}
 .ctx-menu-item:disabled{opacity:0.35;cursor:default;}
-.stage-color-menu{width:130px;padding:10px;}
-.stage-color-menu-title{font-size:11px;color:rgba(255,255,255,0.55);margin:0 2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.stage-color-swatches{display:flex;align-items:center;gap:6px;}
+.stage-color-inline{display:flex;align-items:center;justify-content:center;gap:6px;margin:4px 6px 2px;padding-top:6px;border-top:1px solid rgba(255,255,255,0.10);}
 .stage-color-swatch{width:26px;height:26px;border:1px solid transparent;border-radius:7px;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;}
 .stage-color-swatch:hover,.stage-color-swatch.selected{background:rgba(255,255,255,0.10);border-color:rgba(255,255,255,0.18);}
 .stage-color-swatch .stage-color-marker{width:12px;height:12px;box-shadow:none;}
@@ -363,7 +368,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 [data-theme="light"] .ctx-menu{background:#ffffff;border-color:rgba(0,0,0,0.12);box-shadow:0 4px 20px rgba(0,0,0,0.18);}
 [data-theme="light"] .ctx-menu-item{color:rgba(0,0,0,0.75);}
 [data-theme="light"] .ctx-menu-item:hover:not(:disabled){background:rgba(0,0,0,0.07);color:#1a1a1c;}
-[data-theme="light"] .stage-color-menu-title{color:rgba(0,0,0,0.55);}
+[data-theme="light"] .stage-color-inline{border-top-color:rgba(0,0,0,0.10);}
 [data-theme="light"] .stage-color-swatch:hover,[data-theme="light"] .stage-color-swatch.selected{background:rgba(0,0,0,0.07);border-color:rgba(0,0,0,0.16);}
 [data-theme="light"] .stage-color-swatch-clear{color:rgba(0,0,0,0.55);}
 [data-theme="light"] .stage-color-swatch-clear.selected{color:#111;}

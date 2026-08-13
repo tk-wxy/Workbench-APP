@@ -20,7 +20,7 @@ import { appUsageScore } from "./domain/appUsage";
 import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
-import { normalizeStageItemAppearance, setStageItemsColorTag, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
+import { normalizeStageItemAppearance, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
 import {
   buildNativeDragLabel,
   buildNativeDragMeta,
@@ -170,13 +170,11 @@ async function writeItemToClipboard(item: Pasteable) {
 // 自定义右键菜单（浮层）
 type CtxMenuItem = {
   label: string;
-  action: (anchor: HTMLElement) => void | Promise<void>;
+  action: () => void | Promise<void>;
   disabled?: boolean;
-  keepOpen?: boolean;
 };
-type ActionCtxMenu = { kind: "actions"; x: number; y: number; items: CtxMenuItem[] };
-type ColorCtxMenu = { kind: "colors"; x: number; y: number; ids: number[]; selected: StageColorTag | null; mixed: boolean };
-type CtxMenu = ActionCtxMenu | ColorCtxMenu | null;
+type StageColorPicker = { ids: number[]; selected: StageColorTag | null; mixed: boolean };
+type CtxMenu = { kind: "actions"; x: number; y: number; items: CtxMenuItem[]; colors?: StageColorPicker } | null;
 
 function stageColorLabel(tag: StageColorTag, t: ReturnType<typeof makeT>) {
   switch (tag) {
@@ -673,6 +671,16 @@ export default function App() {
     const next = setStageItemsColorTag(stageRef.current, ids, colorTag);
     if (next.some((item, index) => item !== stageRef.current[index])) void saveStage(next);
   }, [saveStage]);
+  const toggleStagePin = useCallback((id: number) => {
+    const next = stageRef.current.map(item => {
+      if (item.id !== id) return item;
+      if (!item.pinned) return { ...item, pinned: true };
+      const { pinned: _removed, ...rest } = item;
+      return rest;
+    });
+    stageRef.current = next;
+    void saveStage(next);
+  }, [saveStage]);
   const saveLauncher = useCallback(async (list:LauncherItem[]) => {
     setLauncher(list);                              // 先上屏（内存态保留 icon，渲染层零改动）
     await persistLauncher(list);
@@ -1099,7 +1107,7 @@ export default function App() {
           if (!keepOpen && dropped && event.payload !== "move" && draggedItems.length === 1 && draggedItems[0].type === "text") {
             const item = draggedItems[0];
             copyAndPaste(item); // 复用现有粘贴出口（含焦点交还 + Ctrl+V）
-            if (!stagePersistRef.current) {
+            if (!shouldRetainStageItem(item, stagePersistRef.current)) {
               const next = stageRef.current.filter(s => s.id !== item.id); // 取走语义：从中转区移除
               setStage(next);
               await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
@@ -1111,7 +1119,10 @@ export default function App() {
           }
           if (dropped && dr.draggedIds.length) {
             if (!stagePersistRef.current) {
-              const ids = new Set(dr.draggedIds);
+              const ids = new Set(dr.draggedIds.filter(id => {
+                const item = stageRef.current.find(candidate => candidate.id === id);
+                return item ? !shouldRetainStageItem(item, false) : false;
+              }));
               if (ids.size) {
                 const next = stageRef.current.filter(s => !ids.has(s.id));
                 setStage(next);
@@ -1865,7 +1876,7 @@ export default function App() {
     toastAddResult(res, "launcher", name);
     launcherDropRef.current?.classList.add("drop-flash");
     setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
-    if ((res === "added" || res === "duplicate") && !stagePersistRef.current) {
+    if ((res === "added" || res === "duplicate") && !shouldRetainStageItem(item, stagePersistRef.current)) {
       const next = stageRef.current.filter(s => s.id !== item.id);
       setStage(next);
       await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
@@ -2190,26 +2201,20 @@ export default function App() {
   }, [stageMultiselect, filteredStage, copyAndPaste]);
 
   // 通用：在鼠标位置弹出自定义右键菜单（边界检测防出屏）
-  const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[]) => {
+  const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[], colors?: StageColorPicker) => {
     e.preventDefault();
     e.stopPropagation();
-    const MENU_W = 176, MENU_H = items.length * 36 + 8;
-    const x = Math.min(e.clientX, window.innerWidth - MENU_W - 8);
-    const y = Math.min(e.clientY, window.innerHeight - MENU_H - 8);
-    setCtxMenu({ kind: "actions", x, y, items });
+    const MENU_W = 176, MENU_H = items.length * 36 + 8 + (colors ? 54 : 0);
+    const x = Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_W - 8));
+    const y = Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_H - 8));
+    setCtxMenu({ kind: "actions", x, y, items, colors });
   }, []);
 
-  const openStageColorMenu = useCallback((anchor: HTMLElement, ids: number[]) => {
+  const buildStageColorPicker = useCallback((ids: number[]): StageColorPicker => {
     const tagged = stageRef.current.filter(candidate => ids.includes(candidate.id)).map(candidate => candidate.colorTag ?? null);
     const selected = tagged[0] ?? null;
     const mixed = tagged.some(tag => tag !== selected);
-    const rect = anchor.getBoundingClientRect();
-    const menuWidth = 130;
-    const menuHeight = 72;
-    const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
-    const below = rect.bottom + 6;
-    const y = below + menuHeight <= window.innerHeight - 8 ? below : Math.max(8, rect.top - menuHeight - 6);
-    setCtxMenu({ kind: "colors", x, y, ids, selected: mixed ? null : selected, mixed });
+    return { ids, selected: mixed ? null : selected, mixed };
   }, []);
 
   // 中转区条目右键菜单：多选模式且有选中项→批量操作；否则→单项操作
@@ -2223,12 +2228,10 @@ export default function App() {
           action: () => { copyAndPaste(combined()); setStageSel(new Set()); setStageMultiselect(false); } },
         { label: t("复制全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
           action: async () => { await writeItemToClipboard(combined()); setBatchCopied(true); setTimeout(() => setBatchCopied(false), 1000); } },
-        { label: t("设置颜色标记"), keepOpen: true,
-          action: anchor => openStageColorMenu(anchor, sel.map(item => item.id)) },
         { label: t("删除全部（{n} 项）", {n: sel.length}),
           action: () => { saveStage(stage.filter(x => !stageSel.has(x.id))); setStageSel(new Set()); } },
         { label: t("取消选择"), action: () => setStageSel(new Set()) },
-      ]);
+      ], buildStageColorPicker(sel.map(item => item.id)));
       return;
     }
     const items: CtxMenuItem[] = [];
@@ -2249,18 +2252,17 @@ export default function App() {
     } else {
       items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     }
-    items.push({ label: t("设置颜色标记"), keepOpen: true,
-      action: anchor => openStageColorMenu(anchor, [s.id]) });
     items.push({ label: t("删除该项目"),   action: () => removeStage(s.id) });
-    openCtxMenu(e, items);
-  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, openStageColorMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
+    openCtxMenu(e, items, buildStageColorPicker([s.id]));
+  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, buildStageColorPicker, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
   const stageItemActions = useMemo<StageItemActions>(() => ({
     activate: handleStageClick,
     openContextMenu: openStageCtxMenu,
+    togglePin: toggleStagePin,
     copy: copyStageToClipboard,
     remove: removeStage,
     open: openStageFile,
-  }), [handleStageClick, openStageCtxMenu, copyStageToClipboard, removeStage, openStageFile]);
+  }), [handleStageClick, openStageCtxMenu, toggleStagePin, copyStageToClipboard, removeStage, openStageFile]);
   const stageItemPointer = useMemo<StageItemPointerHandlers>(() => ({
     pointerDown: handleStagePointerDown,
     pointerMove: handleStagePointerMove,
@@ -2626,6 +2628,7 @@ export default function App() {
                     selected={stageSel.has(s.id)}
                     missing={missingIds.has(s.id)}
                     multiselect={stageMultiselect}
+                    persistAll={stagePersist}
                     copied={copiedStageId===s.id}
                     imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
                     fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
@@ -2646,6 +2649,7 @@ export default function App() {
                     selected={stageSel.has(s.id)}
                     missing={missingIds.has(s.id)}
                     multiselect={stageMultiselect}
+                    persistAll={stagePersist}
                     copied={copiedStageId===s.id}
                     imageThumbnail={s.contentFile ? stageThumbs[stageImageThumbKey(s.contentFile)] : undefined}
                     fileThumbnail={s.items?.[0]?.path ? stageThumbs[s.items[0].path] : undefined}
@@ -2861,38 +2865,33 @@ export default function App() {
       <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
         {ctxMenu.items.map((item,i)=>(
           <button key={i} className="ctx-menu-item" disabled={item.disabled}
-            onClick={event=>{item.action(event.currentTarget);if(!item.keepOpen)setCtxMenu(null);}}>
+            onClick={()=>{item.action();setCtxMenu(null);}}>
             {item.label}
           </button>
         ))}
-      </div>
-    )}
-    {ctxMenu?.kind === "colors" && (
-      <div className="ctx-menu stage-color-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
-        <div className="stage-color-menu-title">
-          {ctxMenu.ids.length > 1 ? t("为所选 {n} 项设置颜色", { n: ctxMenu.ids.length }) : t("设置颜色标记")}
-        </div>
-        <div className="stage-color-swatches">
-          <button
-            type="button"
-            className={`stage-color-swatch stage-color-swatch-clear${!ctxMenu.mixed && ctxMenu.selected === null ? " selected" : ""}`}
-            title={t("无标记")}
-            aria-label={t("无标记")}
-            aria-pressed={!ctxMenu.mixed && ctxMenu.selected === null}
-            onClick={() => { setStageColorTag(ctxMenu.ids, null); setCtxMenu(null); }}
-          >×</button>
-          {STAGE_COLOR_TAGS.map(tag => (
+        {ctxMenu.colors && (
+          <div className="stage-color-inline" aria-label={ctxMenu.colors.ids.length > 1 ? t("为所选 {n} 项设置颜色", { n: ctxMenu.colors.ids.length }) : t("设置颜色标记")}>
             <button
               type="button"
-              key={tag}
-              className={`stage-color-swatch color-${tag}${!ctxMenu.mixed && ctxMenu.selected === tag ? " selected" : ""}`}
-              title={stageColorLabel(tag, t)}
-              aria-label={stageColorLabel(tag, t)}
-              aria-pressed={!ctxMenu.mixed && ctxMenu.selected === tag}
-              onClick={() => { setStageColorTag(ctxMenu.ids, tag); setCtxMenu(null); }}
-            ><span className="stage-color-marker"/></button>
-          ))}
-        </div>
+              className={`stage-color-swatch stage-color-swatch-clear${!ctxMenu.colors.mixed && ctxMenu.colors.selected === null ? " selected" : ""}`}
+              title={t("无标记")}
+              aria-label={t("无标记")}
+              aria-pressed={!ctxMenu.colors.mixed && ctxMenu.colors.selected === null}
+              onClick={() => { setStageColorTag(ctxMenu.colors!.ids, null); setCtxMenu(null); }}
+            >×</button>
+            {STAGE_COLOR_TAGS.map(tag => (
+              <button
+                type="button"
+                key={tag}
+                className={`stage-color-swatch color-${tag}${!ctxMenu.colors!.mixed && ctxMenu.colors!.selected === tag ? " selected" : ""}`}
+                title={stageColorLabel(tag, t)}
+                aria-label={stageColorLabel(tag, t)}
+                aria-pressed={!ctxMenu.colors!.mixed && ctxMenu.colors!.selected === tag}
+                onClick={() => { setStageColorTag(ctxMenu.colors!.ids, tag); setCtxMenu(null); }}
+              ><span className="stage-color-marker"/></button>
+            ))}
+          </div>
+        )}
       </div>
     )}
     {/* 拖拽跟手克隆：与 #overlay 同为兄弟节点（#overlay 的 backdrop-filter 会成为 fixed 的包含块，放里面定位会错），pointerEvents:none 不挡命中检测。
@@ -2903,7 +2902,6 @@ export default function App() {
         ref={el=>{ clipGhostRef.current=el; const d=clipDragRef.current; if(el&&d) el.style.transform=`translate3d(${d.x-d.hotspotX}px,${d.y-d.hotspotY}px,0) scale(1.04)`; }}
         style={{position:"fixed",pointerEvents:"none",zIndex:100002}}>
         <div className="stage-card-thumb">
-          <span className="stage-card-color color-static color-none"><span className="stage-color-marker"/></span>
           {clipDragItem.type === "text"
             ? <div className="stage-card-text-preview">{clipDragItem.content || t("文本")}</div>
             : (clipDragItem.type === "image" || !!clipDragItem.items?.[0]?.isImage) && clipThumbs[clipDragItem.time]

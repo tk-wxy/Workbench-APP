@@ -2,7 +2,7 @@ import { memo, type MouseEvent, type PointerEvent } from "react";
 import { fmtSize } from "../lib/format";
 import { buildSearchExcerpt, STAGE_GRID_SEARCH_EXCERPT, STAGE_LIST_SEARCH_EXCERPT, type TextRange } from "../domain/pageSearchPresentation";
 import HighlightText from "./HighlightText";
-import { FileGlyph, IconCheck, IconCopy, IconOpen, IconTrash, IconWarn } from "../icons";
+import { FileGlyph, IconCheck, IconCopy, IconOpen, IconPin, IconTrash, IconWarn } from "../icons";
 import type { StageItem } from "../types";
 
 type Translate = (zh: string, vars?: Record<string, string | number>) => string;
@@ -10,6 +10,7 @@ type Translate = (zh: string, vars?: Record<string, string | number>) => string;
 export interface StageItemActions {
   activate: (event: MouseEvent, item: StageItem, index: number) => void;
   openContextMenu: (event: MouseEvent, item: StageItem) => void;
+  togglePin: (id: number) => void;
   copy: (item: StageItem) => void;
   remove: (id: number) => void;
   open: (item: StageItem) => void;
@@ -28,6 +29,7 @@ interface StageItemViewProps {
   selected: boolean;
   missing: boolean;
   multiselect: boolean;
+  persistAll: boolean;
   copied: boolean;
   imageThumbnail?: string;
   fileThumbnail?: string;
@@ -55,6 +57,7 @@ export const StageGridCard = memo(function StageGridCard({
   selected,
   missing,
   multiselect,
+  persistAll,
   copied,
   imageThumbnail,
   fileThumbnail,
@@ -77,16 +80,26 @@ export const StageGridCard = memo(function StageGridCard({
   const textPreview = pageSearchActive && highlightRanges.length
     ? buildSearchExcerpt(item.content || "", highlightRanges, STAGE_GRID_SEARCH_EXCERPT)
     : { text: item.content || "", ranges: [] as TextRange[] };
-  const colorMarker = (
-    <span className={`stage-card-color color-${item.colorTag ?? "none"}`} aria-hidden="true">
+  const colorMarker = item.colorTag ? (
+    <span className={`stage-card-color color-${item.colorTag}`} aria-hidden="true">
       <span className="stage-color-marker"/>
     </span>
+  ) : null;
+  const pin = persistAll ? null : (
+    <button
+      type="button"
+      className={`stage-card-pin${item.pinned ? " pinned" : ""}`}
+      onPointerDown={event => event.stopPropagation()}
+      onClick={event => { event.stopPropagation(); actions.togglePin(item.id); }}
+      title={item.pinned ? t("已固定：取走 / 拖出后保留（点击取消）") : t("点击固定：取走 / 拖出后仍保留在中转区")}
+      aria-pressed={!!item.pinned}
+    ><IconPin/></button>
   );
 
   return (
     <div
       data-stage-id={item.id}
-      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${newlyAdded ? " stage-new" : ""}`}
+      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${!persistAll ? " stage-pin-visible" : ""}${newlyAdded ? " stage-new" : ""}`}
       draggable={false}
       onDragStart={event => event.preventDefault()}
       onClick={event => actions.activate(event, item, index)}
@@ -102,6 +115,7 @@ export const StageGridCard = memo(function StageGridCard({
       {missing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
       {item.type === "image" && (
         <div className="stage-card-thumb">
+          {pin}
           {colorMarker}
           {imageThumbnail
             ? <img className="cover" draggable={false} src={imageThumbnail} alt=""/>
@@ -112,12 +126,14 @@ export const StageGridCard = memo(function StageGridCard({
       )}
       {item.type === "text" && (
         <div className="stage-card-thumb">
+          {pin}
           {colorMarker}
           <div className="stage-card-text-preview"><HighlightText text={textPreview.text} ranges={textPreview.ranges} variant="body"/></div>
         </div>
       )}
       {item.type === "file" && (
         <div className="stage-card-thumb">
+          {pin}
           {colorMarker}
           <div className="stage-card-icon-wrap">
             {item.items?.[0]?.icon
@@ -149,6 +165,7 @@ export const StageListRow = memo(function StageListRow({
   selected,
   missing,
   multiselect,
+  persistAll,
   copied,
   imageThumbnail,
   fileThumbnail,
@@ -195,7 +212,16 @@ export const StageListRow = memo(function StageListRow({
               ? <FileGlyph cat="doc" size={20}/>
               : <FileGlyph size={20} isDir={item.isDir} isImage={item.items?.[0]?.isImage} ext={item.ext ?? item.items?.[0]?.ext ?? ""}/>}</span>}
       {missing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
-      <span className={`stage-list-color color-${item.colorTag ?? "none"}`} aria-hidden="true"><span className="stage-color-marker"/></span>
+      {!persistAll && (
+        <button
+          className={`stage-pin-btn${item.pinned ? " pinned" : ""}`}
+          onPointerDown={event => event.stopPropagation()}
+          onClick={event => { event.stopPropagation(); actions.togglePin(item.id); }}
+          title={item.pinned ? t("已固定：取走 / 拖出后保留（点击取消）") : t("点击固定：取走 / 拖出后仍保留在中转区")}
+          aria-pressed={!!item.pinned}
+        ><IconPin/></button>
+      )}
+      {item.colorTag && <span className={`stage-list-color color-${item.colorTag}`} aria-hidden="true"><span className="stage-color-marker"/></span>}
       <span className="stage-title"><HighlightText text={label} ranges={item.type === "text" ? textPreview.ranges : highlightRanges} variant={item.type === "text" ? "body" : "name"}/></span>
       {item.type === "file" && item.count === 1 && item.size ? <span className="stage-meta">{fmtSize(item.size)}</span> : null}
       <div className="stage-actions">

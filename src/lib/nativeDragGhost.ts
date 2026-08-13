@@ -23,12 +23,14 @@ export function createNativeDragGhost(options: NativeDragGhostOptions): HTMLDivE
 
   const thumb = document.createElement("div");
   thumb.className = "stage-card-thumb";
-  const color = document.createElement("span");
-  color.className = `stage-card-color color-static color-${options.colorTag ?? "none"}`;
-  const marker = document.createElement("span");
-  marker.className = "stage-color-marker";
-  color.appendChild(marker);
-  thumb.appendChild(color);
+  if (options.colorTag) {
+    const color = document.createElement("span");
+    color.className = `stage-card-color color-static color-${options.colorTag}`;
+    const marker = document.createElement("span");
+    marker.className = "stage-color-marker";
+    color.appendChild(marker);
+    thumb.appendChild(color);
+  }
 
   if (options.type === "text") {
     const text = document.createElement("div");

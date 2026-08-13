@@ -2054,14 +2054,16 @@ fn build_drag_preview(items: &[DragOutItem]) -> Option<DragPreview> {
     let dot_left = card_left + card_width as i32 - (10.0 * scale).round() as i32;
     let dot_top = card_top + (7.0 * scale).round() as i32;
     let dot_color = drag_color_tag_rgba(first.drag_color_tag.as_deref(), light);
-    draw_drag_color_marker(
-        &mut canvas,
-        dot_left,
-        dot_top,
-        dot_size,
-        dot_color,
-        if light { [0, 0, 0, 92] } else { [255, 255, 255, 92] },
-    );
+    if let Some(color) = dot_color {
+        draw_drag_color_marker(
+            &mut canvas,
+            dot_left,
+            dot_top,
+            dot_size,
+            Some(color),
+            if light { [0, 0, 0, 92] } else { [255, 255, 255, 92] },
+        );
+    }
 
     let mut bgra = Vec::with_capacity((width * height * 4) as usize);
     for pixel in canvas.pixels() {

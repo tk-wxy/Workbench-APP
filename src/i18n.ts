@@ -67,6 +67,10 @@ export const EN_DICT: Record<string, string> = {
   "字数": "Characters",
   "数量": "Count",
   "颜色标记": "Color label",
+  "状态": "Status",
+  "已固定": "Pinned",
+  "已固定：取走 / 拖出后保留（点击取消）": "Pinned: keep after taking or dragging out (click to unpin)",
+  "点击固定：取走 / 拖出后仍保留在中转区": "Pin: keep in Stage after taking or dragging out",
   // 增强搜索结果分段标题（续114b）。「应用程序」不能复用既有的「应用」——那个 key 是设置里
   // 「应用」按钮的**动词**（译作 Apply），拿来当段标题会显示成 "Apply"。
   "应用程序": "Apps",

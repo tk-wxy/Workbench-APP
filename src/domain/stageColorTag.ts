@@ -8,12 +8,13 @@ export function isStageColorTag(value: unknown): value is StageColorTag {
   return typeof value === "string" && (STAGE_COLOR_TAGS as readonly string[]).includes(value);
 }
 
-// pinned 是旧版单项保留开关。新颜色标记只表达用户分类，不再携带保留语义；
-// 载入与落盘都经此函数，避免旧字段继续形成看不见的行为。
+// 颜色和单项保留是两个独立维度；落盘时只保留合法颜色与 pinned=true，
+// 避免未知值或冗余 false 污染 store。
 export function normalizeStageItemAppearance(item: StageItem): StageItem {
-  const legacy = item as StageItem & { pinned?: unknown; colorTag?: unknown };
-  const { pinned: _legacyPinned, colorTag, ...rest } = legacy;
-  return isStageColorTag(colorTag) ? { ...rest, colorTag } : rest;
+  const raw = item as StageItem & { pinned?: unknown; colorTag?: unknown };
+  const { pinned, colorTag, ...rest } = raw;
+  const normalized = isStageColorTag(colorTag) ? { ...rest, colorTag } : rest;
+  return pinned === true ? { ...normalized, pinned: true } : normalized;
 }
 
 export function setStageItemsColorTag(
@@ -29,4 +30,8 @@ export function setStageItemsColorTag(
     const { colorTag: _removed, ...rest } = item;
     return rest;
   });
+}
+
+export function shouldRetainStageItem(item: Pick<StageItem, "pinned">, persistAll: boolean): boolean {
+  return persistAll || item.pinned === true;
 }
