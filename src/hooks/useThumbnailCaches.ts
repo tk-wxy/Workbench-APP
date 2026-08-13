@@ -6,6 +6,17 @@ const STAGE_IMAGE_THUMB_PREFIX = "simg:";
 
 export const stageImageThumbKey = (contentFile: string) => STAGE_IMAGE_THUMB_PREFIX + contentFile;
 
+export function resolveStageDragPreview(
+  item: StageItem,
+  thumbnails: Readonly<Record<string, string>>,
+): string | null {
+  if (item.contentFile) return thumbnails[stageImageThumbKey(item.contentFile)] ?? null;
+  const first = item.items?.[0];
+  if (!first) return null;
+  if (first.isImage) return thumbnails[first.path] ?? first.icon ?? null;
+  return first.icon ?? null;
+}
+
 export function collectStageThumbnailKeys(stage: StageItem[], launcher: LauncherItem[]): string[] {
   const stagePaths = stage
     .filter(item => item.type === "file" && item.items?.[0]?.isImage && item.items?.[0]?.path)

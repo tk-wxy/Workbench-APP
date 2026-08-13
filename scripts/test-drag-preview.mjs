@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { build } from "esbuild";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -32,7 +33,15 @@ try {
   assert.equal(domain.shouldFinishNativeDragHandoff(secondSession), true);
   assert.equal(domain.shouldFinishNativeDragHandoff(null, secondSession), false);
 
-  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n全部通过\n");
+  const appSource = readFileSync(path.join(root, "src/App.tsx"), "utf8");
+  const nativeStart = appSource.indexOf("const beginNativeDragOut");
+  const reorderStart = appSource.indexOf("const startStageReorder");
+  const reorderEnd = appSource.indexOf("const updateStageReorder", reorderStart);
+  assert.ok(nativeStart >= 0 && reorderStart > nativeStart && reorderEnd > reorderStart);
+  assert.match(appSource.slice(nativeStart, reorderStart), /resolveStageDragPreview\(s, stageThumbsRef\.current\)/);
+  assert.match(appSource.slice(reorderStart, reorderEnd), /resolveStageDragPreview\(item, stageThumbsRef\.current\)/);
+
+  console.log("拖出悬浮样式 —— 中转卡片标签与交接代际\n  ✓ 文件/文本/图片使用同一卡片标签模型\n  ✓ 旧轮 ready 不会结束新轮 handoff\n  ✓ 区内 ghost 与原生交接共用同一预览解析器\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

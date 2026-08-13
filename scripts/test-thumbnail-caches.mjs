@@ -22,6 +22,7 @@ const {
   collectStageThumbnailKeys,
   pruneNumberThumbnailCache,
   pruneStringThumbnailCache,
+  resolveStageDragPreview,
   stageImageThumbKey,
 } = await import(pathToFileURL(outfile).href);
 
@@ -54,6 +55,20 @@ check("中转文件、启动台图片和外置 image 共用一个去重键集",
 check("旧启动台项缺少 ext 或导入项带点扩展名仍进入缩略图队列", stageKeys.includes("D:/legacy.png") && stageKeys.includes("D:/dotted.png"));
 check("原生解码器不支持的 SVG 不会反复请求失败缩略图", !stageKeys.includes("D:/vector.svg"));
 check("外置中转图片键使用独立前缀", stageImageThumbKey("abc.png") === "simg:abc.png");
+
+const shellIcon = "data:image/png;base64,shell-icon";
+const imageIcon = "data:image/png;base64,image-icon";
+const stageThumbs = {
+  "C:/photo.png": "data:image/png;base64/photo-thumb",
+  "simg:stage-image.png": "data:image/png;base64/stage-thumb",
+};
+check("普通文件拖动直接复用卡片的 shell 图标",
+  resolveStageDragPreview({ id: 11, type: "file", items: [{ path: "C:/styles.css", name: "styles.css", isImage: false, icon: shellIcon }] }, stageThumbs) === shellIcon);
+check("图片文件拖动优先复用小缩略图并保留图标兜底",
+  resolveStageDragPreview({ id: 12, type: "file", items: [{ path: "C:/photo.png", name: "photo.png", isImage: true, icon: imageIcon }] }, stageThumbs) === stageThumbs["C:/photo.png"]
+  && resolveStageDragPreview({ id: 13, type: "file", items: [{ path: "C:/missing.png", name: "missing.png", isImage: true, icon: imageIcon }] }, stageThumbs) === imageIcon);
+check("外置中转图片拖动使用独立键空间内的缩略图",
+  resolveStageDragPreview({ id: 14, type: "image", contentFile: "stage-image.png" }, stageThumbs) === stageThumbs["simg:stage-image.png"]);
 
 const clipTimes = collectClipThumbnailTimes([
   { type: "image", time: 11 },

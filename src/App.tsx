@@ -29,7 +29,7 @@ import {
 } from "./domain/dragPreview";
 import { matchPageSearch, type TextRange } from "./domain/pageSearchPresentation";
 import { useWorkbenchPersistence } from "./hooks/useWorkbenchPersistence";
-import { stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
+import { resolveStageDragPreview, stageImageThumbKey, useThumbnailCaches } from "./hooks/useThumbnailCaches";
 import { useEnhancedSearchQuery } from "./hooks/useEnhancedSearchQuery";
 import { useEnhancedSearchPreview } from "./hooks/useEnhancedSearchPreview";
 import { useEnhancedSearchSelection } from "./hooks/useEnhancedSearchSelection";
@@ -1678,13 +1678,7 @@ export default function App() {
       return item ? [item] : [];
     });
     const sessionId = nextNativeDragSessionId();
-    const previewFor = (s: StageItem) => {
-      if (s.contentFile) return stageThumbsRef.current[stageImageThumbKey(s.contentFile)] ?? null;
-      const first = s.items?.[0];
-      if (!first) return null;
-      if (first.isImage) return stageThumbsRef.current[first.path] ?? first.icon ?? null;
-      return first.icon ?? null;
-    };
+    const previewFor = (s: StageItem) => resolveStageDragPreview(s, stageThumbsRef.current);
     const handoffPoint = point ?? (stageReorderRef.current.lastClientX || stageReorderRef.current.lastClientY
       ? { x: stageReorderRef.current.lastClientX, y: stageReorderRef.current.lastClientY }
       : undefined);
@@ -1752,11 +1746,7 @@ export default function App() {
     const grabOffsetY = Math.max(4, Math.min(90, ((clientY - sourceRect.top) / Math.max(1, sourceRect.height)) * 94));
     tiles.forEach(t => t.classList.add("stage-shift"));
     const preview = previewStyle === "card"
-      ? item.contentFile
-        ? stageThumbsRef.current[stageImageThumbKey(item.contentFile)] ?? null
-        : item.items?.[0]?.path
-          ? stageThumbsRef.current[item.items[0].path] ?? null
-          : null
+      ? resolveStageDragPreview(item, stageThumbsRef.current)
       : null;
     const ghostEl = createNativeDragGhost({
       style: previewStyle,
