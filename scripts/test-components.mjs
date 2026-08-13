@@ -122,7 +122,7 @@ const stageCommon = {
   multiselect: false,
   copied: false,
   t,
-  actions: { activate: noop, openContextMenu: noop, openColorMenu: noop, copy: noop, remove: noop, open: noop },
+  actions: { activate: noop, openContextMenu: noop, copy: noop, remove: noop, open: noop },
   pointer: { pointerDown: noop, pointerMove: noop, pointerUp: noop, lostPointerCapture: noop },
   highlightRanges: [],
   pageSearchActive: false,
@@ -137,7 +137,7 @@ const taggedStageCommon = { ...stageCommon, item: { ...stageItem, colorTag: "blu
 const taggedStageGridHtml = renderToStaticMarkup(createElement(StageGridCard, taggedStageCommon));
 const taggedStageListHtml = renderToStaticMarkup(createElement(StageListRow, taggedStageCommon));
 check("中转手动颜色在方格与列表均使用同一标记", taggedStageGridHtml.includes("stage-card-color color-blue") && taggedStageListHtml.includes("stage-list-color color-blue"), taggedStageGridHtml + taggedStageListHtml);
-check("颜色入口不再暴露旧固定语义", !taggedStageGridHtml.includes("固定") && !taggedStageListHtml.includes("固定"), taggedStageGridHtml + taggedStageListHtml);
+check("颜色标记只展示且不再充当卡片按钮", taggedStageGridHtml.includes('<span class="stage-card-color color-blue"') && taggedStageListHtml.includes('<span class="stage-list-color color-blue"') && !taggedStageGridHtml.includes('<button class="stage-card-color') && !taggedStageListHtml.includes('<button class="stage-list-color'), taggedStageGridHtml + taggedStageListHtml);
 const stageNewGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, newlyAdded: true }));
 const stageNewListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, newlyAdded: true }));
 check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);

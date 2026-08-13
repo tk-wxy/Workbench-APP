@@ -266,8 +266,7 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-actions{display:flex;gap:2px;flex-shrink:0;}
 .stage-item .clip-copy-btn,.stage-item .clip-del-btn,.stage-item .stage-open-btn{opacity:0;}
 .stage-item:hover .clip-copy-btn,.stage-item:hover .clip-del-btn,.stage-item:hover .stage-open-btn{opacity:1;}
-.stage-list-color{flex:0 0 18px;width:18px;height:24px;border:0;background:transparent;padding:0;display:flex;align-items:center;justify-content:center;cursor:pointer;border-radius:5px;}
-.stage-list-color:hover{background:var(--hover);}
+.stage-list-color{flex:0 0 18px;width:18px;height:24px;display:flex;align-items:center;justify-content:center;pointer-events:none;}
 /* 多选模式下卡片悬浮不露出单条操作按钮（避免与批量操作栏语义打架，见 MEMORY §0A）*/
 .stage-list.stage-multiselect .stage-item:hover .clip-copy-btn,.stage-list.stage-multiselect .stage-item:hover .clip-del-btn,.stage-list.stage-multiselect .stage-item:hover .stage-open-btn{opacity:0;}
 .stage-open-btn{width:20px;height:20px;border:none;background:none;color:var(--text3);cursor:pointer;border-radius:4px;transition:opacity 80ms,background 80ms,color 80ms;display:flex;align-items:center;justify-content:center;padding:0;}
@@ -311,9 +310,8 @@ input,textarea{user-select:text;-webkit-user-select:text;}
 .stage-card-text-preview{width:72px;height:62px;padding:5px 7px;box-sizing:border-box;font-size:9px;line-height:1.45;color:var(--text2);display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;text-align:left;word-break:break-all;flex-shrink:0;}
 /* 文件图标容器：40×40 居中方块（续99 放大：30→40，图标更醒目）*/
 .stage-card-icon-wrap{width:40px;height:40px;border-radius:9px;background:var(--card-bg);border:0.5px solid var(--card-border-c);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-/* 用户颜色标记：按钮热区不改卡片几何；无标记为空心点，有标记为实心点。 */
-.stage-card-color{position:absolute;top:2px;right:2px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;padding:0;border:none;background:color-mix(in srgb,var(--card-bg) 76%,transparent);border-radius:6px;cursor:pointer;z-index:2;flex-shrink:0;}
-.stage-card-color:hover{background:color-mix(in srgb,var(--card-bg) 94%,transparent);}
+/* 用户颜色标记只负责展示；设置入口统一放在条目右键菜单。 */
+.stage-card-color{position:absolute;top:2px;right:2px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--card-bg) 76%,transparent);border-radius:6px;z-index:2;flex-shrink:0;pointer-events:none;}
 .stage-card-color.color-static{cursor:default;pointer-events:none;}
 .stage-color-marker{width:8px;height:8px;border-radius:50%;display:block;background:var(--stage-tag-color,transparent);border:1px solid var(--stage-tag-color,var(--text3));box-shadow:0 0 0 1px color-mix(in srgb,var(--card-bg) 72%,transparent);}
 .color-red{--stage-tag-color:var(--stage-tag-red);}

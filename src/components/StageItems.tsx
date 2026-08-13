@@ -10,7 +10,6 @@ type Translate = (zh: string, vars?: Record<string, string | number>) => string;
 export interface StageItemActions {
   activate: (event: MouseEvent, item: StageItem, index: number) => void;
   openContextMenu: (event: MouseEvent, item: StageItem) => void;
-  openColorMenu: (event: MouseEvent, item: StageItem) => void;
   copy: (item: StageItem) => void;
   remove: (id: number) => void;
   open: (item: StageItem) => void;
@@ -79,16 +78,9 @@ export const StageGridCard = memo(function StageGridCard({
     ? buildSearchExcerpt(item.content || "", highlightRanges, STAGE_GRID_SEARCH_EXCERPT)
     : { text: item.content || "", ranges: [] as TextRange[] };
   const colorMarker = (
-    <button
-      type="button"
-      className={`stage-card-color color-${item.colorTag ?? "none"}`}
-      onPointerDown={event => event.stopPropagation()}
-      onClick={event => { event.stopPropagation(); actions.openColorMenu(event, item); }}
-      title={t("设置颜色标记")}
-      aria-label={t("设置颜色标记")}
-    >
+    <span className={`stage-card-color color-${item.colorTag ?? "none"}`} aria-hidden="true">
       <span className="stage-color-marker"/>
-    </button>
+    </span>
   );
 
   return (
@@ -203,14 +195,7 @@ export const StageListRow = memo(function StageListRow({
               ? <FileGlyph cat="doc" size={20}/>
               : <FileGlyph size={20} isDir={item.isDir} isImage={item.items?.[0]?.isImage} ext={item.ext ?? item.items?.[0]?.ext ?? ""}/>}</span>}
       {missing && <span className="stage-missing-badge" title={t("原文件已失踪（可能被删除或移动）")}><IconWarn size={15}/></span>}
-      <button
-        type="button"
-        className={`stage-list-color color-${item.colorTag ?? "none"}`}
-        onPointerDown={event => event.stopPropagation()}
-        onClick={event => { event.stopPropagation(); actions.openColorMenu(event, item); }}
-        title={t("设置颜色标记")}
-        aria-label={t("设置颜色标记")}
-      ><span className="stage-color-marker"/></button>
+      <span className={`stage-list-color color-${item.colorTag ?? "none"}`} aria-hidden="true"><span className="stage-color-marker"/></span>
       <span className="stage-title"><HighlightText text={label} ranges={item.type === "text" ? textPreview.ranges : highlightRanges} variant={item.type === "text" ? "body" : "name"}/></span>
       {item.type === "file" && item.count === 1 && item.size ? <span className="stage-meta">{fmtSize(item.size)}</span> : null}
       <div className="stage-actions">

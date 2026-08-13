@@ -168,7 +168,12 @@ async function writeItemToClipboard(item: Pasteable) {
 }
 
 // 自定义右键菜单（浮层）
-type CtxMenuItem = { label: string; action: () => void; disabled?: boolean };
+type CtxMenuItem = {
+  label: string;
+  action: (anchor: HTMLElement) => void | Promise<void>;
+  disabled?: boolean;
+  keepOpen?: boolean;
+};
 type ActionCtxMenu = { kind: "actions"; x: number; y: number; items: CtxMenuItem[] };
 type ColorCtxMenu = { kind: "colors"; x: number; y: number; ids: number[]; selected: StageColorTag | null; mixed: boolean };
 type CtxMenu = ActionCtxMenu | ColorCtxMenu | null;
@@ -2194,21 +2199,18 @@ export default function App() {
     setCtxMenu({ kind: "actions", x, y, items });
   }, []);
 
-  const openStageColorMenu = useCallback((e: React.MouseEvent, item: StageItem) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const ids = stageMultiselect && stageSel.has(item.id) ? [...stageSel] : [item.id];
+  const openStageColorMenu = useCallback((anchor: HTMLElement, ids: number[]) => {
     const tagged = stageRef.current.filter(candidate => ids.includes(candidate.id)).map(candidate => candidate.colorTag ?? null);
     const selected = tagged[0] ?? null;
     const mixed = tagged.some(tag => tag !== selected);
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
     const menuWidth = 130;
     const menuHeight = 72;
     const x = Math.max(8, Math.min(rect.right - menuWidth, window.innerWidth - menuWidth - 8));
     const below = rect.bottom + 6;
     const y = below + menuHeight <= window.innerHeight - 8 ? below : Math.max(8, rect.top - menuHeight - 6);
     setCtxMenu({ kind: "colors", x, y, ids, selected: mixed ? null : selected, mixed });
-  }, [stageMultiselect, stageSel]);
+  }, []);
 
   // 中转区条目右键菜单：多选模式且有选中项→批量操作；否则→单项操作
   const openStageCtxMenu = useCallback((e: React.MouseEvent, s: StageItem) => {
@@ -2221,6 +2223,8 @@ export default function App() {
           action: () => { copyAndPaste(combined()); setStageSel(new Set()); setStageMultiselect(false); } },
         { label: t("复制全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
           action: async () => { await writeItemToClipboard(combined()); setBatchCopied(true); setTimeout(() => setBatchCopied(false), 1000); } },
+        { label: t("设置颜色标记"), keepOpen: true,
+          action: anchor => openStageColorMenu(anchor, sel.map(item => item.id)) },
         { label: t("删除全部（{n} 项）", {n: sel.length}),
           action: () => { saveStage(stage.filter(x => !stageSel.has(x.id))); setStageSel(new Set()); } },
         { label: t("取消选择"), action: () => setStageSel(new Set()) },
@@ -2245,17 +2249,18 @@ export default function App() {
     } else {
       items.push({ label: t("复制到剪贴板"), action: () => copyStageToClipboard(s) });
     }
+    items.push({ label: t("设置颜色标记"), keepOpen: true,
+      action: anchor => openStageColorMenu(anchor, [s.id]) });
     items.push({ label: t("删除该项目"),   action: () => removeStage(s.id) });
     openCtxMenu(e, items);
-  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
+  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, openStageColorMenu, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
   const stageItemActions = useMemo<StageItemActions>(() => ({
     activate: handleStageClick,
     openContextMenu: openStageCtxMenu,
-    openColorMenu: openStageColorMenu,
     copy: copyStageToClipboard,
     remove: removeStage,
     open: openStageFile,
-  }), [handleStageClick, openStageCtxMenu, openStageColorMenu, copyStageToClipboard, removeStage, openStageFile]);
+  }), [handleStageClick, openStageCtxMenu, copyStageToClipboard, removeStage, openStageFile]);
   const stageItemPointer = useMemo<StageItemPointerHandlers>(() => ({
     pointerDown: handleStagePointerDown,
     pointerMove: handleStagePointerMove,
@@ -2856,7 +2861,7 @@ export default function App() {
       <div className="ctx-menu" style={{left:ctxMenu.x, top:ctxMenu.y}} onMouseDown={e=>e.stopPropagation()}>
         {ctxMenu.items.map((item,i)=>(
           <button key={i} className="ctx-menu-item" disabled={item.disabled}
-            onClick={()=>{item.action();setCtxMenu(null);}}>
+            onClick={event=>{item.action(event.currentTarget);if(!item.keepOpen)setCtxMenu(null);}}>
             {item.label}
           </button>
         ))}
