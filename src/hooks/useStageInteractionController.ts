@@ -13,6 +13,7 @@ import {
   sameIdSet,
   selectLassoIds,
   type LassoRect,
+  type RectBounds,
   type StageInteractionState,
 } from "../domain/stageInteraction";
 import type { StageItem } from "../types";
@@ -63,13 +64,14 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   const lassoRef = useRef(lasso);
   const lassoArmedRef = useRef(false);
   const lassoRectsRef = useRef<LassoRect[]>([]);
+  const lassoBoundsRef = useRef<RectBounds | null>(null);
   const lassoVisualRef = useRef<HTMLDivElement | null>(null);
   const suppressClickRef = useRef(false);
 
   const clampLassoPoint = useCallback((point: { x: number; y: number }) => {
-    const rect = dropAreaRef.current?.getBoundingClientRect();
+    const rect = lassoBoundsRef.current;
     return rect ? clampPointToRect(point, rect) : point;
-  }, [dropAreaRef]);
+  }, []);
 
   const paintLasso = useCallback((origin: { x: number; y: number }, current: { x: number; y: number }) => {
     const element = lassoVisualRef.current;
@@ -90,7 +92,12 @@ export function useStageInteractionController(options: StageInteractionOptions) 
 
   const snapshotLassoRects = useCallback(() => {
     const rects: LassoRect[] = [];
-    dropAreaRef.current?.querySelectorAll<HTMLElement>(stageLayout === "grid" ? ".stage-card" : ".stage-item").forEach(element => {
+    const container = dropAreaRef.current;
+    const bounds = container?.getBoundingClientRect();
+    lassoBoundsRef.current = bounds
+      ? { left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom }
+      : null;
+    container?.querySelectorAll<HTMLElement>(stageLayout === "grid" ? ".stage-card" : ".stage-item").forEach(element => {
       const id = Number(element.dataset.stageId);
       if (Number.isNaN(id)) return;
       const rect = element.getBoundingClientRect();
@@ -107,6 +114,8 @@ export function useStageInteractionController(options: StageInteractionOptions) 
   const cancelLasso = useCallback(() => {
     lassoArmedRef.current = false;
     dropAreaRef.current?.classList.remove("lasso-active");
+    lassoBoundsRef.current = null;
+    lassoRectsRef.current = [];
     lassoRef.current = { ...lassoRef.current, active: false };
     setLasso(state => state.active ? { ...state, active: false } : state);
   }, [dropAreaRef]);
@@ -121,6 +130,8 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     lassoRef.current = next;
     setLasso(next);
     lassoArmedRef.current = false;
+    lassoBoundsRef.current = null;
+    lassoRectsRef.current = [];
     dropAreaRef.current?.classList.remove("lasso-active");
   }, [cancelReorder, dropAreaRef, interactionRef, reorderActive, setNativeReorderActive]);
 
@@ -170,6 +181,8 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     lassoArmedRef.current = false;
     try { (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId); } catch {}
     if (!lassoRef.current.active) {
+      lassoBoundsRef.current = null;
+      lassoRectsRef.current = [];
       if (selectedRef.current.size || multiselectRef.current) {
         setSelected(new Set());
         setMultiselect(false);
@@ -178,6 +191,8 @@ export function useStageInteractionController(options: StageInteractionOptions) 
       return;
     }
     dropAreaRef.current?.classList.remove("lasso-active");
+    lassoBoundsRef.current = null;
+    lassoRectsRef.current = [];
     lassoRef.current = { ...lassoRef.current, active: false };
     setLasso(state => ({ ...state, active: false }));
     if (!selectedRef.current.size) setMultiselect(false);
@@ -188,7 +203,12 @@ export function useStageInteractionController(options: StageInteractionOptions) 
     suppressClickRef.current = false;
     const itemId = Number((event.currentTarget as HTMLElement).dataset.stageId);
     if (Number.isNaN(itemId)) return;
-    interactionRef.current = beginStageInteraction(itemId, { x: event.clientX, y: event.clientY });
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    interactionRef.current = beginStageInteraction(
+      itemId,
+      { x: event.clientX, y: event.clientY },
+      { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+    );
     try { (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId); } catch {}
   }, [interactionRef]);
 
@@ -203,7 +223,7 @@ export function useStageInteractionController(options: StageInteractionOptions) 
         selectedIds: selectedRef.current,
         itemId,
         origin: interaction.origin,
-        itemRect: (event.currentTarget as HTMLElement).getBoundingClientRect(),
+        itemRect: interaction.itemRect ?? (event.currentTarget as HTMLElement).getBoundingClientRect(),
       });
       const current = { x: event.clientX, y: event.clientY };
       if (!hasReachedStageThreshold(interaction.origin, current, intent.threshold)) return;

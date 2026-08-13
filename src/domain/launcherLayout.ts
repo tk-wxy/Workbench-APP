@@ -9,6 +9,22 @@ export const LAUNCHER_MAX = 200;
 
 export const createLauncherId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000);
 
+export function reorderLauncherItemAtSlot(
+  current: readonly LauncherItem[],
+  sourceId: number,
+  slot: number,
+): LauncherItem[] {
+  const sourceIndex = current.findIndex(item => item.id === sourceId);
+  if (sourceIndex < 0) return [...current];
+  const boundedSlot = Math.max(0, Math.min(Math.trunc(slot), current.length));
+  const target = Math.max(0, Math.min(boundedSlot - (sourceIndex < boundedSlot ? 1 : 0), current.length - 1));
+  if (target === sourceIndex) return [...current];
+  const next = [...current];
+  const [moved] = next.splice(sourceIndex, 1);
+  next.splice(target, 0, moved);
+  return next;
+}
+
 // The portable layout deliberately excludes id/iconFile. Those values only identify local
 // in-memory state and app-data files; embedded icons remain portable and are externalized again
 // through the launcher's single persistence path after import.

@@ -17,7 +17,7 @@ await build({
   logLevel: "error",
 });
 
-const { LAUNCHER_MAX, buildLauncherLayoutExport, previewLauncherImport } = await import(pathToFileURL(outfile).href);
+const { LAUNCHER_MAX, buildLauncherLayoutExport, previewLauncherImport, reorderLauncherItemAtSlot } = await import(pathToFileURL(outfile).href);
 let failed = 0;
 const check = (name, condition, detail = "") => {
   if (condition) { console.log(`  ✓ ${name}`); return; }
@@ -94,6 +94,17 @@ const exported = buildLauncherLayoutExport([{
 check("导出格式与时间稳定", exported.format === "workbench-launcher" && exported.version === 1 && exported.exportedAt === "2026-08-04T00:00:00.000Z");
 check("导出不携带 id/iconFile", !("id" in exported.items[0]) && !("iconFile" in exported.items[0]));
 check("缺失内嵌图标规范化为 null", exported.items[0].icon === null);
+
+const reorderItems = [
+  { id: 1, kind: "app", name: "one", path: "1" },
+  { id: 2, kind: "app", name: "two", path: "2" },
+  { id: 3, kind: "app", name: "three", path: "3" },
+  { id: 4, kind: "app", name: "four", path: "4" },
+];
+check("排序按 source id 而非旧索引移动", reorderLauncherItemAtSlot(reorderItems, 2, 4).map(item => item.id).join(",") === "1,3,4,2");
+check("向前移动会扣除源槽位", reorderLauncherItemAtSlot(reorderItems, 4, 1).map(item => item.id).join(",") === "1,4,2,3");
+check("源条目已消失时不插入 undefined", reorderLauncherItemAtSlot(reorderItems, 99, 2).map(item => item.id).join(",") === "1,2,3,4");
+check("未换位时保持原顺序", reorderLauncherItemAtSlot(reorderItems, 2, 2).map(item => item.id).join(",") === "1,2,3,4");
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");

@@ -16,6 +16,10 @@ interface LauncherTileProps {
   onOpen: (item: LauncherItem, iconEl: HTMLElement | null) => void;
   onContextMenu: (event: MouseEvent, item: LauncherItem) => void;
   onPointerDown: (event: PointerEvent, id: number) => void;
+  onPointerMove: (event: PointerEvent) => void;
+  onPointerUp: (event: PointerEvent) => void;
+  onPointerCancel: (event: PointerEvent) => void;
+  onLostPointerCapture: () => void;
   highlightRanges: TextRange[];
 }
 
@@ -28,6 +32,10 @@ const LauncherTile = memo(function LauncherTile({
   onOpen,
   onContextMenu,
   onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
   highlightRanges,
 }: LauncherTileProps) {
   const imageThumbnail = item.kind === "file"
@@ -41,6 +49,10 @@ const LauncherTile = memo(function LauncherTile({
       onClick={event => onOpen(item, event.currentTarget.querySelector<HTMLElement>(".app-tile-icon"))}
       onContextMenu={event => onContextMenu(event, item)}
       onPointerDown={event => onPointerDown(event, item.id)}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onLostPointerCapture}
       title={item.kind === "app" ? t("单击启动") : t("单击打开")}
     >
       {missing && (
@@ -77,6 +89,10 @@ interface LauncherPanelProps {
   onOpenItem: (item: LauncherItem, iconEl: HTMLElement | null) => void;
   onOpenContextMenu: (event: MouseEvent, item: LauncherItem) => void;
   onPointerDown: (event: PointerEvent, id: number) => void;
+  onPointerMove: (event: PointerEvent) => void;
+  onPointerUp: (event: PointerEvent) => void;
+  onPointerCancel: (event: PointerEvent) => void;
+  onLostPointerCapture: () => void;
   highlights: ReadonlyMap<number, TextRange[]>;
 }
 
@@ -93,6 +109,10 @@ const LauncherPanel = memo(forwardRef<HTMLDivElement, LauncherPanelProps>(functi
   onOpenItem,
   onOpenContextMenu,
   onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
   highlights,
 }, ref) {
   const hasSearch = !!search.trim();
@@ -118,6 +138,10 @@ const LauncherPanel = memo(forwardRef<HTMLDivElement, LauncherPanelProps>(functi
             onOpen={onOpenItem}
             onContextMenu={onOpenContextMenu}
             onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerCancel={onPointerCancel}
+            onLostPointerCapture={onLostPointerCapture}
             highlightRanges={highlights.get(item.id) ?? []}
           />
         ))}

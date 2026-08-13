@@ -11,6 +11,7 @@ import { hideStageInsertMarker, showStageInsertMarker } from "../lib/stageInsert
 import { clipboardDragApi } from "../platform/clipboardDragApi";
 import { nextNativeDragSessionId, shouldFinishNativeDragHandoff } from "../domain/dragPreview";
 import type { ClipItem } from "../types";
+import { perf } from "../lib/perfTrace";
 
 type DragState = {
   item: ClipItem;
@@ -19,9 +20,12 @@ type DragState = {
   x: number;
   y: number;
   active: boolean;
+  dropPanel: HTMLElement | null;
   dropRect: DOMRect | null;
   stageRects: LassoRect[];
   insertAnchor: StageInsertAnchor | null;
+  insertSlot: number | null;
+  overStage: boolean;
   hotspotX: number;
   hotspotY: number;
 };
@@ -60,10 +64,11 @@ export function useClipboardDragController({
   }, []);
 
   const endDrag = useCallback((clearNativeFlag = true, preserveGhost = false) => {
-    if (dragStateRef.current?.active) suppressClickRef.current = true;
+    const state = dragStateRef.current;
+    if (state?.active) suppressClickRef.current = true;
     dragStateRef.current = null;
     document.getElementById("overlay")?.classList.remove("dragging");
-    dropAreaRef.current?.closest(".center-panel")?.classList.remove("drag-over");
+    state?.dropPanel?.classList.remove("drag-over");
     hideStageInsertMarker(insertMarkerRef.current);
     if (!preserveGhost) {
       nativeHandoffSessionRef.current = null;
@@ -89,9 +94,12 @@ export function useClipboardDragController({
       x: event.clientX,
       y: event.clientY,
       active: false,
+      dropPanel: null,
       dropRect: null,
       stageRects: [],
       insertAnchor: null,
+      insertSlot: null,
+      overStage: false,
       hotspotX: Math.max(4, Math.min(68, ((event.clientX - rect.left) / Math.max(1, rect.width)) * 72)),
       hotspotY: Math.max(4, Math.min(90, ((event.clientY - rect.top) / Math.max(1, rect.height)) * 94)),
     };
@@ -109,7 +117,8 @@ export function useClipboardDragController({
         { x: event.clientX, y: event.clientY },
       )) return;
       state.active = true;
-      state.dropRect = (dropAreaRef.current?.closest(".center-panel") as HTMLElement | null)?.getBoundingClientRect() ?? null;
+      state.dropPanel = dropAreaRef.current?.closest<HTMLElement>(".center-panel") ?? null;
+      state.dropRect = state.dropPanel?.getBoundingClientRect() ?? null;
       const selector = stageLayout === "grid" ? ".stage-card" : ".stage-item";
       state.stageRects = Array.from(dropAreaRef.current?.querySelectorAll<HTMLElement>(selector) ?? []).flatMap(element => {
         const id = Number(element.dataset.stageId);
@@ -127,12 +136,19 @@ export function useClipboardDragController({
     }
     const point = { x: event.clientX, y: event.clientY };
     const overStage = pointInRect(point, state.dropRect);
-    dropAreaRef.current?.closest(".center-panel")?.classList.toggle("drag-over", overStage);
+    if (overStage !== state.overStage) {
+      state.overStage = overStage;
+      state.dropPanel?.classList.toggle("drag-over", overStage);
+    }
     if (overStage) {
       const slot = resolveStageInsertSlot(point, state.stageRects, stageLayout);
-      state.insertAnchor = stageInsertAnchorForSlot(slot, state.stageRects);
-      showStageInsertMarker(insertMarkerRef.current, stageInsertMarkerForSlot(slot, state.stageRects, stageLayout));
-    } else {
+      if (slot !== state.insertSlot) {
+        state.insertSlot = slot;
+        state.insertAnchor = stageInsertAnchorForSlot(slot, state.stageRects);
+        showStageInsertMarker(insertMarkerRef.current, stageInsertMarkerForSlot(slot, state.stageRects, stageLayout));
+      }
+    } else if (state.insertSlot !== null) {
+      state.insertSlot = null;
       state.insertAnchor = null;
       hideStageInsertMarker(insertMarkerRef.current);
     }
@@ -162,6 +178,8 @@ export function useClipboardDragController({
     droppedOnSelfRef.current = false;
     // This dispatch must remain synchronous with endDrag(false): no await is allowed here.
     const sessionId = nextNativeDragSessionId();
+    const perfMark = `dragout:${sessionId}`;
+    perf.mark(perfMark);
     nativeHandoffSessionRef.current = sessionId;
     const state = dragStateRef.current;
     const started = clipboardDragApi.start({
@@ -180,6 +198,7 @@ export function useClipboardDragController({
       drag_dpr: window.devicePixelRatio,
       drag_session_id: sessionId,
     });
+    perf.since(perfMark, "dragout:js-dispatch");
     // 原生 ready 事件到达前保留最后一帧页内 ghost；调用顺序仍完全同步，不在 DoDragDrop 起手前 await。
     endDrag(false, true);
     void started.catch(() => finishNativeHandoff(sessionId));

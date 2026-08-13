@@ -18,6 +18,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicI32, Ordering},
     Mutex, OnceLock,
 };
+use std::time::Instant;
 #[cfg(test)]
 use std::sync::{
     atomic::{AtomicU32, AtomicUsize},
@@ -1465,6 +1466,13 @@ fn build_formats(app: &AppHandle, items: &[DragOutItem]) -> (Vec<(u16, Vec<u8>)>
     (formats, temp_files)
 }
 
+struct DragPerfTrace {
+    command_started: Instant,
+    worker_start_ms: f64,
+    formats_ms: f64,
+    preview_ms: f64,
+}
+
 fn is_internal_stage_reorder(items: &[DragOutItem]) -> bool {
     items.iter().any(|item| item.internal_stage_reorder.unwrap_or(false))
 }
@@ -2220,13 +2228,22 @@ fn is_clip_sourced(items: &[DragOutItem]) -> bool {
 #[tauri::command]
 pub fn start_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: Option<bool>) {
     let force_hide = force_hide.unwrap_or(false);
-    std::thread::spawn(move || run_drag_out(app, items, force_hide));
+    let perf_started = crate::perf::perf_on().then(Instant::now);
+    std::thread::spawn(move || run_drag_out(app, items, force_hide, perf_started));
 }
 
-fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
+fn run_drag_out(
+    app: AppHandle,
+    items: Vec<DragOutItem>,
+    force_hide: bool,
+    perf_started: Option<Instant>,
+) {
+    let worker_started = perf_started.map(|_| Instant::now());
     let drag_session_id = items.first().and_then(|item| item.drag_session_id);
     let copy_only = is_clip_sourced(&items);
+    let formats_started = perf_started.map(|_| Instant::now());
     let (formats, temp_files) = build_formats(&app, &items);
+    let formats_ms = formats_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     println!(
         "[dragout] start: {} item(s) → {} format(s) force_hide={force_hide}",
         items.len(),
@@ -2241,7 +2258,9 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
         emit_drag_preview_ready(&app, drag_session_id, "none");
         return;
     }
+    let preview_started = perf_started.map(|_| Instant::now());
     let drag_preview = build_drag_preview(&items);
+    let preview_ms = preview_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     let hwnd = match app.get_webview_window("main").and_then(|w| w.hwnd().ok()) {
         Some(h) => h.0 as isize,
         None => {
@@ -2260,8 +2279,18 @@ fn run_drag_out(app: AppHandle, items: Vec<DragOutItem>, force_hide: bool) {
         copy_only,
         session_id: drag_session_id,
     };
+    let perf_trace = perf_started.map(|command_started| DragPerfTrace {
+        command_started,
+        worker_start_ms: worker_started
+            .expect("perf worker timestamp exists when command timestamp exists")
+            .duration_since(command_started)
+            .as_secs_f64()
+            * 1000.0,
+        formats_ms,
+        preview_ms,
+    });
     if let Err(e) = app.run_on_main_thread(move || {
-        do_drag_on_main(app_main, formats, temp_files, drag_preview, options)
+        do_drag_on_main(app_main, formats, temp_files, drag_preview, options, perf_trace)
     }) {
         eprintln!("[dragout] run_on_main_thread 调度失败: {e}");
         STAGE_REORDER_ACTIVE.store(false, Ordering::Relaxed);
@@ -2278,7 +2307,9 @@ fn do_drag_on_main(
     temp_files: Vec<PathBuf>,
     drag_preview: Option<DragPreview>,
     options: DragRunOptions,
+    perf_trace: Option<DragPerfTrace>,
 ) {
+    let main_started = perf_trace.as_ref().map(|_| Instant::now());
     let DragRunOptions {
         hwnd,
         force_hide,
@@ -2287,6 +2318,7 @@ fn do_drag_on_main(
     } = options;
     // Shell 通用对象既保存业务格式，也原样保存 drag-image helper 的 TYMED_ISTREAM 等私有格式。
     // 若极端环境下创建失败，退回旧对象保证文件/文本拖出仍可用，只损失预览。
+    let data_object_started = perf_trace.as_ref().map(|_| Instant::now());
     let data_obj: IDataObject = create_shell_drag_data_object(&formats).unwrap_or_else(|error| {
         eprintln!("[dragout] SHCreateDataObject failed, fallback to basic data object: {error}");
         DragOutDataObject {
@@ -2295,9 +2327,11 @@ fn do_drag_on_main(
         .into()
     });
     let data_obj = suppress_drop_description(data_obj);
+    let data_object_ms = data_object_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     // 独立分层窗是正常视觉所有者：source HWND 隐藏会让系统 cursor 短暂重置，但不会影响另一个 HWND，
     // 因而卡片能跨过关闭界面的那一帧。创建失败才降级为 HCURSOR，再降级 Shell helper/默认 cursor；
     // 任何视觉失败都不能阻断文件/文本拖出。
+    let drag_image_started = perf_trace.as_ref().map(|_| Instant::now());
     let native_drag_image = drag_preview.as_ref().and_then(|preview| {
         match NativeDragImageWindow::create(preview) {
             Ok(window) => Some(window),
@@ -2334,6 +2368,7 @@ fn do_drag_on_main(
     } else {
         "none"
     };
+    let drag_image_ms = drag_image_started.map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
     // force_hide（区内重排中按热键升级来的拖出）：用户已明确要隐藏 overlay，无视 keepOpen 设置强制走隐藏收场。
     let auto_close = force_hide || DRAGOUT_AUTO_CLOSE.load(Ordering::Relaxed);
     println!("[dragout] DoDragDrop begin (main thread) auto_close={auto_close} force_hide={force_hide} drag_image={} drag_image_mode={drag_image_mode}", drag_image_mode != "none");
@@ -2443,6 +2478,22 @@ fn do_drag_on_main(
     // 防目标窗口的 WM_SETCURSOR 覆盖。source Drop 只在当前仍是本 cursor 时恢复起拖前形状。
     if let Some(cursor) = &drag_cursor {
         cursor.apply();
+    }
+    if let Some(trace) = perf_trace {
+        eprintln!(
+            "[perf] dragout worker-start={:.1}ms formats={:.1}ms preview={:.1}ms main-start={:.1}ms data-object={:.1}ms drag-image={:.1}ms ready-total={:.1}ms",
+            trace.worker_start_ms,
+            trace.formats_ms,
+            trace.preview_ms,
+            main_started
+                .expect("perf main timestamp exists when trace exists")
+                .duration_since(trace.command_started)
+                .as_secs_f64()
+                * 1000.0,
+            data_object_ms,
+            drag_image_ms,
+            trace.command_started.elapsed().as_secs_f64() * 1000.0,
+        );
     }
     emit_drag_preview_ready(&app, drag_session_id, drag_image_mode);
     let drop_src: IDropSource = DragOutDropSource {

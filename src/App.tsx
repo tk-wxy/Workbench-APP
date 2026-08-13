@@ -38,6 +38,8 @@ import { useSearchSynchronization } from "./hooks/useSearchSynchronization";
 import { useClipboardDragController } from "./hooks/useClipboardDragController";
 import { useLauncherActions, type AddResult } from "./hooks/useLauncherActions";
 import { useStageInteractionController } from "./hooks/useStageInteractionController";
+import { useLauncherReorderController } from "./hooks/useLauncherReorderController";
+import { useEdgeAutoScroll } from "./hooks/useEdgeAutoScroll";
 import { useGlobalKeyboardRouter } from "./hooks/useGlobalKeyboardRouter";
 import {
   createIdleStageInteraction,
@@ -48,6 +50,7 @@ import {
   stageInsertAnchorForSlot,
   stageInsertMarkerForSlot,
   type LassoRect,
+  type RectBounds,
   type StageInsertAnchor,
   type StageInteractionState,
 } from "./domain/stageInteraction";
@@ -98,6 +101,22 @@ const ENH_DEBOUNCE_BUILTIN_MS = 50;
 const ENH_DEBOUNCE_EVERYTHING_MS = 150;
 
 type DragPreviewReadyPayload = { session_id?: number; mode: string };
+type StageReorderState = {
+  active: boolean;
+  tiles: HTMLElement[];
+  rects: { left: number; top: number; width: number; height: number }[];
+  ghostEl: HTMLElement | null;
+  srcEl: HTMLElement | null;
+  srcIdx: number;
+  insertIdx: number;
+  grabOffsetX: number;
+  grabOffsetY: number;
+  lastClientX: number;
+  lastClientY: number;
+  container: HTMLElement | null;
+  containerBounds: RectBounds | null;
+  lastScrollTop: number;
+};
 
 
 /// 搜索现场（页面搜索/增强搜索）保留时长：隐藏时若仍带着搜索现场则不立即复位，保留此时长供用户
@@ -285,6 +304,7 @@ export default function App() {
   const dropAreaRef = useRef<HTMLDivElement | null>(null); // 中转区 .drop-area，命中检测用
   const launcherDropRef = useRef<HTMLDivElement | null>(null); // 启动器 .app-grid，OLE 拖入落点判断用
   const dragLayerRef = useRef<HTMLDivElement | null>(null); // 顶层拖拽预览层，承载 DOM clone ghost
+  const stageAutoScroll = useEdgeAutoScroll();
   const nativeHandoffGhostRef = useRef<{ sessionId: number; element: HTMLElement } | null>(null);
   const removeNativeHandoffGhost = useCallback((sessionId?: number) => {
     const current = nativeHandoffGhostRef.current;
@@ -295,6 +315,8 @@ export default function App() {
   const stageInsertMarkerRef = useRef<HTMLDivElement | null>(null); // 外来条目拖入的轻量插入槽位；fixed 覆盖层，不参与 grid/list 布局
   const nativeFileDragActiveRef = useRef(false);
   const nativeStageInsertRectsRef = useRef<LassoRect[]>([]);
+  const nativeDropZonesRef = useRef<{ stage: DOMRect | null; launcher: DOMRect | null }>({ stage: null, launcher: null });
+  const nativeInsertSlotRef = useRef<number | null>(null);
   // 中转条目拖出（续71）：按下记录起点，move 超阈值 → emit drag-out-begin（Rust 接管 OLE DoDragDrop）
   // mode：idle=未决出/pending；reorder=区内重排中（续87）；native=已交给 Rust OLE，JS 侧不再处理
   const dragOutRef = useRef<StageInteractionState>(createIdleStageInteraction());
@@ -306,16 +328,11 @@ export default function App() {
   // 中转区内重排（续87，仿启动台 FLIP 方案）：仅「拖出后自动关闭」关闭时，单项拖动走此逻辑，ghost 跟手 + FLIP 排序。
   // 自动关闭开启时，超过阈值直接进入原生拖出并隐藏；关闭时仍不使用曾被否决的越界/时间升级，
   // 如需去外部则在重排中按热键，经 stage-drag-hotkey → beginNativeDragOut 交接。
-  const stageReorderRef = useRef<{
-    active: boolean; tiles: HTMLElement[]; rects: { left: number; top: number; width: number; height: number }[];
-    ghostEl: HTMLElement | null; srcEl: HTMLElement | null; srcIdx: number; insertIdx: number;
-    grabOffsetX: number; grabOffsetY: number; lastClientX: number; lastClientY: number;
-  }>({ active: false, tiles: [], rects: [], ghostEl: null, srcEl: null, srcIdx: -1, insertIdx: -1, grabOffsetX: 0, grabOffsetY: 0, lastClientX: 0, lastClientY: 0 });
-  // 启动台排序拖拽（续74重写）：全 DOM 直操作 + window 全局监听，绕过 React 渲染保证跟手
-  // ghost 也走 DOM clone，不经 React state/ref，确保拖拽预览一定可见。
-  const launcherDragActiveRef = useRef(false); // 是否已超阈值激活
-  const launcherDragInsertRef = useRef(-1); // 当前插入位置，-1=未激活
-  const launcherLandingRef = useRef(false); // 松手回落动画进行中：守卫此窗口内不被新拖拽采集脏几何
+  const stageReorderRef = useRef<StageReorderState>({
+    active: false, tiles: [], rects: [], ghostEl: null, srcEl: null, srcIdx: -1, insertIdx: -1,
+    grabOffsetX: 0, grabOffsetY: 0, lastClientX: 0, lastClientY: 0,
+    container: null, containerBounds: null, lastScrollTop: 0,
+  });
   const suppressLaunchClickRef = useRef(false); // 激活排序拖拽后抑制随之而来的 onClick
   // 外部文件拖入窗口时的悬停高亮（HTML5 dragenter/dragleave，与 OLE IDropTarget 正交）
   const [fileDragOver, setFileDragOver] = useState(false);
@@ -791,11 +808,14 @@ export default function App() {
         }); // 失效检查延后到首屏可操作后，绝不阻塞呼出。
         await register("hotkey-hide", () => {
           cancelStageMissingScan();
+          cancelLauncherReorder();
           endClipDrag();
           removeNativeHandoffGhost();
           resetStageInteractionForHide();
           nativeFileDragActiveRef.current = false;
           nativeStageInsertRectsRef.current = [];
+          nativeDropZonesRef.current = { stage: null, launcher: null };
+          nativeInsertSlotRef.current = null;
           if (fileDragLeaveTimer) { clearTimeout(fileDragLeaveTimer); fileDragLeaveTimer = null; }
           hideStageInsertMarker(stageInsertMarkerRef.current);
           setFileDragOver(false);
@@ -875,6 +895,8 @@ export default function App() {
           nativeStageInsertRectsRef.current = [];
           if (fileDragLeaveTimer) { clearTimeout(fileDragLeaveTimer); fileDragLeaveTimer = null; }
           nativeFileDragActiveRef.current = false;
+          nativeDropZonesRef.current = { stage: null, launcher: null };
+          nativeInsertSlotRef.current = null;
           hideStageInsertMarker(stageInsertMarkerRef.current);
           // 自己的中转拖出落回窗口内也会经 IDropTarget→files-dropped（draggedIds 尚未清）。
           // 落启动台仍由下方路径处理；落中转区则按本次 DragEnter 冻结的槽位提交真实排序，不能把自身
@@ -975,25 +997,36 @@ export default function App() {
           // 每次 DragEnter 都刷新：同一 OLE 拖动跨子 HWND 重入时成本很小；真实的新拖动若恰好在
           // 100ms leave 防抖窗口内开始，也不会复用上一轮冻结坐标。
           nativeStageInsertRectsRef.current = snapshotStageInsertRects(dropAreaRef.current, stageLayoutRef.current);
+          nativeDropZonesRef.current = {
+            stage: dropAreaRef.current?.getBoundingClientRect() ?? null,
+            launcher: launcherDropRef.current?.getBoundingClientRect() ?? null,
+          };
+          nativeInsertSlotRef.current = null;
           setFileDragOver(true);
         });
         await register<{ x: number; y: number }>("file-drag-over", event => {
           if (!nativeFileDragActiveRef.current) return;
           const point = { x: event.payload.x / window.devicePixelRatio, y: event.payload.y / window.devicePixelRatio };
-          const stageRect = dropAreaRef.current?.getBoundingClientRect();
-          const launcherRect = launcherDropRef.current?.getBoundingClientRect();
+          const { stage: stageRect, launcher: launcherRect } = nativeDropZonesRef.current;
           if (resolveWorkbenchFileDropZone(point, stageRect, launcherRect) !== "stage") {
-            hideStageInsertMarker(stageInsertMarkerRef.current);
+            if (nativeInsertSlotRef.current !== null) {
+              nativeInsertSlotRef.current = null;
+              hideStageInsertMarker(stageInsertMarkerRef.current);
+            }
             return;
           }
           const rects = nativeStageInsertRectsRef.current;
           const slot = resolveStageInsertSlot(point, rects, stageLayoutRef.current);
+          if (slot === nativeInsertSlotRef.current) return;
+          nativeInsertSlotRef.current = slot;
           showStageInsertMarker(stageInsertMarkerRef.current, stageInsertMarkerForSlot(slot, rects, stageLayoutRef.current));
         });
         await register("file-drag-leave", () => {
           fileDragLeaveTimer = setTimeout(() => {
             nativeFileDragActiveRef.current = false;
             nativeStageInsertRectsRef.current = [];
+            nativeDropZonesRef.current = { stage: null, launcher: null };
+            nativeInsertSlotRef.current = null;
             hideStageInsertMarker(stageInsertMarkerRef.current);
             setFileDragOver(false);
           }, 100);
@@ -1008,6 +1041,7 @@ export default function App() {
         // 移除仍严格挂在 Rust 回传的「非 none」（已确认成功投放）之后，只是多加一道门。
         await register<DragPreviewReadyPayload>("drag-preview-ready", event => {
           if (event.payload.session_id === undefined) return;
+          perf.since(`dragout:${event.payload.session_id}`, "dragout:ready");
           removeNativeHandoffGhost(event.payload.session_id);
           finishClipNativeHandoff(event.payload.session_id);
         });
@@ -1090,9 +1124,12 @@ export default function App() {
         await register<ClipboardOriginalDegradedPayload>("clipboard-original-degraded", event => passiveEventHandlers.onClipboardOriginalDegraded(event.payload));
     });
     return () => {
+      cancelLauncherReorder();
       eventScope.dispose();
       nativeFileDragActiveRef.current = false;
       nativeStageInsertRectsRef.current = [];
+      nativeDropZonesRef.current = { stage: null, launcher: null };
+      nativeInsertSlotRef.current = null;
       hideStageInsertMarker(stageInsertMarkerRef.current);
       if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer);
       if (searchKeepTimer) clearTimeout(searchKeepTimer);
@@ -1409,145 +1446,21 @@ export default function App() {
     beginDismiss(() => { void hideWorkbench(); });
   }, [beginDismiss, launchApp, spawnLaunchClone]);
 
-  // ── 启动台排序拖拽（续75 打磨：Launchpad 式让路 + ghost 首帧修复 + 松手回落 + 淡入抬起）──
-  // 核心原则：ghost 位置 / 让路 transform 全走 DOM 直操作，零 React 渲染，彻底保证跟手。
-  // 让路用 FLIP：激活时采集各格「固定原始槽位坐标」，之后插入判断 + 让路位移都基于这份快照
-  //（绝不用实时 rect——格子 transform 移动后 getBoundingClientRect 会含位移、污染插入判断）。
-  // React state 仅用于：① 触发 ghost 内容渲染（激活时一次 setLauncherDragSource，含首帧坐标）②清除 ghost。
-  const handleLauncherPointerDown = useCallback((e: React.PointerEvent, id: number) => {
-    if (e.button !== 0) return;
-    if (search.trim()) return; // 过滤态禁排序（filteredLauncher 是子集）
-    if (launcherLandingRef.current) return; // 上一次松手回落动画未结束，忽略新起手（防脏几何）
-    const srcIdx = launcherRef.current.findIndex(x => x.id === id);
-    if (srcIdx === -1) return;
-    e.preventDefault(); // 阻止默认（防文字选中、防系统拖拽光标）
-    const originX = e.clientX, originY = e.clientY;
-    const srcEl = e.currentTarget as HTMLElement;
-    const srcStartRect = srcEl.getBoundingClientRect();
-    const grabOffsetX = originX - srcStartRect.left;
-    const grabOffsetY = originY - srcStartRect.top;
-    launcherDragActiveRef.current = false;
-    launcherDragInsertRef.current = srcIdx;
-    suppressLaunchClickRef.current = false;
-
-    // FLIP 快照：激活时采集，之后固定不变（同一次 pointerdown 闭包内 onMove/onUp 共享）
-    let tiles: HTMLElement[] = [];
-    let rects: { left: number; top: number; width: number; height: number }[] = [];
-    let ghostEl: HTMLElement | null = null;
-
-    // 按固定槽位快照判断鼠标落在哪个插入点（0..n，插入到第 idx 个之前）
-    const calcInsert = (cx: number, cy: number): number => {
-      for (let i = 0; i < rects.length; i++) {
-        const r = rects[i];
-        if (cy < r.top) return i; // 鼠标在本行上方 → 插入本行第一项前
-        if (cy <= r.top + r.height) {
-          if (cx < r.left + r.width / 2) return i; // 左半区 → 插入此格前
-          // 右半区 → 继续找下一格
-        }
-      }
-      return rects.length;
-    };
-
-    // 让路：源被抓走后，非源格子平移填补，为落点 target 槽腾出空位（transform 纯视觉、不改 grid）
-    const applyShift = (insertIdx: number) => {
-      const target = insertIdx > srcIdx ? insertIdx - 1 : insertIdx; // 源在「去源序列」里的落点槽
-      for (let i = 0; i < tiles.length; i++) {
-        if (i === srcIdx) continue; // 源由 ghost 代替、不参与让路
-        const k = i < srcIdx ? i : i - 1;        // 该格在去源序列里的顺序
-        const newSlot = k < target ? k : k + 1;   // 跳过 target 槽 → 让出空位
-        const dx = rects[newSlot].left - rects[i].left;
-        const dy = rects[newSlot].top - rects[i].top;
-        tiles[i].style.transform = dx || dy ? `translate(${dx}px,${dy}px)` : "";
-      }
-    };
-
-    const onMove = (me: PointerEvent) => {
-      if (!launcherDragActiveRef.current) {
-        if (Math.hypot(me.clientX - originX, me.clientY - originY) < 8) return;
-        // 超阈值激活：先采集固定槽位快照（此刻所有格都在原位、未 transform）
-        tiles = Array.from(document.querySelectorAll<HTMLElement>(".app-grid .app-tile"));
-        rects = tiles.map(t => { const r = t.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; });
-        tiles.forEach(t => t.classList.add("launcher-shift")); // 建立让路过渡
-        launcherDragActiveRef.current = true;
-        suppressLaunchClickRef.current = true;
-        ghostEl = srcEl.cloneNode(true) as HTMLElement;
-        ghostEl.classList.remove("selected", "launcher-dragging-src", "launcher-shift"); // 续143：摘掉继承的 launcher-shift（transition:transform 200ms → 逐帧 transform 位移被动画化 → 滞后不跟手）
-        ghostEl.classList.add("launcher-drag-ghost");
-        ghostEl.querySelectorAll("img").forEach(img => { img.draggable = false; });
-        const ghostHost = dragLayerRef.current ?? document.body;
-        const inDragLayer = ghostHost === dragLayerRef.current;
-        // 续143：位移走 transform:translate3d 而非 left/top（后者逐帧 layout → 掉帧）；scale 并入同一 transform。同剪贴板 ghost。
-        Object.assign(ghostEl.style, {
-          position: inDragLayer ? "absolute" : "fixed",
-          left: "0",
-          top: "0",
-          transition: "none", // 续143：拖动期间瞬时跟手（落定时 onUp 再设 180ms）
-          transform: `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`,
-          width: `${srcStartRect.width}px`,
-          height: `${srcStartRect.height}px`,
-          zIndex: inDragLayer ? "" : "100003",
-          display: "flex",
-          opacity: "0.72",
-          visibility: "visible",
-          pointerEvents: "none",
-        });
-        ghostHost.appendChild(ghostEl);
-        srcEl.classList.add("launcher-dragging-src");
-        document.getElementById("overlay")?.classList.add("launcher-reordering");
-      }
-      // ghost 跟手：保持鼠标在原卡片内的相对位置，直接写 transform，零 React 渲染、零 layout（续143）
-      if (ghostEl) {
-        ghostEl.style.transform = `translate3d(${me.clientX - grabOffsetX}px,${me.clientY - grabOffsetY}px,0) scale(1.05)`;
-      }
-      const ins = calcInsert(me.clientX, me.clientY);
-      if (ins !== launcherDragInsertRef.current) {
-        launcherDragInsertRef.current = ins;
-        applyShift(ins);
-      }
-    };
-
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-
-      if (!launcherDragActiveRef.current) { // 短按 → 未激活，onClick 正常启动
-        srcEl.classList.remove("launcher-dragging-src");
-        return;
-      }
-      launcherDragActiveRef.current = false;
-      const finalInsert = launcherDragInsertRef.current;
-      const target = finalInsert > srcIdx ? finalInsert - 1 : finalInsert;
-
-      // 松手回落：ghost 平滑飞回落点空槽（rects[target]），落定后再统一 commit
-      const landing = rects[target] ?? rects[srcIdx];
-      launcherLandingRef.current = true;
-      if (ghostEl && landing) {
-        ghostEl.style.transition = "transform 180ms cubic-bezier(.2,.8,.2,1)"; // 续143：落定动画同走 transform
-        ghostEl.style.transform = `translate3d(${landing.left}px,${landing.top}px,0) scale(1.05)`;
-      }
-
-      // 180ms 回落结束后统一 commit：清 transform/class → 清 ghost → 重排持久化
-      window.setTimeout(() => {
-        tiles.forEach(t => { t.style.transform = ""; t.classList.remove("launcher-shift"); });
-        srcEl.classList.remove("launcher-dragging-src");
-        document.getElementById("overlay")?.classList.remove("launcher-reordering");
-        ghostEl?.remove();
-        ghostEl = null;
-        launcherLandingRef.current = false;
-        const list = [...launcherRef.current];
-        const [moved] = list.splice(srcIdx, 1);
-        const tgt = Math.max(0, Math.min(target, list.length));
-        list.splice(tgt, 0, moved);
-        const unchanged = list.every((x, i) => x.id === launcherRef.current[i]?.id);
-        if (!unchanged) saveLauncher(list); // 位置不变则跳过 I/O
-      }, 180);
-    };
-
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-  }, [search, saveLauncher]);
+  const {
+    pointerDown: handleLauncherPointerDown,
+    pointerMove: handleLauncherPointerMove,
+    pointerUp: handleLauncherPointerUp,
+    pointerCancel: handleLauncherPointerCancel,
+    lostPointerCapture: handleLauncherLostPointerCapture,
+    cancel: cancelLauncherReorder,
+  } = useLauncherReorderController({
+    containerRef: launcherDropRef,
+    dragLayerRef,
+    itemsRef: launcherRef,
+    searchActive: !!search.trim(),
+    suppressClickRef: suppressLaunchClickRef,
+    saveItems: saveLauncher,
+  });
 
   // 增强搜索 fs 结果加入中转区（允许重复，置顶）。
   const addFsToStage = useCallback(async (r:{path:string;name:string;ext:string;isDir:boolean}):Promise<AddResult> => {
@@ -1695,6 +1608,8 @@ export default function App() {
       return item ? [item] : [];
     });
     const sessionId = nextNativeDragSessionId();
+    const perfMark = `dragout:${sessionId}`;
+    perf.mark(perfMark);
     const previewFor = (s: StageItem) => resolveStageDragPreview(s, stageThumbsRef.current);
     const handoffPoint = point ?? (stageReorderRef.current.lastClientX || stageReorderRef.current.lastClientY
       ? { x: stageReorderRef.current.lastClientX, y: stageReorderRef.current.lastClientY }
@@ -1747,6 +1662,7 @@ export default function App() {
     import("@tauri-apps/api/core")
       .then(({ invoke }) => invoke("start_drag_out", { items: dragItems, forceHide }))
       .catch(() => removeNativeHandoffGhost(sessionId));
+    perf.since(perfMark, "dragout:js-dispatch");
   }, [removeNativeHandoffGhost]);
   // FLIP 快照 + ghost 建立：与启动台 handleLauncherPointerDown 的 onMove 激活段同构，选择器按当前 stageLayout 决定。
   const startStageReorder = useCallback((id: number, srcEl: HTMLElement, clientX: number, clientY: number) => {
@@ -1757,6 +1673,7 @@ export default function App() {
     const selector = stageLayout === "grid" ? ".stage-card" : ".stage-item";
     const tiles = Array.from(container.querySelectorAll<HTMLElement>(selector));
     const rects = tiles.map(t => { const r = t.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; });
+    const containerRect = container.getBoundingClientRect();
     const item = stageRef.current[srcIdx];
     const previewStyle: NativeDragPreviewStyle = "card";
     const sourceRect = srcEl.getBoundingClientRect();
@@ -1806,14 +1723,14 @@ export default function App() {
       grabOffsetY,
       lastClientX: clientX,
       lastClientY: clientY,
+      container,
+      containerBounds: { left: containerRect.left, top: containerRect.top, right: containerRect.right, bottom: containerRect.bottom },
+      lastScrollTop: container.scrollTop,
     };
     setStageReorderActiveNative(true); // 告知 Rust：light-dismiss 本阶段让路（热键 monitor 续88 起不再让路）
   }, [stageLayout, setStageReorderActiveNative]);
-  const updateStageReorder = useCallback((clientX: number, clientY: number) => {
-    const st = stageReorderRef.current;
-    if (!st.active || !st.ghostEl) return;
-    st.lastClientX = clientX;
-    st.lastClientY = clientY;
+  const applyStageReorderPosition = useCallback((st: StageReorderState, clientX: number, clientY: number) => {
+    if (!st.ghostEl) return;
     st.ghostEl.style.transform = `translate3d(${clientX - st.grabOffsetX}px,${clientY - st.grabOffsetY}px,0) scale(1.04)`;
     // 按固定槽位快照判断插入点：同启动台 calcInsert（cy 落在某行 → 按 cx 半区决定插入本格前/继续找下一格）
     let ins = st.rects.length;
@@ -1835,6 +1752,36 @@ export default function App() {
       }
     }
   }, []);
+  const updateStageReorder = useCallback((clientX: number, clientY: number) => {
+    const st = stageReorderRef.current;
+    if (!st.active || !st.ghostEl) return;
+    st.lastClientX = clientX;
+    st.lastClientY = clientY;
+    if (st.container) {
+      const manualScrollDelta = st.container.scrollTop - st.lastScrollTop;
+      if (manualScrollDelta !== 0) {
+        st.rects.forEach(rect => { rect.top -= manualScrollDelta; });
+        st.lastScrollTop = st.container.scrollTop;
+      }
+    }
+    applyStageReorderPosition(st, clientX, clientY);
+    if (st.container && st.containerBounds) {
+      stageAutoScroll.update({
+        container: st.container,
+        bounds: st.containerBounds,
+        pointerY: clientY,
+        onScroll: () => {
+          if (stageReorderRef.current !== st || !st.active) return;
+          const scrollTop = st.container?.scrollTop ?? st.lastScrollTop;
+          const scrollDelta = scrollTop - st.lastScrollTop;
+          if (scrollDelta === 0) return;
+          st.rects.forEach(rect => { rect.top -= scrollDelta; });
+          st.lastScrollTop = scrollTop;
+          applyStageReorderPosition(st, st.lastClientX, st.lastClientY);
+        },
+      });
+    }
+  }, [applyStageReorderPosition, stageAutoScroll]);
   // 升级为原生拖出前的清场：无落定动画（马上交给 Rust 接管鼠标），立即复原让路 transform + 清 ghost。
   // ⚠️ 本函数只做 JS 侧清场（ghost / 让路 transform / class），**不**清 Rust 的 STAGE_REORDER_ACTIVE 让路标志。
   // 清标志的时机分两类，别在这里一刀切：
@@ -1846,12 +1793,13 @@ export default function App() {
     const st = stageReorderRef.current;
     if (!st.active) return;
     // 先占有终止权，防 lostpointercapture / hide 等重入路径重复清理同一批 DOM。
-    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
+    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [], container: null, containerBounds: null };
+    stageAutoScroll.stop();
     st.tiles.forEach(t => { t.classList.remove("stage-shift"); t.style.transform = ""; });
     st.srcEl?.classList.remove("stage-dragging-src");
     document.getElementById("overlay")?.classList.remove("stage-reordering");
     st.ghostEl?.remove();
-  }, []);
+  }, [stageAutoScroll]);
   // 松手提交：真实槽位换序、撤 FLIP transform 和移除 ghost 必须在同一同步任务内完成。
   // 让视觉动画决定交互可用性会让 transitionend/回调异常永久锁住下一轮拖动；这里不保留异步 settle 阶段。
   const commitStageReorder = useCallback(() => {
@@ -1865,7 +1813,8 @@ export default function App() {
     const unchanged = list.every((item, index) => item.id === stageRef.current[index]?.id);
     // 先占有终止权并清掉旧 DOM 上的临时状态，再同步提交物理槽位。两步在同一 JS 任务内，浏览器
     // 不会绘制中间帧；React 也不会在换序后继续携带 opacity:0 / FLIP transform 的旧节点状态。
-    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [] };
+    stageReorderRef.current = { ...st, active: false, ghostEl: null, tiles: [], rects: [], container: null, containerBounds: null };
+    stageAutoScroll.stop();
     tiles.forEach(tile => { tile.classList.remove("stage-shift"); tile.style.transform = ""; });
     srcEl?.classList.remove("stage-dragging-src");
     document.getElementById("overlay")?.classList.remove("stage-reordering");
@@ -1875,7 +1824,7 @@ export default function App() {
     } finally {
       setStageReorderActiveNative(false); // 即使同步提交异常，也不能让 Rust 让路标志永久残留
     }
-  }, [saveStage, setStageReorderActiveNative]);
+  }, [saveStage, setStageReorderActiveNative, stageAutoScroll]);
   // 续143：单项重排松手落点在启动台 → 加入启动台（恢复旧「拖中转项目到启动台」功能——旧靠越界升级为原生 OLE
   // 落到启动台再由 files-dropped 处理，续143 删了越界升级故改在此 JS 落点侧处理）。仅文件/文件夹项（有 path）可入；
   // 忠实旧 OLE 行为的 move 语义：加入成功（added/duplicate）后，非持久 + 非固定则从中转移除。清 reorder 现场不回弹。
@@ -2599,6 +2548,10 @@ export default function App() {
           onOpenItem={openLauncherItem}
           onOpenContextMenu={openLauncherCtxMenu}
           onPointerDown={handleLauncherPointerDown}
+          onPointerMove={handleLauncherPointerMove}
+          onPointerUp={handleLauncherPointerUp}
+          onPointerCancel={handleLauncherPointerCancel}
+          onLostPointerCapture={handleLauncherLostPointerCapture}
           highlights={launcherPageSearch.highlights}
         />
         <section className="center-panel">

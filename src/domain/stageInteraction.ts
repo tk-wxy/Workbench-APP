@@ -7,6 +7,7 @@ export type StageInteractionState = {
   pressing: boolean;
   itemId: number | null;
   origin: { x: number; y: number };
+  itemRect: RectBounds | null;
   draggedIds: number[];
   mode: StageInteractionMode;
 };
@@ -132,11 +133,11 @@ export function reorderStageItemsAtSlot<T extends { id: number }>(
 }
 
 export function createIdleStageInteraction(): StageInteractionState {
-  return { pressing: false, itemId: null, origin: { x: 0, y: 0 }, draggedIds: [], mode: "idle" };
+  return { pressing: false, itemId: null, origin: { x: 0, y: 0 }, itemRect: null, draggedIds: [], mode: "idle" };
 }
 
-export function beginStageInteraction(itemId: number, origin: { x: number; y: number }): StageInteractionState {
-  return { pressing: true, itemId, origin, draggedIds: [], mode: "idle" };
+export function beginStageInteraction(itemId: number, origin: { x: number; y: number }, itemRect: RectBounds | null = null): StageInteractionState {
+  return { pressing: true, itemId, origin, itemRect, draggedIds: [], mode: "idle" };
 }
 
 export function finishStageInteraction(state: StageInteractionState): StageInteractionState {
