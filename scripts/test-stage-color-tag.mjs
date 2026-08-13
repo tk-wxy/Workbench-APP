@@ -22,15 +22,20 @@ try {
   assert.deepEqual(domain.normalizeStageItemAppearance({ id: 4, type: "text", pinned: false, colorTag: "yellow" }), { id: 4, type: "text", colorTag: "yellow" });
   assert.deepEqual(domain.setStageItemsColorTag(items, [1, 3], "blue").map(item => item.colorTag ?? null), ["blue", "red", "blue"]);
   assert.deepEqual(domain.setStageItemsColorTag(items, [2], null).map(item => item.colorTag ?? null), [null, null, "invalid"]);
+  assert.equal(domain.resolveStageColorClick("red", false, "red"), null);
+  assert.equal(domain.resolveStageColorClick("red", false, "blue"), "blue");
+  assert.equal(domain.resolveStageColorClick(null, true, "yellow"), "yellow");
   assert.equal(domain.shouldRetainStageItem(items[0], false), true);
   assert.equal(domain.shouldRetainStageItem(items[1], false), false);
   assert.equal(domain.shouldRetainStageItem(items[1], true), true);
   assert.equal(domain.STAGE_COLOR_TAGS.join(","), "red,yellow,blue");
   const appSource = await readFile(path.join(root, "src/App.tsx"), "utf8");
   assert.match(appSource, /className="stage-color-inline"/);
+  assert.match(appSource, /className="stage-color-clear-marker"/);
+  assert.doesNotMatch(appSource, />×<\/button>/);
   assert.doesNotMatch(appSource, /kind: "colors"/);
   assert.match(appSource, /stageRef\.current = next;\s*void saveStage\(next\);/);
-  console.log("中转站手动颜色标记 —— 枚举、内联菜单、批量设置与固定字段\n  ✓ 无标记、红黄蓝标签与单项固定保持稳定\n  ✓ 颜色选择直接位于右键菜单底部\n全部通过\n");
+  console.log("中转站手动颜色标记 —— 枚举、内联菜单、批量设置与固定字段\n  ✓ 无标记、红黄蓝标签与单项固定保持稳定\n  ✓ 颜色选择直接位于右键菜单底部\n  ✓ 再点当前颜色清除，取消按钮使用圆圈减号\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }

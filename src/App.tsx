@@ -20,7 +20,7 @@ import { appUsageScore } from "./domain/appUsage";
 import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
-import { normalizeStageItemAppearance, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
+import { normalizeStageItemAppearance, resolveStageColorClick, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
 import {
   buildNativeDragLabel,
   buildNativeDragMeta,
@@ -2871,6 +2871,7 @@ export default function App() {
         ))}
         {ctxMenu.colors && (
           <div className="stage-color-inline" aria-label={ctxMenu.colors.ids.length > 1 ? t("为所选 {n} 项设置颜色", { n: ctxMenu.colors.ids.length }) : t("设置颜色标记")}>
+            <span className="stage-color-inline-label">{t("颜色")}</span>
             <button
               type="button"
               className={`stage-color-swatch stage-color-swatch-clear${!ctxMenu.colors.mixed && ctxMenu.colors.selected === null ? " selected" : ""}`}
@@ -2878,7 +2879,7 @@ export default function App() {
               aria-label={t("无标记")}
               aria-pressed={!ctxMenu.colors.mixed && ctxMenu.colors.selected === null}
               onClick={() => { setStageColorTag(ctxMenu.colors!.ids, null); setCtxMenu(null); }}
-            >×</button>
+            ><span className="stage-color-clear-marker" aria-hidden="true"/></button>
             {STAGE_COLOR_TAGS.map(tag => (
               <button
                 type="button"
@@ -2887,7 +2888,11 @@ export default function App() {
                 title={stageColorLabel(tag, t)}
                 aria-label={stageColorLabel(tag, t)}
                 aria-pressed={!ctxMenu.colors!.mixed && ctxMenu.colors!.selected === tag}
-                onClick={() => { setStageColorTag(ctxMenu.colors!.ids, tag); setCtxMenu(null); }}
+                onClick={() => {
+                  const next = resolveStageColorClick(ctxMenu.colors!.selected, ctxMenu.colors!.mixed, tag);
+                  setStageColorTag(ctxMenu.colors!.ids, next);
+                  setCtxMenu(null);
+                }}
               ><span className="stage-color-marker"/></button>
             ))}
           </div>

@@ -32,6 +32,7 @@ export const EN_DICT: Record<string, string> = {
   "图片": "Image",
   "文本": "Text",
   "设置颜色标记": "Set color label",
+  "颜色": "Color",
   "为所选 {n} 项设置颜色": "Set color for {n} selected items",
   "无标记": "No label",
   "红色": "Red",

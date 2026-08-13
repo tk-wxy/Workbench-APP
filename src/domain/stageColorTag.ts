@@ -32,6 +32,14 @@ export function setStageItemsColorTag(
   });
 }
 
+export function resolveStageColorClick(
+  selected: StageColorTag | null,
+  mixed: boolean,
+  clicked: StageColorTag,
+): StageColorTag | null {
+  return !mixed && selected === clicked ? null : clicked;
+}
+
 export function shouldRetainStageItem(item: Pick<StageItem, "pinned">, persistAll: boolean): boolean {
   return persistAll || item.pinned === true;
 }
