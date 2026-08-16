@@ -18,6 +18,8 @@ import { type ClipboardCategory } from "./domain/clipboardCategory";
 import { buildClipboardPageSearch } from "./domain/clipboardPageSearch";
 import { appUsageScore } from "./domain/appUsage";
 import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
+import { createHiddenResetLifecycle } from "./domain/hiddenResetLifecycle";
+import { startSearchFocusLifecycle } from "./domain/searchFocusLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
 import { filterStageItemsByColor, markStageItemsUsed as clearStageItemsUnused, normalizeStageItemAppearance, resolveStageColorClick, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
@@ -834,9 +836,6 @@ export default function App() {
   // ── 核心：事件监听（只注册一次，依赖[]）。可见性唯一真相在 Rust，前端只同步 ──
   useEffect(() => {
     let fileDragLeaveTimer: ReturnType<typeof setTimeout> | null = null;
-    let searchKeepTimer: ReturnType<typeof setTimeout> | null = null; // 搜索现场延迟复位计时器（hide 武装 / show 取消）
-    let uiKeepTimer: ReturnType<typeof setTimeout> | null = null;
-    let clipboardCategoryKeepTimer: ReturnType<typeof setTimeout> | null = null;
     // 搜索现场复位：页面搜索 + 增强搜索全部状态，hotkey-hide 的「立即/延迟」两路复用
     const resetSearchState = () => { setEnhOpen(false); setEnhPinned(false); setEnhQuery(""); setEnhSelIdx(0); clearEnhancedSearchResults(); setSearch(""); pageSearchForcedRef.current = false; };
     // 可恢复工作现场与危险瞬态分开：多选/管理弹层保留 10 秒；拖拽、框选、菜单仍在 hide 当场清。
@@ -849,6 +848,13 @@ export default function App() {
       closeLauncherManager();
       setStageRecoveryOpen(false);
     };
+    // 隐藏 WebView 可能延后 JS timer；以截止时间为真相，show 时主动补结算超期状态。
+    const searchResetLifecycle = createHiddenResetLifecycle(SEARCH_KEEP_MS, resetSearchState);
+    const retainedUiResetLifecycle = createHiddenResetLifecycle(SEARCH_KEEP_MS, resetRetainedUiState);
+    const clipboardCategoryResetLifecycle = createHiddenResetLifecycle(
+      CLIPBOARD_CATEGORY_KEEP_MS,
+      () => setClipboardCategory("all"),
+    );
     const passiveEventHandlers = createPassiveEventHandlers({
       loadClipboardHistory: clipboardApi.getHistory,
       replaceClipboard: history => setClipboard(history),
@@ -862,9 +868,9 @@ export default function App() {
     // 监听作用域统一承担动态加载、逐项隔离和 StrictMode 的异步注册清理竞态（R47）。
     const eventScope = subscribeNativeEvents(async register => {
         await register("hotkey-show", () => {
-          if (searchKeepTimer !== null) { clearTimeout(searchKeepTimer); searchKeepTimer = null; }
-          if (uiKeepTimer !== null) { clearTimeout(uiKeepTimer); uiKeepTimer = null; }
-          if (clipboardCategoryKeepTimer !== null) { clearTimeout(clipboardCategoryKeepTimer); clipboardCategoryKeepTimer = null; }
+          searchResetLifecycle.resume();
+          retainedUiResetLifecycle.resume();
+          clipboardCategoryResetLifecycle.resume();
           setVisible(true);
           scheduleStageMissingScan();
         }); // 失效检查延后到首屏可操作后，绝不阻塞呼出。
@@ -905,37 +911,24 @@ export default function App() {
             pageSearchActive: !!searchValueRef.current,
             enhancedSearchOpen: enhOpenRef.current,
           });
-          if (searchKeepTimer !== null) {
-            clearTimeout(searchKeepTimer);
-            searchKeepTimer = null;
-          }
           if (resetPlan.search === "delayed") {
-            searchKeepTimer = setTimeout(() => {
-              searchKeepTimer = null;
-              resetSearchState();
-            }, SEARCH_KEEP_MS);
+            searchResetLifecycle.arm();
           } else {
+            searchResetLifecycle.cancel();
             resetSearchState();
           }
 
-          if (uiKeepTimer !== null) clearTimeout(uiKeepTimer);
           if (resetPlan.retainedUi === "delayed") {
-            uiKeepTimer = setTimeout(() => {
-              uiKeepTimer = null;
-              resetRetainedUiState();
-            }, SEARCH_KEEP_MS);
+            retainedUiResetLifecycle.arm();
           } else {
+            retainedUiResetLifecycle.cancel();
             resetRetainedUiState();
           }
 
-          if (clipboardCategoryKeepTimer !== null) clearTimeout(clipboardCategoryKeepTimer);
           if (clipboardCategoryRef.current !== "all") {
-            clipboardCategoryKeepTimer = setTimeout(() => {
-              clipboardCategoryKeepTimer = null;
-              setClipboardCategory("all");
-            }, CLIPBOARD_CATEGORY_KEEP_MS);
+            clipboardCategoryResetLifecycle.arm();
           } else {
-            clipboardCategoryKeepTimer = null;
+            clipboardCategoryResetLifecycle.cancel();
           }
         }); // 复位（续88：任何窗口隐藏都兜底清一次区内重排残留状态，防 ghost 卡死；菜单/toast 同样立即清）
         // 性能优化步骤2：image 条目 content 已不入前端 state，无法再按 content 做乐观去重。
@@ -1196,9 +1189,9 @@ export default function App() {
       nativeInsertSlotRef.current = null;
       hideStageInsertMarker(stageInsertMarkerRef.current);
       if (fileDragLeaveTimer) clearTimeout(fileDragLeaveTimer);
-      if (searchKeepTimer) clearTimeout(searchKeepTimer);
-      if (uiKeepTimer) clearTimeout(uiKeepTimer);
-      if (clipboardCategoryKeepTimer) clearTimeout(clipboardCategoryKeepTimer);
+      searchResetLifecycle.cancel();
+      retainedUiResetLifecycle.cancel();
+      clipboardCategoryResetLifecycle.cancel();
     };
   }, []);
 
@@ -1229,7 +1222,13 @@ export default function App() {
         })();
       }
     }
-    setTimeout(() => searchRef.current?.focus(), 100);
+    return startSearchFocusLifecycle({
+      focusInput: () => searchRef.current?.focus({ preventScroll: true }),
+      requestFrame: callback => requestAnimationFrame(callback),
+      cancelFrame: frame => cancelAnimationFrame(frame),
+      addWindowFocusListener: listener => window.addEventListener("focus", listener),
+      removeWindowFocusListener: listener => window.removeEventListener("focus", listener),
+    });
   }, [visible]);
 
   // ── 按使用打分排序（频率为主×近期乘数：常用且近期用过的浮前；同分按名字兜底）──
@@ -2653,25 +2652,28 @@ export default function App() {
             <span className="section-label">{t("文件中转区")}</span>
             <div className="stage-header-actions">
               <div className="stage-color-filter" role="group" aria-label={t("颜色标记")}>
+                {stageColorFilter !== null && (
+                  <button
+                    type="button"
+                    className="stage-color-filter-btn stage-color-filter-reset"
+                    disabled={stageMultiselect}
+                    aria-label={t("恢复显示全部")}
+                    title={stageMultiselect ? t("多选模式下不可切换颜色分类") : t("恢复显示全部")}
+                    onClick={() => changeStageColorFilter(null)}
+                  ><span className="stage-color-clear-marker" aria-hidden="true"/></button>
+                )}
                 {STAGE_COLOR_TAGS.map(colorTag => (
                   <button
                     key={colorTag}
                     type="button"
                     className={`stage-color-filter-btn color-${colorTag}${stageColorFilter === colorTag ? " active" : ""}`}
+                    disabled={stageMultiselect}
                     aria-pressed={stageColorFilter === colorTag}
                     aria-label={t("只显示{color}", { color: stageColorLabel(colorTag, t) })}
-                    title={t("只显示{color}", { color: stageColorLabel(colorTag, t) })}
+                    title={stageMultiselect ? t("多选模式下不可切换颜色分类") : t("只显示{color}", { color: stageColorLabel(colorTag, t) })}
                     onClick={() => changeStageColorFilter(colorTag)}
                   ><span className="stage-color-marker" aria-hidden="true"/></button>
                 ))}
-                <button
-                  type="button"
-                  className={`stage-color-filter-btn stage-color-filter-reset${stageColorFilter === null ? " active" : ""}`}
-                  aria-pressed={stageColorFilter === null}
-                  aria-label={t("恢复显示全部")}
-                  title={t("恢复显示全部")}
-                  onClick={() => changeStageColorFilter(null)}
-                >{t("归位")}</button>
               </div>
               <div className="stage-multi-toolbar">
               {stageMultiselect ? <>
@@ -2948,9 +2950,9 @@ export default function App() {
             {item.label}
           </button>
         ))}
+        {/* 颜色栏是右键菜单的固定收尾：以后新增普通按钮仍放入 items，不得放到本节点之后。 */}
         {ctxMenu.colors && (
           <div className="stage-color-inline" aria-label={ctxMenu.colors.ids.length > 1 ? t("为所选 {n} 项设置颜色", { n: ctxMenu.colors.ids.length }) : t("设置颜色标记")}>
-            <span className="stage-color-inline-label">{t("颜色")}</span>
             <button
               type="button"
               className={`stage-color-swatch stage-color-swatch-clear${!ctxMenu.colors.mixed && ctxMenu.colors.selected === null ? " selected" : ""}`}

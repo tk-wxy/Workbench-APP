@@ -40,17 +40,23 @@ try {
   const appSource = await readFile(path.join(root, "src/App.tsx"), "utf8");
   assert.match(appSource, /className="stage-color-inline"/);
   assert.match(appSource, /className="stage-color-clear-marker"/);
+  assert.doesNotMatch(appSource, /stage-color-inline-label/);
   assert.doesNotMatch(appSource, />×<\/button>/);
   assert.doesNotMatch(appSource, /kind: "colors"/);
   assert.match(appSource, /stageRef\.current = next;\s*void saveStage\(next\);/);
   assert.match(appSource, /className="stage-color-filter"/);
+  assert.match(appSource, /stageColorFilter !== null && \(\s*<button[\s\S]*?stage-color-filter-reset[\s\S]*?stage-color-clear-marker/);
   assert.match(appSource, /STAGE_COLOR_TAGS\.map\(colorTag/);
+  assert.match(appSource, /stage-color-filter-reset[\s\S]*?STAGE_COLOR_TAGS\.map\(colorTag/);
+  assert.match(appSource, /stage-color-filter-reset[\s\S]*?disabled=\{stageMultiselect\}/);
+  assert.match(appSource, /STAGE_COLOR_TAGS\.map\(colorTag[\s\S]*?disabled=\{stageMultiselect\}/);
+  assert.match(appSource, /ctxMenu\.items\.map[\s\S]*?\{ctxMenu\.colors && \(/);
   assert.match(appSource, /setStageColorFilter\(null\);\s*closeLauncherPicker/);
   assert.match(appSource, /searchActive: !!search\.trim\(\) \|\| stageColorFilter !== null/);
   assert.match(appSource, /unused: true/);
   assert.match(appSource, /fileEntryToStage\(await startupNative\.getFileInfo\(fp\), false\)/);
   assert.match(appSource, /markStageItemsUsed\(ids\);\s*const dr = dragOutRef\.current/);
-  console.log("中转站颜色与首次使用状态 —— 枚举、过滤、内联菜单与持久字段\n  ✓ 无标记、五色标签与单项固定保持稳定\n  ✓ 颜色过滤和归位保持原顺序\n  ✓ 未使用字段仅保留 true，首次使用后按 id 清除\n  ✓ 颜色选择直接位于右键菜单底部\n全部通过\n");
+  console.log("中转站颜色与首次使用状态 —— 枚举、过滤、内联菜单与持久字段\n  ✓ 无标记、五色标签与单项固定保持稳定\n  ✓ 颜色过滤和归位保持原顺序\n  ✓ 未使用字段仅保留 true，首次使用后按 id 清除\n  ✓ 右键纯圆点颜色栏固定收尾\n  ✓ 右上归位按需显示且多选时分类控件禁用\n全部通过\n");
 } finally {
   await rm(temp, { recursive: true, force: true });
 }
