@@ -12,6 +12,8 @@ import type {
   StageItem,
 } from "../types";
 
+const DEFAULT_APP_LIMIT = 50;
+
 export type SearchTranslate = (key: string, vars?: Record<string, string | number>) => string;
 
 export interface EnhancedFileSearchResult {
@@ -64,7 +66,7 @@ export const enhancedClipboardName = (item: ClipItem, t: SearchTranslate) =>
 function buildLegacyTier1(input: BuildEnhancedSearchResultModelOptions): EnhResult[] {
   const query = input.query.trim();
   if (!query) {
-    return input.sortedApps.slice(0, 30).map(app => ({
+    return input.sortedApps.slice(0, DEFAULT_APP_LIMIT).map(app => ({
       kind: "app",
       app,
       ranges: [],

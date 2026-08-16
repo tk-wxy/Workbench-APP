@@ -130,13 +130,13 @@ const clipTypeFallback = buildEnhancedSearchResultModel(base({
 }));
 check("剪贴板类型词仍能兜底命中", clipTypeFallback.results[0]?.kind === "clip");
 
-const fallbackApps = Array.from({ length: 35 }, (_, index) => app(`App ${index}`, `C:/${index}.exe`));
+const fallbackApps = Array.from({ length: 55 }, (_, index) => app(`App ${index}`, `C:/${index}.exe`));
 const empty = buildEnhancedSearchResultModel(base({
   query: "",
   apps: fallbackApps,
   sortedApps: fallbackApps,
 }));
-check("空查询只取前 30 个常用应用", empty.results.length === 30 && empty.sections.length === 1);
+check("空查询只取前 50 个常用应用", empty.results.length === 50 && empty.sections.length === 1);
 
 rmSync(dir, { recursive: true, force: true });
 console.log(failed ? `\n${failed} 个断言失败\n` : "\n全部通过\n");

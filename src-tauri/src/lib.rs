@@ -42,6 +42,10 @@ fn choose_paste_target(remembered: isize, current: isize, self_hwnd: isize, reme
     }
 }
 
+fn choose_focus_restore_target(remembered: isize, self_hwnd: isize, remembered_valid: bool) -> isize {
+    choose_paste_target(remembered, 0, self_hwnd, remembered_valid)
+}
+
 /// 必须在 window.show() 之前调用；只记录真实外部窗口，失败时清零避免复用上轮陈旧 HWND。
 fn remember_foreground_before_show(window: &tauri::WebviewWindow) {
     use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -51,6 +55,31 @@ fn remember_foreground_before_show(window: &tauri::WebviewWindow) {
         if current != 0 && current != self_hwnd { current } else { 0 },
         Ordering::SeqCst,
     );
+}
+
+/// 快捷键关闭发生时，Windows 不保证隐藏的 WebView HWND 会把键盘路由自动还给呼出前窗口。
+/// 使用 show 前已经保存的外部 HWND 显式激活；只接在快捷键 hide 后，light-dismiss 不能调用，
+/// 否则用户点击另一个应用时会被强行拉回呼出前窗口。
+fn restore_foreground_after_hotkey_hide(window: &tauri::WebviewWindow) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, IsWindow, SetForegroundWindow};
+
+    let remembered = FOREGROUND_BEFORE_SHOW.load(Ordering::SeqCst);
+    let self_hwnd = window.hwnd().ok().map(|h| h.0 as isize).unwrap_or(0);
+    let remembered_valid = remembered != 0
+        && unsafe { IsWindow(HWND(remembered as *mut _)).as_bool() };
+    let target = choose_focus_restore_target(remembered, self_hwnd, remembered_valid);
+    if target == 0 {
+        eprintln!("[hotkey] no valid foreground snapshot to restore after hide");
+        return false;
+    }
+
+    let requested = unsafe { SetForegroundWindow(HWND(target as *mut _)).as_bool() };
+    let restored = unsafe { GetForegroundWindow().0 as isize == target };
+    if !restored {
+        eprintln!("[hotkey] foreground restore did not complete requested={requested}");
+    }
+    restored
 }
 
 /// hide + handback 后解析本次粘贴目标。快照失效时退回 OS 当前交还的前台窗口。
@@ -707,6 +736,9 @@ fn start_hotkey_monitor(app: AppHandle) {
                     false
                 }
             };
+            if native_hidden {
+                let _ = restore_foreground_after_hotkey_hide(window);
+            }
             set_webview_memory_low(window, true);
             if native_hidden {
                 let _ = app.emit("hotkey-hide", ());
@@ -1104,6 +1136,14 @@ mod tests {
     fn paste_target_never_returns_self_or_null_fallback() {
         assert_eq!(choose_paste_target(0, 300, 300, false), 0);
         assert_eq!(choose_paste_target(0, 0, 300, false), 0);
+    }
+
+    #[test]
+    fn hotkey_hide_restores_only_a_valid_external_snapshot() {
+        assert_eq!(choose_focus_restore_target(100, 300, true), 100);
+        assert_eq!(choose_focus_restore_target(100, 300, false), 0);
+        assert_eq!(choose_focus_restore_target(300, 300, true), 0);
+        assert_eq!(choose_focus_restore_target(0, 300, false), 0);
     }
 
     #[test]

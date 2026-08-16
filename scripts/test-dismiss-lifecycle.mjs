@@ -75,13 +75,26 @@ console.log("\n关闭淡出生命周期 —— transitionend 与 watchdog");
   const hotkeyNativePos = hotkeyMonitor.indexOf("hide_window_native_first(window, raw_hwnd, \"hotkey\")");
   const hotkeyLowPos = hotkeyMonitor.indexOf("set_webview_memory_low(window, true)", hotkeyNativePos);
   const hotkeyGatePos = hotkeyMonitor.indexOf("if native_hidden", hotkeyNativePos);
+  const hotkeyRestorePos = hotkeyMonitor.indexOf("restore_foreground_after_hotkey_hide(window)", hotkeyGatePos);
   const hotkeyEmitPos = hotkeyMonitor.indexOf('emit("hotkey-hide"', hotkeyGatePos);
   check(
     "热键关闭先完成原生隐藏，再切 Low 并按成功结果 emit 前端清场",
     hotkeyNativePos >= 0
-      && hotkeyLowPos > hotkeyNativePos
-      && hotkeyGatePos > hotkeyLowPos
+      && hotkeyGatePos > hotkeyNativePos
+      && hotkeyLowPos > hotkeyGatePos
       && hotkeyEmitPos > hotkeyGatePos,
+  );
+  check(
+    "热键关闭在 HWND 隐藏后立即归还呼出前焦点，再做 Low 与前端清场",
+    hotkeyRestorePos > hotkeyGatePos
+      && hotkeyLowPos > hotkeyRestorePos
+      && hotkeyEmitPos > hotkeyLowPos,
+  );
+  const focusWatchStart = rust.indexOf("fn start_focus_watch");
+  const focusWatch = focusWatchStart >= 0 ? rust.slice(focusWatchStart) : "";
+  check(
+    "light-dismiss 不抢回呼出前窗口",
+    focusWatchStart >= 0 && !focusWatch.includes("restore_foreground_after_hotkey_hide(window)"),
   );
   check(
     "热键压力探针只扩大 HWND 已隐藏后的 tao 同步间隔",
