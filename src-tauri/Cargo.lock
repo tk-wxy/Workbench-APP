@@ -4998,7 +4998,7 @@ dependencies = [
 
 [[package]]
 name = "workbench-app"
-version = "0.27.17"
+version = "0.27.18"
 dependencies = [
  "arboard",
  "enigo",

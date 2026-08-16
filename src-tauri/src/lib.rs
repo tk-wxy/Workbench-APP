@@ -670,6 +670,15 @@ fn start_hotkey_monitor(app: AppHandle) {
             Some(w) => w,
             None => { eprintln!("[hotkey] no main window, abort"); return; }
         };
+        // 热键 monitor 本身就在后台线程；提前缓存稳定 HWND，关闭时才能绕过 tao 消息队列先
+        // 同步隐藏真实窗口。取不到句柄时仍保留 Tauri hide 降级，但绝不先 emit 透明前端态。
+        let hotkey_hwnd = match window.hwnd() {
+            Ok(hwnd) => Some(hwnd.0 as isize),
+            Err(error) => {
+                eprintln!("[hotkey] hwnd unavailable; native-first hide disabled: {error:?}");
+                None
+            }
+        };
         // MSB(0x8000)=当前物理按下。读"电平"而非"事件"——这是与 RegisterHotKey 的本质区别
         let is_down = |vk: u16| -> bool {
             unsafe { (GetAsyncKeyState(vk as i32) as u16 & 0x8000u16) != 0 }
@@ -688,11 +697,20 @@ fn start_hotkey_monitor(app: AppHandle) {
                 if win.is_visible().unwrap_or(false) { let _ = win.set_focus(); }
             });
         };
-        // hide：纯 hide + emit 同步前端（hide 路径不含焦点交还/Ctrl+V，那是粘贴专用）
+        // hide：仍是即时关闭、绝不插淡出（R11）；但后台线程不能只排队 Tauri hide 后立即 emit，
+        // 否则 HWND 尚未真正消失时前端先透明化，会偶发暴露 WebView2/DWM 黑色宿主帧。
         let hide = |app: &AppHandle, window: &tauri::WebviewWindow| {
-            let _ = window.hide();
+            let native_hidden = match hotkey_hwnd {
+                Some(raw_hwnd) => hide_window_native_first(window, raw_hwnd, "hotkey"),
+                None => {
+                    let _ = window.hide();
+                    false
+                }
+            };
             set_webview_memory_low(window, true);
-            let _ = app.emit("hotkey-hide", ());
+            if native_hidden {
+                let _ = app.emit("hotkey-hide", ());
+            }
         };
 
         let mut prev_combo = false;                          // 上一拍 Ctrl+Space 是否同时按下
@@ -804,22 +822,26 @@ fn start_hotkey_monitor(app: AppHandle) {
 //    · 已 arm 且 前台 != 本窗口 → 用户切走了 → hide + emit + disarm
 //  好处：show 的 set_focus 未落地前前台还是上一个应用，未 arm 故不会误关；若 set_focus
 //  彻底失败则永不 arm、永不乱关（优雅降级，用户仍可 Esc/快捷键关）。
-//  隐藏复用纯 hide()+emit("hotkey-hide") 路径，不碰焦点交还/粘贴流程。
+//  隐藏复用 native-first 即时 hide + emit 路径，不碰焦点交还/粘贴流程。
 // ════════════════════════════════════════════════════════════════════
 
-/// light-dismiss 发生在目标应用已经成为前台之后。这里不能只从后台线程调用 Tauri `hide()`：
+/// 热键与 light-dismiss 都从后台轮询线程触发。这里不能只调用 Tauri `hide()`：
 /// runtime-wry 只会把 Hide 投递到 tao 主事件循环，排队期间全屏 topmost HWND 仍参与 DWM 合成；
 /// 若紧接着 emit 让 React 提交隐藏态，就可能在 HWND 真正消失前暴露 WebView2 宿主末帧。
 ///
 /// 顺序必须是：原生 HWND 同步隐藏并跨过一次 DWM present → Tauri hide 同步 tao 可见性缓存 →
 /// emit 前端清场。裸 ShowWindow 后的 Tauri hide 不能删除：R37 已由 GUI 实测证明，否则 tao
 /// 仍缓存 visible=true，下一次 `window.show()` 会被 diff 成 no-op、整窗再也呼不出。
-fn hide_light_dismiss_native_first(window: &tauri::WebviewWindow, raw_hwnd: isize) -> bool {
+fn hide_window_native_first(
+    window: &tauri::WebviewWindow,
+    raw_hwnd: isize,
+    source: &'static str,
+) -> bool {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::DwmFlush;
     use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, ShowWindow, SW_HIDE};
 
-    // start_focus_watch 启动时已经取得并验证过这一句柄；复用同一值，避免关闭时再次取句柄的
+    // monitor 启动时已经取得并验证过这一句柄；复用同一值，避免关闭时再次取句柄的
     // 错误分支退化回“只排队 Tauri hide 后立即 emit”的原始竞态。
     let hwnd = HWND(raw_hwnd as *mut _);
 
@@ -828,14 +850,14 @@ fn hide_light_dismiss_native_first(window: &tauri::WebviewWindow, raw_hwnd: isiz
         if IsWindowVisible(hwnd).as_bool() {
             // ShowWindow is synchronous here. 若极端错误下仍可见，只排队 Tauri hide、绝不 emit
             // 透明前端态；宁可保留本轮 UI 状态，也不能重开已知的黑帧窗口。
-            eprintln!("[focus] native SW_HIDE returned but HWND is still visible; suppressing frontend hide event");
+            eprintln!("[{source}] native SW_HIDE returned but HWND is still visible; suppressing frontend hide event");
             let _ = window.hide();
             return false;
         }
         if let Err(e) = DwmFlush() {
             // Windows 11 normally always has DWM enabled. A barrier failure must not skip the cache-sync
             // hide; the HWND has already received SW_HIDE, so this is diagnostic rather than a retry loop.
-            eprintln!("[focus] DwmFlush after SW_HIDE failed: {e:?}");
+            eprintln!("[{source}] DwmFlush after SW_HIDE failed: {e:?}");
         }
     }
 
@@ -843,11 +865,11 @@ fn hide_light_dismiss_native_first(window: &tauri::WebviewWindow, raw_hwnd: isiz
     // already been hidden and flushed, while tao still believes it is visible. A large value therefore
     // verifies that visual correctness no longer depends on how quickly Tauri consumes WindowMessage::Hide.
     #[cfg(debug_assertions)]
-    if let Ok(raw) = std::env::var("WORKBENCH_TEST_LIGHT_DISMISS_TAURI_SYNC_DELAY_MS") {
+    if let Ok(raw) = std::env::var("WORKBENCH_TEST_NATIVE_HIDE_TAURI_SYNC_DELAY_MS") {
         if let Ok(ms) = raw.parse::<u64>() {
             let bounded_ms = ms.min(5_000);
             if bounded_ms > 0 {
-                println!("[focus] test-only Tauri hide sync delay={bounded_ms}ms");
+                println!("[{source}] test-only Tauri hide sync delay={bounded_ms}ms");
                 std::thread::sleep(std::time::Duration::from_millis(bounded_ms));
             }
         }
@@ -856,7 +878,7 @@ fn hide_light_dismiss_native_first(window: &tauri::WebviewWindow, raw_hwnd: isiz
     // Cache synchronization for tao (R37). This may still queue, but the real HWND is already hidden and
     // DWM has crossed a present boundary, so its latency can no longer expose a transparent WebView frame.
     if let Err(e) = window.hide() {
-        eprintln!("[focus] Tauri hide cache sync failed: {e:?}");
+        eprintln!("[{source}] Tauri hide cache sync failed: {e:?}");
     }
     true
 }
@@ -900,7 +922,7 @@ fn start_focus_watch(app: AppHandle) {
                     armed = true;
                 } else if armed && fg != 0 {
                     // 前台切到另一个真实窗口（fg==0 是切换瞬间的空窗，不误关）→ light dismiss
-                    let native_hidden = hide_light_dismiss_native_first(&window, my_hwnd);
+                    let native_hidden = hide_window_native_first(&window, my_hwnd, "focus");
                     set_webview_memory_low(&window, true);
                     if native_hidden {
                         let _ = app.emit("hotkey-hide", ());

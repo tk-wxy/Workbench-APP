@@ -44,8 +44,13 @@ console.log("\n关闭淡出生命周期 —— transitionend 与 watchdog");
   const css = readFileSync("src/App.css", "utf8");
   const rust = readFileSync("src-tauri/src/lib.rs", "utf8");
   const nativeFirstHelper = rust.match(
-    /fn hide_light_dismiss_native_first[\s\S]*?\n}\n\nfn start_focus_watch/,
+    /fn hide_window_native_first[\s\S]*?\n}\n\nfn start_focus_watch/,
   )?.[0] ?? "";
+  const hotkeyStart = rust.indexOf("fn start_hotkey_monitor");
+  const hotkeyEnd = rust.indexOf("//  焦点监听", hotkeyStart);
+  const hotkeyMonitor = hotkeyStart >= 0 && hotkeyEnd > hotkeyStart
+    ? rust.slice(hotkeyStart, hotkeyEnd)
+    : "";
   const showPos = nativeFirstHelper.indexOf("ShowWindow(hwnd, SW_HIDE)");
   const visibleCheckPos = nativeFirstHelper.indexOf("IsWindowVisible(hwnd)");
   const flushPos = nativeFirstHelper.indexOf("DwmFlush()");
@@ -65,7 +70,26 @@ console.log("\n关闭淡出生命周期 —— transitionend 与 watchdog");
   );
   check(
     "light-dismiss 仅在原生隐藏确认后 emit 前端清场",
-    /let native_hidden = hide_light_dismiss_native_first\(&window, my_hwnd\);[\s\S]*?if native_hidden \{[\s\S]*?emit\("hotkey-hide"/.test(rust),
+    /let native_hidden = hide_window_native_first\(&window, my_hwnd, "focus"\);[\s\S]*?if native_hidden \{[\s\S]*?emit\("hotkey-hide"/.test(rust),
+  );
+  const hotkeyNativePos = hotkeyMonitor.indexOf("hide_window_native_first(window, raw_hwnd, \"hotkey\")");
+  const hotkeyLowPos = hotkeyMonitor.indexOf("set_webview_memory_low(window, true)", hotkeyNativePos);
+  const hotkeyGatePos = hotkeyMonitor.indexOf("if native_hidden", hotkeyNativePos);
+  const hotkeyEmitPos = hotkeyMonitor.indexOf('emit("hotkey-hide"', hotkeyGatePos);
+  check(
+    "热键关闭先完成原生隐藏，再切 Low 并按成功结果 emit 前端清场",
+    hotkeyNativePos >= 0
+      && hotkeyLowPos > hotkeyNativePos
+      && hotkeyGatePos > hotkeyLowPos
+      && hotkeyEmitPos > hotkeyGatePos,
+  );
+  check(
+    "热键压力探针只扩大 HWND 已隐藏后的 tao 同步间隔",
+    nativeFirstHelper.includes("WORKBENCH_TEST_NATIVE_HIDE_TAURI_SYNC_DELAY_MS")
+      && showPos >= 0
+      && flushPos > showPos
+      && nativeFirstHelper.indexOf("WORKBENCH_TEST_NATIVE_HIDE_TAURI_SYNC_DELAY_MS") > flushPos
+      && nativeFirstHelper.indexOf("WORKBENCH_TEST_NATIVE_HIDE_TAURI_SYNC_DELAY_MS") < cacheSyncPos,
   );
 }
 
