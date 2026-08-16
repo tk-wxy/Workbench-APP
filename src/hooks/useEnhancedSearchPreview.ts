@@ -255,7 +255,9 @@ export function useEnhancedSearchPreview({
       }
       if (item.colorTag) {
         const color = item.colorTag === "red" ? t("红色")
-          : item.colorTag === "yellow" ? t("黄色") : t("蓝色");
+          : item.colorTag === "yellow" ? t("黄色")
+          : item.colorTag === "blue" ? t("蓝色")
+          : item.colorTag === "green" ? t("绿色") : t("紫色");
         pushRow(t("颜色标记"), color);
       }
       if (item.pinned) pushRow(t("状态"), t("已固定"));

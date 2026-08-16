@@ -99,7 +99,7 @@ export const StageGridCard = memo(function StageGridCard({
   return (
     <div
       data-stage-id={item.id}
-      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${!persistAll ? " stage-pin-visible" : ""}${newlyAdded ? " stage-new" : ""}`}
+      className={`stage-card${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${!persistAll ? " stage-pin-visible" : ""}${item.unused ? " stage-unused" : ""}${newlyAdded ? " stage-new" : ""}`}
       draggable={false}
       onDragStart={event => event.preventDefault()}
       onClick={event => actions.activate(event, item, index)}
@@ -189,7 +189,7 @@ export const StageListRow = memo(function StageListRow({
   return (
     <div
       data-stage-id={item.id}
-      className={`stage-item${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${newlyAdded ? " stage-new" : ""}`}
+      className={`stage-item${selected ? " selected" : ""}${missing ? " stage-missing" : ""}${item.unused ? " stage-unused" : ""}${newlyAdded ? " stage-new" : ""}`}
       draggable={false}
       onDragStart={event => event.preventDefault()}
       onClick={event => actions.activate(event, item, index)}

@@ -20,7 +20,7 @@ import { appUsageScore } from "./domain/appUsage";
 import { createDismissLifecycle, type DismissLifecycle } from "./domain/dismissLifecycle";
 import { createLauncherId, LAUNCHER_MAX } from "./domain/launcherLayout";
 import { STAGE_MAX_OPTIONS } from "./domain/stageSettings";
-import { normalizeStageItemAppearance, resolveStageColorClick, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
+import { filterStageItemsByColor, markStageItemsUsed as clearStageItemsUnused, normalizeStageItemAppearance, resolveStageColorClick, setStageItemsColorTag, shouldRetainStageItem, STAGE_COLOR_TAGS, type StageColorTag } from "./domain/stageColorTag";
 import {
   buildNativeDragLabel,
   buildNativeDragMeta,
@@ -132,9 +132,10 @@ async function hideWorkbench() { try { const { invoke } = await import("@tauri-a
 
 // ── 文件中转：转换 + 写剪贴板助手 ──
 const stageId = () => Date.now() * 1000 + Math.floor(Math.random() * 1000); // 稳定唯一 id（key/去重）
-function fileEntryToStage(f: FileEntry): StageItem {
+function fileEntryToStage(f: FileEntry, markUnused = true): StageItem {
   const isImage = IMG_EXTS.includes(f.ext.toLowerCase());
-  return { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage, icon: f.icon }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
+  const item: StageItem = { id: stageId(), type: "file", items: [{ path: f.path, name: f.name, ext: f.ext, isImage, icon: f.icon }], count: 1, name: f.name, ext: f.ext, isDir: f.isDir, size: f.size };
+  return markUnused ? { ...item, unused: true } : item;
 }
 
 function snapshotStageInsertRects(container: HTMLDivElement | null, layout: "list" | "grid") {
@@ -148,7 +149,7 @@ function snapshotStageInsertRects(container: HTMLDivElement | null, layout: "lis
   });
 }
 function clipToStage(c: ClipItem): StageItem {
-  return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path };
+  return { id: stageId(), type: c.type, content: c.content, items: c.items, count: c.count, name: c.items?.[0]?.name, orig_path: c.orig_path, unused: true };
 }
 // 图片大内容不常驻前端 state：剪贴板按 time 从 CLIP_CACHE 现取，中转图片按 contentFile 从
 // stage_images/ 现取。拖出路径另由 Rust 同步自查，绝不在前端 await（R13）。
@@ -181,6 +182,8 @@ function stageColorLabel(tag: StageColorTag, t: ReturnType<typeof makeT>) {
     case "red": return t("红色");
     case "yellow": return t("黄色");
     case "blue": return t("蓝色");
+    case "green": return t("绿色");
+    case "purple": return t("紫色");
   }
 }
 
@@ -213,6 +216,7 @@ export default function App() {
   const clipboardCategoryRef = useRef<ClipboardCategory>("all"); clipboardCategoryRef.current = clipboardCategory;
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [stage, setStage] = useState<StageItem[]>([]); // 文件中转区：混合条目（文件/文本/图片）
+  const [stageColorFilter, setStageColorFilter] = useState<StageColorTag | null>(null); // null=归位/显示全部；隐藏超过 10 秒后复位
   // 新落入中转站的条目只在本轮渲染中带动画标记；绝不落盘，避免启动恢复或图片补水时误闪。
   const [newlyAddedStageIds, setNewlyAddedStageIds] = useState<Set<number>>(new Set());
   const [launcher, setLauncher] = useState<LauncherItem[]>([]); // 启动器收藏托盘（手动策展，持久化）
@@ -567,7 +571,8 @@ export default function App() {
           const items: StageItem[] = [];
           for (const fp of fps.slice(0, stageMaxLoaded)) {
             try {
-              items.push(fileEntryToStage(await startupNative.getFileInfo(fp)));
+              // 老 file-list 迁移项在本次版本之前已经存在，按“历史条目=已使用”兼容，不补未使用轮廓。
+              items.push(fileEntryToStage(await startupNative.getFileInfo(fp), false));
             } catch (error) {
               console.warn(`[startup] 恢复旧中转条目失败：${fp}`, error);
             }
@@ -667,10 +672,40 @@ export default function App() {
       return next;
     });
   }, []);
+  const markStageItemsUsed = useCallback((ids: readonly number[]) => {
+    if (!ids.length) return;
+    const current = stageRef.current;
+    const next = clearStageItemsUnused(current, ids);
+    if (!next.some((item, index) => item !== current[index])) return;
+    // 同步推进 ref，避免“首次使用”动作之后紧接着的拖出完成/删除路径读到旧 unused 快照。
+    stageRef.current = next;
+    setStage(next);
+    setNewlyAddedStageIds(previous => {
+      const usedIds = new Set(ids);
+      if (![...usedIds].some(id => previous.has(id))) return previous;
+      return new Set([...previous].filter(id => !usedIds.has(id)));
+    });
+    void persistStage(next);
+  }, [persistStage]);
   const setStageColorTag = useCallback((ids: readonly number[], colorTag: StageColorTag | null) => {
     const next = setStageItemsColorTag(stageRef.current, ids, colorTag);
-    if (next.some((item, index) => item !== stageRef.current[index])) void saveStage(next);
-  }, [saveStage]);
+    if (!next.some((item, index) => item !== stageRef.current[index])) return;
+    stageRef.current = next;
+    void saveStage(next);
+    if (stageColorFilter !== null) {
+      setStageSel(new Set<number>());
+      setStageMultiselect(false);
+      stageAnchorRef.current = null;
+    }
+  }, [saveStage, stageColorFilter]);
+  const changeStageColorFilter = useCallback((colorTag: StageColorTag | null) => {
+    if (colorTag === stageColorFilter) return;
+    // 过滤改变了可见集合；清掉跨过滤条件的隐藏选择，避免批量动作误作用于看不见的条目。
+    setStageColorFilter(colorTag);
+    setStageSel(new Set<number>());
+    setStageMultiselect(false);
+    stageAnchorRef.current = null;
+  }, [stageColorFilter]);
   const toggleStagePin = useCallback((id: number) => {
     const next = stageRef.current.map(item => {
       if (item.id !== id) return item;
@@ -809,6 +844,7 @@ export default function App() {
       setStageSel(new Set<number>());
       setStageMultiselect(false);
       stageAnchorRef.current = null;
+      setStageColorFilter(null);
       closeLauncherPicker();
       closeLauncherManager();
       setStageRecoveryOpen(false);
@@ -1285,13 +1321,17 @@ export default function App() {
   // 消除「每键同步重建整棵列表」的输入掉帧。控制逻辑（键盘导航/enh 同步）仍读即时 `search`，deferred
   // 只喂视觉列表；两者相差至多一两帧内收敛，打字停下即一致，不影响回车/方向键选中。
   const deferredSearch = useDeferredValue(search);
-  // 中转区：名称/内容优先 + 类型词叠加；空查询=全量
+  const stageColorFiltered = useMemo(
+    () => filterStageItemsByColor(stage, stageColorFilter),
+    [stage, stageColorFilter],
+  );
+  // 中转区：颜色筛选与页面搜索取交集；名称/内容优先 + 类型词叠加。
   const stagePageSearch = useMemo(() => {
     const q = deferredSearch.trim();
-    if (!q) return { items: stage, highlights: new Map<number, TextRange[]>() };
+    if (!q) return { items: stageColorFiltered, highlights: new Map<number, TextRange[]>() };
     const items: StageItem[] = [];
     const highlights = new Map<number, TextRange[]>();
-    for (const s of stage) {
+    for (const s of stageColorFiltered) {
       const name = s.type === "text" ? (s.content || "") : s.type === "image" ? "图片" : (s.name || s.items?.[0]?.name || "文件");
       const match = matchPageSearch(q, name, typeKeywords({ type: s.type, ext: s.ext ?? s.items?.[0]?.ext, isImage: s.items?.[0]?.isImage }));
       if (!match.matches) continue;
@@ -1299,7 +1339,7 @@ export default function App() {
       highlights.set(s.id, match.ranges);
     }
     return { items, highlights };
-  }, [stage, deferredSearch]);
+  }, [stageColorFiltered, deferredSearch]);
   const filteredStage = stagePageSearch.items;
   // 中转区失踪扫描是低优先级任务：呼出后才延迟启动；按小批次检查并让出执行机会。
   // 预算耗尽时不清空未检查路径的旧状态，避免“尚未检查”被误标；下一次呼出再继续。
@@ -1434,8 +1474,8 @@ export default function App() {
     if (r.kind === "app") { launchApp(r.app, iconEl ?? null); }
     else if (r.kind === "fs") { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.path })).catch(() => {}); }
     else if (r.kind === "clip") { copyAndPasteRef.current?.(r.item); } // 剪贴板结果：取走粘贴（copyAndPaste 定义在后，走 ref 避免 TDZ）
-    else { hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
-  }, [launchApp]);
+    else { markStageItemsUsed([r.item.id]); hideWorkbench(); import("@tauri-apps/api/core").then(({ invoke }) => invoke("open_file", { path: r.item.items![0].path })).catch(() => {}); }
+  }, [launchApp, markStageItemsUsed]);
   // 注：原生拖入（drag-in）已废弃——全屏 transparent+alwaysOnTop+focus:false 覆盖层收不到任何 OLE 拖放事件（阶段2 实测：零事件+红色禁止），且全屏会盖住拖拽源。改走剪贴板加入。详见 DECISIONS §14。
 
   // ── 启动器（收藏托盘）操作 ──
@@ -1499,7 +1539,7 @@ export default function App() {
       const info = await invoke<FileEntry>("get_file_info", { path: r.path });
       icon = info.icon ?? null;
     } catch {}
-    const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir };
+    const item: StageItem = { id:stageId(), type:"file", items:[{path:r.path,name:r.name,ext:r.ext,isImage,icon}], count:1, name:r.name, ext:r.ext, isDir:r.isDir, unused:true };
     const next = [item, ...stage].slice(0, stageMax);
     saveStage(next);
     markStageItemsNew(next.some(candidate => candidate.id === item.id) ? [item] : []);
@@ -1622,6 +1662,7 @@ export default function App() {
   // forceHide=true：由"区内重排中按热键"升级而来——Rust 侧无视 keepOpen 设置强制隐藏 overlay（用户已明确要隐藏
   // 去外部投放）。自动关闭开启时的直接原生拖出传 false，由 Rust 读取当前设置决定起手隐藏。
   const beginNativeDragOut = useCallback((ids: number[], forceHide = false, point?: { x: number; y: number }, sourceElement?: HTMLElement) => {
+    markStageItemsUsed(ids);
     const dr = dragOutRef.current;
     dr.mode = "native";
     dr.draggedIds = ids;
@@ -1693,7 +1734,7 @@ export default function App() {
       .then(({ invoke }) => invoke("start_drag_out", { items: dragItems, forceHide }))
       .catch(() => removeNativeHandoffGhost(sessionId));
     perf.since(perfMark, "dragout:js-dispatch");
-  }, [removeNativeHandoffGhost]);
+  }, [markStageItemsUsed, removeNativeHandoffGhost]);
   // FLIP 快照 + ghost 建立：与启动台 handleLauncherPointerDown 的 onMove 激活段同构，选择器按当前 stageLayout 决定。
   const startStageReorder = useCallback((id: number, srcEl: HTMLElement, clientX: number, clientY: number) => {
     if (stageReorderRef.current.active) return;
@@ -1873,6 +1914,7 @@ export default function App() {
     } else { return; } // 文本等无实体，不该走到这
     if (!path) return;
     const res = await addFsToLauncher({ path, name, ext, isDir, icon });
+    if (res === "added" || res === "duplicate") markStageItemsUsed([item.id]);
     toastAddResult(res, "launcher", name);
     launcherDropRef.current?.classList.add("drop-flash");
     setTimeout(() => launcherDropRef.current?.classList.remove("drop-flash"), 200);
@@ -1881,7 +1923,7 @@ export default function App() {
       setStage(next);
       await persistStage(next); // 续146b：改道唯一出口（脱水后落盘）
     }
-  }, [addFsToLauncher, toastAddResult, showToast, t]);
+  }, [addFsToLauncher, markStageItemsUsed, toastAddResult, showToast, t]);
   const {
     lasso: lassoState,
     lassoRef: lassoStateRef,
@@ -1908,7 +1950,8 @@ export default function App() {
     anchorRef: stageAnchorRef,
     stageLayout,
     autoClose: dragoutAutoClose,
-    searchActive: !!search.trim(),
+    // 颜色过滤与搜索一样只呈现全量列表的子集；禁用区内换序，避免可见索引写回全量列表时错位。
+    searchActive: !!search.trim() || stageColorFilter !== null,
     clipDragActive: () => !!clipDragRef.current?.active,
     setSelected: setStageSel,
     setMultiselect: setStageMultiselect,
@@ -1925,9 +1968,10 @@ export default function App() {
   });
   const openStageFile = useCallback((s:StageItem) => {
     if (s.type!=="file"||!s.items?.[0]) return;
+    markStageItemsUsed([s.id]);
     hideWorkbench();
     import("@tauri-apps/api/core").then(({invoke})=>invoke("open_file",{path:s.items![0].path})).catch(()=>{});
-  }, []);
+  }, [markStageItemsUsed]);
   // 从 Rust 权威缓存（CLIP_CACHE）回拉历史覆盖前端 state（续147）。删除/清空乐观改前端后若落地失败，
   // 用它把前端拽回权威真相，避免「前端删了、磁盘没删 → 重启复活」的静默分叉。
   const refreshClipboard = useCallback(async () => {
@@ -2156,11 +2200,12 @@ export default function App() {
   // 不是「剪贴板已写完」，故乐观置位；真失败时立刻撤掉 ✓，不会骗人。
   const copyStageToClipboard = useCallback(async (s:StageItem) => {
     if (s.type === "file" && missingIdsRef.current.has(s.id)) return;
+    markStageItemsUsed([s.id]);
     setCopiedStageId(s.id);
     setTimeout(()=>setCopiedStageId(x=>x===s.id?null:x), 1000);
     try { await writeItemToClipboard(s); }
     catch { setCopiedStageId(x=>x===s.id?null:x); }
-  }, []);
+  }, [markStageItemsUsed]);
 
   // 中转区单击 handler
   // Ctrl/Meta+click：隐式进入多选模式 + 切换单项
@@ -2193,18 +2238,19 @@ export default function App() {
     }
     if (!stageMultiselect) {
       if (missingIdsRef.current.has(s.id)) return; // 含失效路径的条目只留恢复/清理动作，不把不完整引用送进粘贴链。
+      markStageItemsUsed([s.id]);
       copyAndPaste(s);
       return;
     }
     setStageSel(prev => { const next = new Set(prev); if (next.has(s.id)) next.delete(s.id); else next.add(s.id); return next; });
     stageAnchorRef.current = idx;
-  }, [stageMultiselect, filteredStage, copyAndPaste]);
+  }, [stageMultiselect, filteredStage, copyAndPaste, markStageItemsUsed]);
 
   // 通用：在鼠标位置弹出自定义右键菜单（边界检测防出屏）
   const openCtxMenu = useCallback((e: React.MouseEvent, items: CtxMenuItem[], colors?: StageColorPicker) => {
     e.preventDefault();
     e.stopPropagation();
-    const MENU_W = 176, MENU_H = items.length * 36 + 8 + (colors ? 54 : 0);
+    const MENU_W = colors ? 220 : 176, MENU_H = items.length * 36 + 8 + (colors ? 54 : 0);
     const x = Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_W - 8));
     const y = Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_H - 8));
     setCtxMenu({ kind: "actions", x, y, items, colors });
@@ -2225,9 +2271,9 @@ export default function App() {
       const combined = (): Pasteable => ({ type: "file", items: sel.flatMap(x => x.items ?? []) });
       openCtxMenu(e, [
         { label: t("取走全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
-          action: () => { copyAndPaste(combined()); setStageSel(new Set()); setStageMultiselect(false); } },
+          action: () => { markStageItemsUsed(sel.map(item => item.id)); copyAndPaste(combined()); setStageSel(new Set()); setStageMultiselect(false); } },
         { label: t("复制全部（{n} 项）", {n: sel.length}), disabled: !allFiles,
-          action: async () => { await writeItemToClipboard(combined()); setBatchCopied(true); setTimeout(() => setBatchCopied(false), 1000); } },
+          action: async () => { markStageItemsUsed(sel.map(item => item.id)); await writeItemToClipboard(combined()); setBatchCopied(true); setTimeout(() => setBatchCopied(false), 1000); } },
         { label: t("删除全部（{n} 项）", {n: sel.length}),
           action: () => { saveStage(stage.filter(x => !stageSel.has(x.id))); setStageSel(new Set()); } },
         { label: t("取消选择"), action: () => setStageSel(new Set()) },
@@ -2243,6 +2289,7 @@ export default function App() {
       items.push({
         label: t("打开所在目录"),
         action: async () => {
+          markStageItemsUsed([s.id]);
           hideWorkbench(); // 先隐藏全屏毛玻璃覆盖层，避免 explorer 在其下冷起时 backdrop-filter 抢 GPU 卡顿
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("reveal_in_explorer", { path: s.items![0].path });
@@ -2254,7 +2301,7 @@ export default function App() {
     }
     items.push({ label: t("删除该项目"),   action: () => removeStage(s.id) });
     openCtxMenu(e, items, buildStageColorPicker([s.id]));
-  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, buildStageColorPicker, copyAndPaste, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
+  }, [stageMultiselect, stageSel, stage, missingPaths, missingIds, openCtxMenu, buildStageColorPicker, copyAndPaste, markStageItemsUsed, saveStage, copyStageToClipboard, removeStage, relinkStageItem, copyMissingStagePath, t]);
   const stageItemActions = useMemo<StageItemActions>(() => ({
     activate: handleStageClick,
     openContextMenu: openStageCtxMenu,
@@ -2341,13 +2388,17 @@ export default function App() {
       const path = r.item.items?.[0]?.path;
       items.push({ label: t("复制到剪贴板"), action: async () => { await copyStageToClipboard(r.item); showToast(t("已复制到剪贴板")); } });
       if (path) {
-        items.push({ label: t("打开所在目录"), action: () => revealPath(path) });
-        items.push({ label: t("加入启动台"), action: async () => toastAddResult(await addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir }), "launcher", r.name) });
+        items.push({ label: t("打开所在目录"), action: () => { markStageItemsUsed([r.item.id]); revealPath(path); } });
+        items.push({ label: t("加入启动台"), action: async () => {
+          const result = await addFsToLauncher({ path, name: r.name, ext: r.item.ext, isDir: !!r.item.isDir });
+          if (result === "added" || result === "duplicate") markStageItemsUsed([r.item.id]);
+          toastAddResult(result, "launcher", r.name);
+        } });
       }
     } // clip：仅默认「取走粘贴」，无附加项（已在剪贴板中，复制冗余）
     openCtxMenu(e, items);
     // ↑ 该函数体结束于下方 deps；enhRows 紧随其后定义（它要用 openEnhCtxMenu）
-  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, revealPath, toastAddResult, showToast, t]);
+  }, [openCtxMenu, activateEnh, addFsToLauncher, addFsToStage, addAppToLauncher, copyStageToClipboard, markStageItemsUsed, revealPath, toastAddResult, showToast, t]);
 
   const changeEnhQuery = useCallback((query: string) => {
     perf.mark("input"); // 性能专项 t0：input→echo / input→paint 两段以此为起点
@@ -2360,17 +2411,22 @@ export default function App() {
       : await addFsToLauncher(r.kind === "fs"
         ? r
         : { path: preview.path, name: r.kind === "stage" ? r.name : preview.title, ext: r.kind === "stage" ? r.item.ext : undefined, isDir: r.kind === "stage" ? !!r.item.isDir : false });
+    if (r.kind === "stage" && (result === "added" || result === "duplicate")) markStageItemsUsed([r.item.id]);
     toastAddResult(result, "launcher", preview.title);
-  }, [addAppToLauncher, addFsToLauncher, toastAddResult]);
+  }, [addAppToLauncher, addFsToLauncher, markStageItemsUsed, toastAddResult]);
+  const revealEnhancedPreview = useCallback((preview: EnhancedSearchPreview) => {
+    if (preview.r.kind === "stage") markStageItemsUsed([preview.r.item.id]);
+    revealPath(preview.path);
+  }, [markStageItemsUsed, revealPath]);
   const addEnhancedFileToStage = useCallback(async (result: Extract<EnhResult, { kind: "fs" }>, title: string) => {
     toastAddResult(await addFsToStage(result), "stage", title);
   }, [addFsToStage, toastAddResult]);
   const enhancedSearchActions = useMemo<EnhancedSearchActions>(() => ({
     activate: activateEnh,
-    reveal: revealPath,
+    reveal: revealEnhancedPreview,
     addPreviewToLauncher: addEnhancedPreviewToLauncher,
     addFileToStage: addEnhancedFileToStage,
-  }), [activateEnh, revealPath, addEnhancedPreviewToLauncher, addEnhancedFileToStage]);
+  }), [activateEnh, revealEnhancedPreview, addEnhancedPreviewToLauncher, addEnhancedFileToStage]);
 
   // ── 增强搜索结果行（续127：从 JSX 内联的 map 提出来缓存）──
   //
@@ -2595,15 +2651,37 @@ export default function App() {
         <section className="center-panel">
           <div className="stage-section-header">
             <span className="section-label">{t("文件中转区")}</span>
-            <div className="stage-multi-toolbar">
+            <div className="stage-header-actions">
+              <div className="stage-color-filter" role="group" aria-label={t("颜色标记")}>
+                {STAGE_COLOR_TAGS.map(colorTag => (
+                  <button
+                    key={colorTag}
+                    type="button"
+                    className={`stage-color-filter-btn color-${colorTag}${stageColorFilter === colorTag ? " active" : ""}`}
+                    aria-pressed={stageColorFilter === colorTag}
+                    aria-label={t("只显示{color}", { color: stageColorLabel(colorTag, t) })}
+                    title={t("只显示{color}", { color: stageColorLabel(colorTag, t) })}
+                    onClick={() => changeStageColorFilter(colorTag)}
+                  ><span className="stage-color-marker" aria-hidden="true"/></button>
+                ))}
+                <button
+                  type="button"
+                  className={`stage-color-filter-btn stage-color-filter-reset${stageColorFilter === null ? " active" : ""}`}
+                  aria-pressed={stageColorFilter === null}
+                  aria-label={t("恢复显示全部")}
+                  title={t("恢复显示全部")}
+                  onClick={() => changeStageColorFilter(null)}
+                >{t("归位")}</button>
+              </div>
+              <div className="stage-multi-toolbar">
               {stageMultiselect ? <>
                 {stageSel.size > 0 && <span className="stage-sel-count">{t("已选 {n}", {n: stageSel.size})}</span>}
                 <button className="stage-batch-btn" disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
                   title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("取走并粘贴到上个窗口"):t("仅文件可批量取走")}
-                  onClick={()=>{const sel=stage.filter(x=>stageSel.has(x.id));copyAndPaste({type:"file",items:sel.flatMap(x=>x.items??[])});setStageSel(new Set());setStageMultiselect(false);}}>{t("取走")}</button>
+                  onClick={()=>{const sel=stage.filter(x=>stageSel.has(x.id));markStageItemsUsed(sel.map(item=>item.id));copyAndPaste({type:"file",items:sel.flatMap(x=>x.items??[])});setStageSel(new Set());setStageMultiselect(false);}}>{t("取走")}</button>
                 <button className={`stage-batch-btn${batchCopied?" copied":""}`} disabled={stageSel.size===0||!stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))}
                   title={stageSel.size>0&&stage.filter(x=>stageSel.has(x.id)).every(x=>x.type==="file"&&!missingIds.has(x.id))?t("复制到剪贴板"):t("仅文件可批量复制")}
-                  onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>{t("复制")}</button>
+                  onClick={async()=>{const sel=stage.filter(x=>stageSel.has(x.id));markStageItemsUsed(sel.map(item=>item.id));await writeItemToClipboard({type:"file",items:sel.flatMap(x=>x.items??[])});setBatchCopied(true);setTimeout(()=>setBatchCopied(false),1000);}}>{t("复制")}</button>
                 <button className="stage-batch-btn" disabled={stageSel.size===0}
                   onClick={()=>{saveStage(stage.filter(x=>!stageSel.has(x.id)));setStageSel(new Set());}}>{t("删除")}</button>
               </> : (
@@ -2614,6 +2692,7 @@ export default function App() {
                 disabled={!stageMultiselect && !stage.length}
                 onClick={()=>{setStageSel(new Set());setStageMultiselect(!stageMultiselect);stageAnchorRef.current=null;}}
                 title={stageMultiselect ? t("退出多选模式") : t("进入多选模式")}>{stageMultiselect ? t("完成") : t("多选")}</button>
+              </div>
             </div>
           </div>
           <div className="drop-area" ref={dropAreaRef}
@@ -2662,7 +2741,7 @@ export default function App() {
                     onNewlyAddedAnimationEnd={finishStageItemNewAnimation}
                   />
                 ))}</div>
-            ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : (
+            ) : search.trim() ? <p className="empty-hint">{t("无匹配")}</p> : stageColorFilter ? <p className="empty-hint">{t("该颜色暂无条目")}</p> : (
               <div className="stage-empty-guide" aria-label={t("将文件拖到这里")}>
                 <span className="stage-empty-guide-icon"><IconDrop size={26}/></span>
                 <span className="stage-empty-guide-title">{t("将文件拖到这里")}</span>

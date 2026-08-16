@@ -1842,9 +1842,13 @@ fn drag_color_tag_rgba(tag: Option<&str>, light: bool) -> Option<[u8; 4]> {
         ("red", false) => [255, 107, 107],
         ("yellow", false) => [255, 212, 59],
         ("blue", false) => [77, 171, 247],
+        ("green", false) => [81, 207, 102],
+        ("purple", false) => [177, 151, 252],
         ("red", true) => [201, 42, 42],
         ("yellow", true) => [166, 111, 0],
         ("blue", true) => [24, 100, 171],
+        ("green", true) => [43, 138, 62],
+        ("purple", true) => [103, 65, 217],
         _ => return None,
     };
     Some([rgb[0], rgb[1], rgb[2], 255])
@@ -2664,6 +2668,8 @@ mod tests {
     fn manual_drag_color_tags_match_both_theme_palettes_and_reject_unknown_values() {
         assert_eq!(drag_color_tag_rgba(Some("red"), false), Some([255, 107, 107, 255]));
         assert_eq!(drag_color_tag_rgba(Some("blue"), true), Some([24, 100, 171, 255]));
+        assert_eq!(drag_color_tag_rgba(Some("green"), false), Some([81, 207, 102, 255]));
+        assert_eq!(drag_color_tag_rgba(Some("purple"), true), Some([103, 65, 217, 255]));
         assert_eq!(drag_color_tag_rgba(None, false), None);
         assert_eq!(drag_color_tag_rgba(Some("cyan"), false), None);
     }

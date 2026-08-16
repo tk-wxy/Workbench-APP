@@ -35,7 +35,7 @@ export interface EnhancedSearchPreview {
 
 export interface EnhancedSearchActions {
   activate: (result: EnhResult) => void;
-  reveal: (path: string) => void;
+  reveal: (preview: EnhancedSearchPreview) => void;
   addPreviewToLauncher: (preview: EnhancedSearchPreview) => void;
   addFileToStage: (result: Extract<EnhResult, { kind: "fs" }>, title: string) => void;
 }
@@ -160,7 +160,7 @@ export default function EnhancedSearchLayer({
               <button className="enh-pv-btn enh-pv-btn-primary" onClick={() => actions.activate(preview.r)}>
                 {preview.r.kind === "clip" ? t("取走粘贴") : t("打开")}
               </button>
-              {preview.path && <button className="enh-pv-btn" onClick={() => actions.reveal(preview.path)}>{t("打开所在目录")}</button>}
+              {preview.path && <button className="enh-pv-btn" onClick={() => actions.reveal(preview)}>{t("打开所在目录")}</button>}
               {preview.path && preview.r.kind !== "clip" && <button className="enh-pv-btn" onClick={() => actions.addPreviewToLauncher(preview)}>{t("加入启动台")}</button>}
               {preview.r.kind === "fs" && <button className="enh-pv-btn" onClick={() => actions.addFileToStage(preview.r as Extract<EnhResult, { kind: "fs" }>, preview.title)}>{t("加入中转区")}</button>}
             </div>

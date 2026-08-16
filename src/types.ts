@@ -62,6 +62,9 @@ export interface StageItem {
   orig_path?: string;
   colorTag?: import("./domain/stageColorTag").StageColorTag;
   pinned?: boolean;
+  // Only newly created Stage items carry this flag. It is removed on first use;
+  // historical items without the field remain visually unchanged.
+  unused?: boolean;
 }
 
 // ClipItem and StageItem deliberately share this action-facing shape.

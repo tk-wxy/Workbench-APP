@@ -147,6 +147,9 @@ check("颜色标记只展示且不再充当卡片按钮", taggedStageGridHtml.in
 const stageNewGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, newlyAdded: true }));
 const stageNewListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, newlyAdded: true }));
 check("中转新条目在两种布局均带一次性高亮标记", stageNewGridHtml.includes("stage-card selected stage-missing stage-pin-visible stage-new") && stageNewListHtml.includes("stage-item selected stage-missing stage-new"), stageNewGridHtml + stageNewListHtml);
+const stageUnusedGridHtml = renderToStaticMarkup(createElement(StageGridCard, { ...stageCommon, item: { ...stageItem, unused: true }, newlyAdded: false }));
+const stageUnusedListHtml = renderToStaticMarkup(createElement(StageListRow, { ...stageCommon, item: { ...stageItem, unused: true }, newlyAdded: false }));
+check("中转未使用条目在两种布局均带持久轮廓标记", stageUnusedGridHtml.includes("stage-card selected stage-missing stage-pin-visible stage-unused") && stageUnusedListHtml.includes("stage-item selected stage-missing stage-unused"), stageUnusedGridHtml + stageUnusedListHtml);
 
 const stageText = "开头文字保留识别，经过较长的描述之后才出现关键词供搜索定位。";
 const stageTextStart = stageText.indexOf("关键词");
