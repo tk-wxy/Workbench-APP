@@ -1,5 +1,12 @@
 # Workbench App
 
+> ⚠️ **项目已废弃 / Deprecated**  
+> 本项目已正式废弃并不再维护。架构问题与历史教训复盘详见 [RETROSPECTIVE.md](RETROSPECTIVE.md)。  
+> 新一代重构项目：**vok**（面向 Windows / Linux）。  
+>  
+> This project has been deprecated and is no longer maintained. See [RETROSPECTIVE.md](RETROSPECTIVE.md) for postmortem and lessons learned.  
+> Successor project: **vok** (for Windows / Linux).
+
 [中文](#中文) · [English](#english)
 
 ## 中文

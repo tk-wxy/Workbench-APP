@@ -44,7 +44,7 @@ console.log("\n关闭淡出生命周期 —— transitionend 与 watchdog");
   const css = readFileSync("src/App.css", "utf8");
   const rust = readFileSync("src-tauri/src/lib.rs", "utf8");
   const nativeFirstHelper = rust.match(
-    /fn hide_window_native_first[\s\S]*?\n}\n\nfn start_focus_watch/,
+    /fn hide_window_native_first[\s\S]*?\r?\n}\r?\n\r?\nfn start_focus_watch/,
   )?.[0] ?? "";
   const hotkeyStart = rust.indexOf("fn start_hotkey_monitor");
   const hotkeyEnd = rust.indexOf("//  焦点监听", hotkeyStart);
